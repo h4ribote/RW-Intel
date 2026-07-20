@@ -2,3 +2,7 @@ local/
 tmp/
 *.log
 .env
+
+# Build output of tools/probe-agent
+tools/probe-agent/classes/
+tools/probe-agent/*.jar
