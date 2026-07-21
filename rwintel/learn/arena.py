@@ -77,6 +77,11 @@ TERMINAL_OUTCOME_WEIGHT = 1.0
 #: Drawn rather than fixed because the allowance is one of the features the layer reads and one of the three things that make a mission be reported as losing. Pinned at the whole worth of the squad, being reported as losing means being all but destroyed, so the report never arrives in time to be acted on and the feature never moves; a layer trained that way has never seen the board on which the decision to break off is the right one, and meets it for the first time in a match, where the operational layer hands down allowances far tighter than a squad's whole worth.
 BUDGET_SHARE = (0.3, 1.2)
 
+#: How much of a fight's score is explained by which side the draw made stronger, per unit of the strength share.
+#:
+#: Fitted once, over a thousand fights of one layer against another, and then left alone. Refitting it as a run goes on would make the reward move under the policy for reasons that have nothing to do with the policy; a fixed multiple is unbiased whatever its value, because the draw happens before either side has decided anything, and only how much variance it removes depends on getting it near right. At this value it takes a third of the variance out.
+STRENGTH_SLOPE = 2.2
+
 
 def _lost(started: float, left: float) -> float:
     """The share of a side's worth that was destroyed, between nought and one.
@@ -116,13 +121,19 @@ class Engagement:
 
     @property
     def outcome(self) -> float:
-        """How the fight went for our side, from minus one to plus one: the share of the enemy's worth destroyed, less the share of ours lost.
+        """How the fight went for our side, from minus one to plus one: the share of the enemy's worth destroyed, less the share of ours lost, less what being dealt the stronger side is worth on its own.
 
-        Antisymmetric, which is the property the whole measurement rests on. The other side's figure is exactly this one negated, so a run of self-play must average to nought and any departure from nought is a left-right asymmetry in the arena rather than a policy that has learnt something — while against the handwritten layer, an average above nought is the same statement as having beaten it. What is learnt from and what is reported are then one quantity.
+        Antisymmetric, which is the property the whole measurement rests on. The other side's figure is exactly this one negated — the last term included, since one side's share of the total strength is one less the other's — so a run of self-play must average to nought and any departure from nought is a left-right asymmetry in the arena rather than a policy that has learnt something, while against the handwritten layer an average above nought is the same statement as having beaten it. What is learnt from and what is reported are then one quantity.
 
         Written in shares rather than in credits because the two sides are built to a deliberately uneven draw. A difference of worth would pay for having been dealt the stronger side, and a layer can improve that score without ever fighting differently.
+
+        Shares alone do not finish the job, which is what the last term is for. The stronger side loses a smaller fraction of itself as well as fewer credits, so the score still rises with the draw: measured over a thousand fights it correlated with the share of the total strength dealt to this side at nearly six tenths, and the draw is made before either layer has decided anything. Subtracting a fixed multiple of that share removes a third of the variance without moving the average, because the draw is independent of how either side plays. What is left is how well a side did for the hand it was dealt, which is what both the reward and the comparison are trying to be.
         """
-        return _lost(self.their_value, self.their_left_value) - _lost(self.our_value, self.our_left_value)
+        strength = self.our_value + self.their_value
+        share = self.our_value / strength if strength > 0 else 0.5
+        return (_lost(self.their_value, self.their_left_value)
+                - _lost(self.our_value, self.our_left_value)
+                - STRENGTH_SLOPE * (share - 0.5))
 
     def as_dict(self) -> dict:
         return {"index": self.index, "our_value": round(self.our_value), "their_value": round(self.their_value),

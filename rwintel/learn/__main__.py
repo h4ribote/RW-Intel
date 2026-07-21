@@ -133,7 +133,7 @@ def train_tactics(arguments) -> int:
     from .net import TacticalNet
 
     device = _device(arguments.device)
-    net = TacticalNet().to(device)
+    net = TacticalNet(**_given(width=arguments.width)).to(device)
     _load(net, arguments.load, device)
     log.info("tactical policy on %s: %d features, %d parameters",
              device, TACTICAL_SIZE, sum(p.numel() for p in net.parameters()))
@@ -224,7 +224,7 @@ def duel(arguments) -> int:
             log.error("there are no parameters at %s to measure", arguments.load)
             return 1
         device = _device(arguments.device)
-        net = TacticalNet().to(device)
+        net = TacticalNet(**_given(width=arguments.width)).to(device)
         _load(net, arguments.load, device)
         batcher = tactical_batcher(net, device=device, greedy=arguments.greedy)
 
@@ -406,7 +406,8 @@ def clone(arguments) -> int:
     from .net import OperationalNet, TacticalNet
 
     device = _device(arguments.device)
-    net = (TacticalNet() if arguments.layer == TACTICAL else OperationalNet()).to(device)
+    net = (TacticalNet(**_given(width=arguments.width)) if arguments.layer == TACTICAL
+           else OperationalNet()).to(device)
     _load(net, arguments.load, device)
     samples = read_teacher(arguments.teacher or "local/teacher.jsonl", arguments.layer,
                            keep_tainted=arguments.keep_tainted)
@@ -453,6 +454,8 @@ def main(argv=None) -> int:
     parser.add_argument("--batch", type=int, default=None,
                         help="rows in one gradient step: the steps that make a reinforcement update when "
                              "training, the teacher's decisions in one minibatch when cloning")
+    parser.add_argument("--width", type=int, default=None,
+                        help="hidden units per layer in the tactical network, which the measured cost of inference leaves room to raise")
     parser.add_argument("--entropy", type=float, default=None,
                         help="how hard the objective pushes the policy towards choosing evenly, which a run starting from an imitation wants much less of than one starting from noise")
     parser.add_argument("--learning-rate", type=float, default=None)

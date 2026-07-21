@@ -26,7 +26,7 @@ from rwintel.control.policy.catalogue import Catalogue
 from rwintel.control.policy.contracts import Doctrine, SquadRecord, TaskContract
 from rwintel.control.policy.view import build as build_view
 from rwintel.control.session import UnitType
-from rwintel.learn.arena import Engagement
+from rwintel.learn.arena import STRENGTH_SLOPE, Engagement
 from rwintel.learn.deciders import Choice
 from rwintel.learn.encoding import (
     OPERATIONAL_SIZE,
@@ -366,6 +366,8 @@ def test_the_score_of_a_fight_read_from_the_other_side_is_the_same_number_negate
     """The property the whole measurement rests on, and the reason the score is written in shares rather than in credits.
 
     Self-play has to average to nought, so that a run against the handwritten layer that averages above nought is the same statement as having beaten it and needs no correction for anything. A score built from a difference of worth would instead pay for having been dealt the stronger side, and the arena deals deliberately uneven sides.
+
+    The term that takes out what the draw was worth has to be antisymmetric too, and it is, because one side's share of the total strength is one less the other's. It is what puts the score a little outside minus one to plus one: a massacre against the odds scores above one, which is the point of it.
     """
     draw = random.Random(5)
     for _ in range(64):
@@ -376,19 +378,24 @@ def test_the_score_of_a_fight_read_from_the_other_side_is_the_same_number_negate
         ours = _fight(our_value, their_value, our_left, their_left)
         theirs = _fight(their_value, our_value, their_left, our_left)
         assert abs(ours.outcome + theirs.outcome) < 1e-12
-        assert -1.0 <= ours.outcome <= 1.0
+        # Bounded by the shares, which run from minus one to plus one, less a term that cannot exceed half the slope.
+        assert -1.0 - STRENGTH_SLOPE / 2 <= ours.outcome <= 1.0 + STRENGTH_SLOPE / 2
 
     # A side that was never built at all is worth nothing and has lost nothing, which has to be a number rather than a division by nought: an engagement whose spawns never arrived on one side still reaches the point where it is scored.
     empty = _fight(0.0, 1200.0, 0.0, 0.0)
-    assert empty.outcome == 1.0 and empty.outcome + _fight(1200.0, 0.0, 0.0, 0.0).outcome == 0.0
+    assert empty.outcome + _fight(1200.0, 0.0, 0.0, 0.0).outcome == 0.0
 
 
 def test_destroying_the_other_side_without_a_loss_is_the_top_of_the_scale():
-    """What fixes the size of the scale, and with it how much a called fight is worth against the errand's own conclusions: a massacre is paid exactly what taking the contracted ground is paid, and no more, so that a layer is never taught to prefer the one to the other."""
-    assert _fight(3200.0, 2500.0, 3200.0, 0.0).outcome == 1.0
-    assert _fight(2500.0, 3200.0, 0.0, 3200.0).outcome == -1.0
-    # And the middle of it is an even trade, whatever the two sides were built to be worth.
-    assert _fight(4000.0, 1000.0, 2000.0, 500.0).outcome == 0.0
+    """What fixes the size of the scale, and with it how much a called fight is worth against the errand's own conclusions: a massacre is paid exactly what taking the contracted ground is paid, and no more, so that a layer is never taught to prefer the one to the other.
+
+    Stated on an even draw, because the scale is only exactly one there. What is subtracted for having been dealt the stronger side is nought when neither side was, and the same massacre from behind is worth more than one while the same massacre from in front is worth less: that is the term doing its job, since a massacre against the odds is the better piece of play.
+    """
+    assert _fight(3000.0, 3000.0, 3000.0, 0.0).outcome == 1.0
+    assert _fight(3000.0, 3000.0, 0.0, 3000.0).outcome == -1.0
+    assert _fight(2000.0, 4000.0, 2000.0, 0.0).outcome > 1.0
+    # And the middle of it is an even trade between sides of equal worth.
+    assert _fight(2000.0, 2000.0, 1000.0, 1000.0).outcome == 0.0
 
 
 # ---- where one errand stops and the next begins ---------------------------------------------

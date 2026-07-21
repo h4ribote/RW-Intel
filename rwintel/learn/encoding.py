@@ -20,7 +20,9 @@ DISTANCE_SCALE = 2000.0
 #: World units a weapon range is quoted against. The longest built-in reach measured is 400.
 RANGE_SCALE = 400.0
 
-#: World units a squad's scatter is quoted against, which is the distance the game side spreads a squad to.
+#: World units a squad's scatter is quoted against, which is the radius the fight around it is cut at.
+#:
+#: Not the distance a scattering squad is pushed out to, which is 140. Scatter is measured as the root mean square distance of the members from their centre and the feature is clipped at one, so quoting it against 140 would put a squad that had merely done as it was told at the top of the range and leave nothing above it to say that a squad has come apart.
 SPREAD_SCALE = 400.0
 
 #: Members a squad is quoted against. The largest doctrine establishes at ten, so a full squad sits a little below one and an over strength one above it.
