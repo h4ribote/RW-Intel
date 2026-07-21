@@ -154,7 +154,8 @@ def train_tactics(arguments) -> int:
         # Both sides script is how the arena itself is measured rather than a policy: it is the baseline a learnt layer has to beat, and it is the only setting in which what the arena produces says something about the arena rather than about whatever the policy currently happens to do.
         ours = None if arguments.script else learnt
         return Arena(session, tactics=ours, seed=arguments.seed + session.instance,
-                     **_given(outcome_weight=arguments.outcome_weight),
+                     **_given(outcome_weight=arguments.outcome_weight,
+                              stall_ms=arguments.stall_seconds * 1000 if arguments.stall_seconds else None),
                      opponent=None if (arguments.script or arguments.script_opponent) else learnt)
 
     journal = Journal(arguments.record or default_path("tactics"))
@@ -236,7 +237,8 @@ def duel(arguments) -> int:
 
     def arm(session):
         # The opponent is left unnamed, which is what puts the handwritten layer on the other side of every fight. That is the thing being measured against, so it is not something this run offers a choice about.
-        return Arena(session, tactics=learnt, seed=arguments.seed + session.instance)
+        return Arena(session, tactics=learnt, seed=arguments.seed + session.instance,
+                     **_given(stall_ms=arguments.stall_seconds * 1000 if arguments.stall_seconds else None))
 
     # The baseline is written down as the baseline. It is a different quantity from a policy's score rather than a run of it that happens to have scored nought, and the likeliest way to confuse the two is to have journalled them under one name.
     name = "duel" if arguments.load else "duel-baseline"
@@ -454,6 +456,8 @@ def main(argv=None) -> int:
     parser.add_argument("--batch", type=int, default=None,
                         help="rows in one gradient step: the steps that make a reinforcement update when "
                              "training, the teacher's decisions in one minibatch when cloning")
+    parser.add_argument("--stall-seconds", type=int, default=None,
+                        help="game seconds a fight may go without a casualty before the arena calls it, which is how decisive its fights are")
     parser.add_argument("--width", type=int, default=None,
                         help="hidden units per layer in the tactical network, which the measured cost of inference leaves room to raise")
     parser.add_argument("--entropy", type=float, default=None,

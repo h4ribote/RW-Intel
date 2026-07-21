@@ -206,9 +206,12 @@ class Arena:
     def __init__(self, session, tactics: Optional[Callable] = None,
                  opponent: Optional[Callable] = None, seed: int = 0,
                  enemy_slot: Optional[int] = None,
-                 outcome_weight: float = TERMINAL_OUTCOME_WEIGHT) -> None:
+                 outcome_weight: float = TERMINAL_OUTCOME_WEIGHT,
+                 stall_ms: int = STALL_MS) -> None:
         self.session = session
         self.outcome_weight = outcome_weight
+        # How long a fight may go without a casualty before it is called. An argument rather than the constant because how decisive the arena's fights are is one of the things a run may want to ask about: a layer's choices can only be worth as much as the fights they are made in, and a fight that is called at the first quiet spell is one where declining to fight costs nothing.
+        self.stall_ms = stall_ms
         self.catalogue = Catalogue(session.types, session.assets)
         self.random = random.Random(seed)
         # The layers are built here rather than handed in already made, because both sides have to read the same type catalogue as the arena that spawns their units: a layer classifying a unit from a different table would sort the same tank into a different role.
@@ -383,7 +386,7 @@ class Arena:
         alive = len(ours.members) + len(theirs.members)
         if alive != self._alive:
             self._alive, self._changed_ms = alive, now
-        elif now - self._changed_ms >= STALL_MS:
+        elif now - self._changed_ms >= self.stall_ms:
             self._call(ours, theirs, now, stalled=True)
 
     def _call(self, ours: SquadRecord, theirs: SquadRecord, now: int, stalled: bool = False) -> None:
