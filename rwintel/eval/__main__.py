@@ -1,6 +1,7 @@
 """Runs a comparison, or reports one that has already been run.
 
     python -m rwintel.eval --instances 4 --episodes 3 --arm script --arm arm --map Lake --max-seconds 300
+    python -m rwintel.eval --instances 4 --episodes 3 --arm script --intrude
     python -m rwintel.eval --from local/episodes/run.jsonl
 
 Start this first and then the game instances, as with the plain runner. The arms alternate within each instance rather than one being run to completion before the other, because two arms measured in sequence differ by whatever else changed about the machine in between, and the whole point of the comparison is that nothing else changed.
@@ -13,9 +14,10 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Sequence
 
+from ..control.intruder import interference
 from ..control.server import Server, ServerSettings
 from ..control.session import EpisodeSettings
 from ..data import AssetPaths
@@ -39,18 +41,22 @@ class Played:
     standing: Sequence[dict]
     seconds: int
     statistics: dict
+    #: What anyone outside the chain did to this episode. Carried through the report because a score taken under interference is not the same quantity as one taken without it, and two of them must never be compared as though they were.
+    interference: dict = field(default_factory=dict)
 
     @classmethod
     def of(cls, record) -> "Played":
         return cls(arm=record.arm, winner=record.winner, team=record.team, timeout=record.timeout,
-                   standing=record.standing, seconds=record.seconds, statistics=record.statistics)
+                   standing=record.standing, seconds=record.seconds, statistics=record.statistics,
+                   interference=record.interference)
 
     @classmethod
     def from_dict(cls, entry: dict) -> "Played":
         return cls(arm=entry.get("arm", ""), winner=int(entry.get("winner", -1)),
                    team=int(entry.get("team", -1)), timeout=bool(entry.get("timeout", False)),
                    standing=entry.get("standing", []), seconds=int(entry.get("seconds", 0)),
-                   statistics=entry.get("statistics", {}))
+                   statistics=entry.get("statistics", {}),
+                   interference=entry.get("interference", {}))
 
 
 def report(played: Sequence[Played], weights: Weights) -> None:
@@ -74,6 +80,7 @@ def report(played: Sequence[Played], weights: Weights) -> None:
                      _mean(p.military for p in parts), _mean(p.economy for p in parts),
                      sum(1 for e in episodes if decided(e)), _mean(e.seconds for e in episodes))
         _report_layers(episodes)
+        _report_interference(episodes)
         for difference in REPORTED_DIFFERENCES:
             logging.info("%-10s   to resolve %.2f: %d episode(s) per side",
                          "", difference, episodes_for(summary.sd, difference))
@@ -106,6 +113,22 @@ def _report_layers(episodes: Sequence[Played]) -> None:
                  _mean(e.statistics.get("fulfilment", 0.0) for e in episodes))
 
 
+def _report_interference(episodes: Sequence[Played]) -> None:
+    """Whether the arm was measured under interference, and how much of it there was.
+
+    The design says evaluation is run with interference too, because a number measured without it is not the number the system will be operated at. That makes the presence of an intruder part of what a score means rather than a detail of how it was produced, so it is printed with the score and not left to be recovered from the settings of the run. It also says which squads a learning run must leave out, and a report that never mentions them invites a comparison between an arm that was interfered with and one that was not.
+    """
+    disturbed = [episode for episode in episodes if episode.interference.get("touched")]
+    if not disturbed:
+        logging.info("%-10s   no interference: this is the undisturbed number", "")
+        return
+    logging.info("%-10s   interference in %d of %d episode(s): %.1f squad(s) and %.1f "
+                 "intervention(s) each, on average over those",
+                 "", len(disturbed), len(episodes),
+                 _mean(len(e.interference["touched"]) for e in disturbed),
+                 _mean(len(e.interference.get("events", [])) for e in disturbed))
+
+
 def _mean(values) -> float:
     values = list(values)
     return sum(values) / len(values) if values else 0.0
@@ -130,6 +153,10 @@ def main(argv=None) -> int:
     parser.add_argument("--max-seconds", type=int, default=300, help="game time an episode is cut off at")
     parser.add_argument("--assets", default=None)
     parser.add_argument("--record", default=None, help="where the episodes are written, one JSON object per line")
+    parser.add_argument("--intrude", action="store_true",
+                        help="measure with the script intruder present, which is how the design says "
+                             "evaluation is to be run: a number taken without interruption is not the "
+                             "number the system will be operated at")
     parser.add_argument("--verbose", action="store_true")
     arguments = parser.parse_args(argv)
 
@@ -145,12 +172,17 @@ def main(argv=None) -> int:
         return 0
 
     arms = arm_names.parse_all(arguments.arm or ["script"])
-    journal = Journal(arguments.record or default_path("-".join(name for name, _ in arms)))
+    # The intruder is in the default file name because an interfered-with run and an undisturbed one measure different quantities, and the likeliest way to confuse them is to have written them to the same place.
+    run = "-".join(name for name, _ in arms) + ("-intruded" if arguments.intrude else "")
+    journal = Journal(arguments.record or default_path(run))
     logging.info("recording to %s", journal.path)
+
+    # One intruder per episode, seeded from the run's seed and the instance, so that every arm of a comparison meets interference drawn the same way. The arms alternate within an instance and the episode index moves the seed on, so no two episodes of a comparison are disturbed identically either.
+    outside = [interference(seed=arguments.seed)] if arguments.intrude else []
 
     settings = ServerSettings(
         host=arguments.host, port=arguments.port, instances=arguments.instances,
-        episodes=arguments.episodes, arms=arms, journal=journal,
+        episodes=arguments.episodes, arms=arms, journal=journal, outside=outside,
         assets=AssetPaths.at(arguments.assets) if arguments.assets else AssetPaths.default(),
         episode=EpisodeSettings(map=arguments.map, opponents=arguments.opponents,
                                 difficulty=arguments.difficulty, credits=arguments.credits,

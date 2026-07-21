@@ -19,6 +19,12 @@ final class MatchDriver {
 
     private static final String SKIRMISH_DIRECTORY = "assets/maps/skirmish";
 
+    /** How long a networked host holds its room open for the other process. Generous, because what it is waiting through is that process loading the game. */
+    private static final int PEER_WAIT_SECONDS = 90;
+
+    /** Game time that has to pass before the match is judged at all, which is long enough for every player's starting units to have been placed. */
+    private static final int START_GRACE_MS = 3000;
+
     static final class Settings {
         String map = "";
         int opponents = 1;
@@ -31,6 +37,24 @@ final class MatchDriver {
         int fog = 2;
         int seed = 12345;
         int maxSeconds = 0;
+        /**
+         * Holds the episode open even when only one side has anything on the board.
+         *
+         * An episode used to construct engagements in starts with no units at all, so every player is wiped from the first frame and the ordinary end test would finish the match before a single unit had been spawned into it. What ends such an episode is the clock or the control process saying so, and nothing else.
+         */
+        boolean arena = false;
+        /**
+         * Opens a real multiplayer session rather than the single player server, so that a second process can join this match before it starts.
+         *
+         * Nothing else about the episode changes: the map, the room, the AI opponents and the seed are all settled the same way. That is deliberate, because the point of running a match over a session two processes share is to find out whether the ordinary episode stays in step, not to run a different episode.
+         */
+        boolean networked = false;
+        /** The port a networked host binds. Two hosts on one machine need different ones, since the engine reads this from the settings as it binds rather than taking it as an argument. */
+        int networkPort = 5123;
+        /** host[:port] of a match to join instead of hosting one. A joining process settles nothing about the match: the map, the settings, the seed and the moment of the start all arrive from the host. */
+        String joinAddress = "";
+        /** The name this process answers to in a session. It is what the host's per client desync report names each client by, so it is worth making it say which process this is. */
+        String name = "";
     }
 
     private final Engine engine;
@@ -68,8 +92,12 @@ final class MatchDriver {
         throw new IllegalStateException("no built-in map matching '" + wanted + "'");
     }
 
-    /** Brings up a single player server on the requested map. Runs on the game thread: loading a map needs the OpenGL context. */
-    void start(Object game, Settings requested) throws Exception {
+    /**
+     * Brings up a server on the requested map and starts the match, unless it has to wait for somebody first.
+     *
+     * Returns whether the match actually began. A networked host does not begin until the other process is registered as a player in its room, which cannot be waited for from here: registration is the far end of a handshake the engine works through on its own threads and its own loop, and holding the game thread still to wait for it is holding still the thing that has to run for it to finish. So the room is left standing and {@link #beginWhenReady} is polled instead, one poll per step, until there is somebody to start against.
+     */
+    boolean start(Object game, Settings requested) throws Exception {
         settings = requested;
         resolvedMap = resolveMap(requested.map);
 
@@ -90,11 +118,9 @@ final class MatchDriver {
         load.setAccessible(true);
         load.invoke(game, Boolean.TRUE, normal);
 
-        engine.setField(net, "y", "You");
+        engine.setField(net, "y", playerName());
         engine.setField(net, "o", Boolean.TRUE);
-        if (!Boolean.TRUE.equals(engine.invoke(net, "S"))) {
-            throw new IllegalStateException("single player server did not start");
-        }
+        openServer(game, net);
 
         Object config = engine.getField(net, "ay");
         engine.setField(config, "a", engine.staticField(engine.mapKindClass, "a"));
@@ -109,18 +135,197 @@ final class MatchDriver {
         engine.setField(config, "i", Boolean.FALSE);
         engine.setField(config, "l", Boolean.FALSE);
 
-        for (int i = 0; i < settings.opponents; i++) engine.invoke(net, "ap");
+        // A networked host takes its opponent from the other process rather than manufacturing one, so no AI is added: on a map for two there is one other slot and the peer needs it.
+        if (!settings.networked) {
+            for (int i = 0; i < settings.opponents; i++) engine.invoke(net, "ap");
+        }
         engine.invoke(net, "f");
         engine.invoke(net, "P");
         engine.invoke(net, "L");
 
         // Taken out after the room has finished populating itself, because it fills every free slot with an AI whatever was asked for.
         if (settings.contestants > 0) chooseContestants();
+        if (settings.arena) chooseSparringPartner();
 
-        // The seed is written last, because returning to the battleroom redraws it.
+        if (settings.networked) {
+            openedAtMs = System.currentTimeMillis();
+            return beginWhenReady(game);
+        }
+        begin(game, net);
+        return true;
+    }
+
+    /**
+     * Starts a networked match once somebody else is in the room, and says whether it has started.
+     *
+     * Called once a step while a host is waiting, so that the engine's own loop keeps running and the handshake that turns a connection into a player can finish. A connection is not enough to start against: it exists from the moment the socket is accepted, several exchanges before the far end has a name, a slot and a place on the map.
+     */
+    boolean beginWhenReady(Object game) throws Exception {
+        if (!settings.networked || openedAtMs == 0) return false;
+        if (peers() == 0) {
+            if (System.currentTimeMillis() - openedAtMs > PEER_WAIT_SECONDS * 1000L) {
+                openedAtMs = 0;
+                throw new IllegalStateException("no other process joined within " + PEER_WAIT_SECONDS + "s");
+            }
+            return false;
+        }
+        openedAtMs = 0;
+        begin(game, engine.net(game));
+        return true;
+    }
+
+    /** Players in the room other than this process's own, which is what a host is waiting for and what says the handshake finished rather than merely started. */
+    private int peers() throws Exception {
+        Object local = engine.local(engine.engine());
+        int found = 0;
+        int slots = engine.slotCount();
+        for (int i = 0; i < slots; i++) {
+            Object player = engine.playerAt(i);
+            if (player != null && player != local) found++;
+        }
+        return found;
+    }
+
+    private void begin(Object game, Object net) throws Exception {
+        // The seed is written last, because both of the calls that bring a server up redraw it: returning to the battleroom does, and so does opening a session for others to join.
+        Object config = engine.getField(net, "ay");
         engine.setField(config, "q", Integer.valueOf(settings.seed));
         engine.invoke(net, "ae");
         episode++;
+    }
+
+    /** When a networked host opened its room, or nought when it is not waiting for anybody. */
+    private long openedAtMs = 0;
+
+    /**
+     * Brings up the server the match will run on, which is the one place a networked host differs from a single player one.
+     *
+     * A single player server is the whole session inside this process. Nothing can join it, so the engine never has a second world to compare its own against and the lockstep machinery it carries is never exercised at all. A networked host binds a port and admits other processes, and from that point on it checksums the world for each of them and records what each one answers.
+     */
+    private void openServer(Object game, Object net) throws Exception {
+        if (!settings.networked) {
+            if (!Boolean.TRUE.equals(engine.invoke(net, "S"))) {
+                throw new IllegalStateException("single player server did not start");
+            }
+            return;
+        }
+        if (settings.networkPort < 1024 || settings.networkPort > 65535) {
+            throw new IllegalStateException("network port out of range: " + settings.networkPort);
+        }
+        if (!engine.hostNetworked(game, settings.networkPort)) {
+            throw new IllegalStateException("could not host on port " + settings.networkPort
+                    + ", which usually means another process is already holding it");
+        }
+    }
+
+    /**
+     * Leaves an arena episode with one opponent that owns nothing and can therefore do nothing.
+     *
+     * A board on which engagements are constructed has to be a board on which nothing else is happening, and the room does not offer one. The starting-unit setting was measured to have no effect through this start sequence: every value tried produced a command centre and a builder for each player who had a starting position, so an empty board cannot simply be asked for. What can be arranged is that the only other player left in the match is one the map has no starting position for. The room fills every free slot with an AI whatever was asked for, and on a map for two, the slots past the second are created and wiped out immediately for want of anywhere to appear; such a player has no base, no income and nothing to think about, which is exactly the sparring partner an arena wants. Everyone else, the player with the second base included, goes to the spectators so that no second match is played in the background.
+     *
+     * The last slot is chosen rather than a slot searched for by whether it has a starting position, because the engine offers no way to ask that question directly and the answer is only interesting on the maps for two that the arena runs on, where the last slot never has one.
+     */
+    private void chooseSparringPartner() throws Exception {
+        int slots = engine.slotCount();
+        Object local = engine.local(engine.engine());
+        int partner = -1;
+        for (int i = slots - 1; i >= 0; i--) {
+            Object player = engine.playerAt(i);
+            if (player == null || player == local) continue;
+            partner = i;
+            break;
+        }
+        for (int i = 0; i < slots; i++) {
+            Object player = engine.playerAt(i);
+            if (player == null || player == local || i == partner) continue;
+            engine.setTeam(player, SPECTATOR);
+        }
+        if (partner >= 0 && local != null && engine.team(engine.playerAt(partner)) == engine.team(local)) {
+            engine.setTeam(engine.playerAt(partner), engine.team(local) + 1);
+        }
+        sparringSlot = partner;
+    }
+
+    /** The slot an arena episode's opposing side is spawned for, or -1 outside an arena episode. The control process is told, because it is what decides which player each constructed unit belongs to. */
+    int sparringSlot() {
+        return settings.arena ? sparringSlot : -1;
+    }
+
+    private int sparringSlot = -1;
+
+    /**
+     * Joins a match another process is hosting.
+     *
+     * Nothing is loaded and nothing is configured here, because none of it is this process's to decide. The host chooses the map, the settings and the seed and sends all of them over as it starts, so what follows a successful join is a wait, and {@link #running} is what ends it.
+     *
+     * A host compares a checksum of the core unit definitions before it admits anyone and refuses a client whose units differ, so both processes have to be running the same install with the same mods, which for instances that share one master copy means simply that neither of them was given any.
+     */
+    void join(Object game, Settings requested) throws Exception {
+        settings = requested;
+        resolvedMap = "";
+        engine.setNetworkName(game, playerName());
+        String failure = engine.join(game, requested.joinAddress);
+        if (failure != null) {
+            throw new IllegalStateException("could not join " + requested.joinAddress + ": " + failure);
+        }
+    }
+
+    /**
+     * Takes note that a match this process joined has begun, reading back what the host decided about it.
+     *
+     * The episode is counted here rather than at the join, because a connection that is never followed by a start is not an episode and counting it would leave the two sides disagreeing about how many have been run.
+     */
+    void joined(Object game) throws Exception {
+        Object path = engine.getField(engine.net(game), "az");
+        resolvedMap = path == null ? "" : String.valueOf(path);
+        episode++;
+    }
+
+    /** Whether the engine has a match in progress. For a process that joined one, this going true is the only sign that the host has started it. */
+    boolean running(Object game) throws Exception {
+        return engine.getBoolean(engine.net(game), "aW");
+    }
+
+    /** The seed the match is actually running under, which for a process that joined one is the host's rather than anything asked for here. */
+    int seed(Object game) throws Exception {
+        Object config = engine.getField(engine.net(game), "ay");
+        Object value = config == null ? null : engine.getField(config, "q");
+        return value instanceof Integer ? ((Integer) value).intValue() : settings.seed;
+    }
+
+    /**
+     * What the engine knows about whether the processes in this session are still simulating the same match.
+     *
+     * The engine settles this itself rather than leaving it to be guessed at from the log. The host checksums the world every few hundred frames, each client answers with its own, and the host keeps every client's verdict on the connection it arrived over. It matters to a run because a session that has drifted apart does not stop: it goes on playing, only no longer the same match on each side, so any number taken out of an episode after that moment describes nothing.
+     */
+    String synchronisation(Object game) throws Exception {
+        StringBuilder peers = new StringBuilder("[");
+        for (Object connection : engine.connections(game)) {
+            Wire.Json peer = new Wire.Json();
+            peer.put("name", engine.peerName(connection));
+            peer.put("desynced", engine.peerDesynced(connection));
+            peer.put("broken", engine.peerBroken(connection));
+            peer.put("matched", engine.peerMatches(connection));
+            peer.put("desyncs", engine.peerDesyncs(connection));
+            if (peers.length() > 1) peers.append(',');
+            peers.append(peer.toString());
+        }
+        peers.append(']');
+
+        Wire.Json report = new Wire.Json();
+        report.put("networked", engine.networked(game));
+        report.put("host", engine.isHost(game));
+        report.put("frame", engine.checksumFrame(game));
+        report.put("interval", engine.checksumInterval(game));
+        report.put("checksum", engine.checksum(game));
+        report.put("matched", engine.checksumMatches(game));
+        report.raw("peers", peers.toString());
+        return report.toString();
+    }
+
+    /** The name this process plays under. The engine's own default is used when nothing was asked for, so that a single player episode looks exactly as it did before there was anything to name. */
+    private String playerName() {
+        return settings.name.isEmpty() ? "You" : settings.name;
     }
 
     private void chooseContestants() throws Exception {
@@ -142,11 +347,14 @@ final class MatchDriver {
 
     /** True once the match cannot usefully continue: one side left, the engine has called it, or the time limit is up. */
     boolean finished(Object game) throws Exception {
-        Object net = engine.net(game);
-        if (!engine.getBoolean(net, "aW")) return true;
+        if (!running(game)) return true;
+        if (settings.maxSeconds > 0 && engine.gameTime(game) / 1000 >= settings.maxSeconds) return true;
+        // An arena episode is a board to build situations on rather than a match to win, and every test below asks who is winning. Its engagements are begun and ended by the control process, and it runs until the clock or an abort stops it.
+        if (settings.arena) return false;
+        // Nothing is decided in the first moments of a match. A player whose starting units have not been placed yet reads as wiped out, so the count of surviving sides is one until everybody is on the board; without this a match ends before it begins as soon as a second process is in it and its player is registered a frame later than this one's.
+        if (engine.gameTime(game) < START_GRACE_MS) return false;
         // The engine's victory and defeat flags speak for the local player, which means nothing once that player is watching.
         if (settings.contestants == 0 && (engine.victory(game) || engine.defeat(game))) return true;
-        if (settings.maxSeconds > 0 && engine.gameTime(game) / 1000 >= settings.maxSeconds) return true;
         return aliveTeams().size() <= 1;
     }
 

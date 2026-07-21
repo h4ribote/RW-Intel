@@ -118,6 +118,9 @@ class Operations:
                 continue
             if squad.id in self.human_held:
                 continue
+            # A squad that has just taken in units somebody else was moving waits a period. What was done with them is unknown here, and a contract written now would be written about a composition and a position this layer has not seen; the squad holds the stance it has until the next period, by which time the organisation layer has reported what it actually consists of.
+            if squad.settling:
+                continue
             plan = self._plan(view, orders, squad, by_squad.get(squad.id))
             if plan is not None:
                 plans.append(plan)

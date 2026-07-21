@@ -33,6 +33,10 @@ class ServerSettings:
     arms: List[Tuple[str, Callable]] = field(default_factory=list)
     #: Where every episode is written as it finishes, or None to keep nothing.
     journal: Optional[object] = None
+    #: Ways of building a commander outside the chain, each called once per episode with the session. The intervention console puts one here and so does the script intruder; the order is the order they are consulted in, and the last has the final word about a squad, so a person belongs after an intruder.
+    outside: List[Callable] = field(default_factory=list)
+    #: Set to put every connected instance into one shared lockstep match rather than giving each its own, which is the only arrangement in which the engine has a second world to compare its own against.
+    pairing: Optional[object] = None
 
 
 class Server:
@@ -86,6 +90,11 @@ class Server:
     def stop(self) -> None:
         self._done.set()
 
+    def session(self, instance: int) -> Optional[Session]:
+        """The session of one instance, which is how anything outside the link threads — the intervention console above all — reaches the policy that is currently deciding for it."""
+        with self._lock:
+            return next((s for s in self.sessions if s.instance == instance), None)
+
     def _session_for(self, instance: int, connection, address) -> Session:
         """The session this connection belongs to, which is an existing one whenever the instance has been seen before."""
         with self._lock:
@@ -94,7 +103,9 @@ class Server:
                     session.rebind(connection, address)
                     return session
             session = Session(connection, address, self.settings.episode, self.arms,
-                              self.settings.assets, self.settings.episodes, self.settings.journal)
+                              self.settings.assets, self.settings.episodes, self.settings.journal,
+                              self.settings.outside)
+            session.pairing = self.settings.pairing
             self.sessions.append(session)
             return session
 

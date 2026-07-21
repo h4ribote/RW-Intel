@@ -14,7 +14,7 @@ final class Wire {
     /** ASCII "RWIN", so a stream that has lost sync fails at the next header rather than silently. */
     static final int MAGIC = 0x4E495752;
 
-    static final int PROTOCOL_VERSION = 2;
+    static final int PROTOCOL_VERSION = 3;
 
     static final int HEADER_SIZE = 16;
 

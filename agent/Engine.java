@@ -124,6 +124,47 @@ final class Engine {
 
     private final Object[] stances;
 
+    // ---- the network session ---------------------------------------------------------------
+
+    /**
+     * Everything a real multiplayer session needs, and everything the engine will say about whether one has drifted apart.
+     *
+     * These are resolved leniently rather than in the strict style of the rest of this class, and every accessor over them answers something harmless when its member is missing. The reason is what they are for: a synchronisation report exists to tell a run that an episode's result cannot be trusted, and it must not be the thing that stops the run because one obfuscated name moved.
+     */
+    private final Field settingsEngine;      // l.bQ, the settings object, whose own class name is not obfuscated
+    private final Field settingsPort;        // SettingsEngine.networkPort, which is where a host reads the port it binds
+    private final Method netHost;            // ad.b(boolean), the multiplayer host call
+    private final Method netConnect;         // ad.a(String, boolean, Runnable), which starts a connector and hands it back
+    private final Method netAdopt;           // ad.a(Socket), which takes a connected socket over as this process's session
+    private final Method netName;            // ad.a(String), which is how the name this process joins under is set
+    private final Field netStarted;          // ad.B, a session of either kind is up
+    private final Field netHosting;          // ad.C, and this process is its host
+    private final Field netChecksumFrame;    // ad.ah, the frame the current checksum belongs to, -1 for none
+    private final Field netChecksumInterval; // ad.ai, 300 frames
+    private final Field netChecksum;         // ad.am, the checksum record
+    private final Field netMatches;          // ad.aq, checksums this process has agreed with as a client
+    private final Field netConnections;      // ad.aM, the host's connection to each client
+    private final Method netAssert;          // ad.x()
+    private final Field checksumTotal;       // ak.a, the aggregate over every subsystem
+    private final Field connectorError;      // an.e, non-null once a connection attempt has failed
+    private final Field connectorSocket;     // an.g, the connected socket once one has succeeded
+    private final Method connectorCancel;    // an.a()
+    private final Field peerDesynced;        // c.v, this client is out of step right now
+    private final Field peerBroken;          // c.w, and could not be brought back
+    private final Field peerMatches;         // c.x, checksums it has agreed with
+    private final Field peerDesyncs;         // c.y, times it has fallen out of step
+    private final Method peerName;           // c.e()
+
+    /**
+     * How long a join waits for the connector before giving up.
+     *
+     * The wait happens on the game thread, which stalls the simulation for as long as it lasts, so this is a bound on how long a mistyped address costs rather than a generous allowance. A host on the same machine answers in milliseconds, and one that is not listening refuses immediately.
+     */
+    private static final int JOIN_TIMEOUT_SECONDS = 90;
+
+    /** How long one attempt to reach a host is given before it is abandoned and tried again. The engine's own connect gives up after seven seconds, so this only has to be longer than that. */
+    private static final int CONNECT_TIMEOUT_SECONDS = 10;
+
     Engine() throws Exception {
         engineClass = Class.forName("com.corrodinggames.rts.gameFramework.l");
         unitClass = Class.forName("com.corrodinggames.rts.game.units.am");
@@ -209,9 +250,10 @@ final class Engine {
 
         Class<?> poolClass = Class.forName("com.corrodinggames.rts.gameFramework.c");
         Class<?> commandClass = Class.forName("com.corrodinggames.rts.gameFramework.e");
+        Class<?> netClass = Class.forName("com.corrodinggames.rts.gameFramework.j.ad");
         poolObtain = method(poolClass, "b", playerClass);
         poolTake = method(poolClass, "b");
-        netSubmit = method(Class.forName("com.corrodinggames.rts.gameFramework.j.ad"), "a", commandClass);
+        netSubmit = method(netClass, "a", commandClass);
         commandAddUnit = method(commandClass, "a", armedClass);
         commandAttack = method(commandClass, "a", unitClass);
         commandMove = method(commandClass, "a", float.class, float.class);
@@ -222,6 +264,34 @@ final class Engine {
         actionHandle = method(actionClass, "a", String.class);
 
         stances = (Object[]) stanceClass.getMethod("values").invoke(null);
+
+        Class<?> settingsClass = classOrNull("com.corrodinggames.rts.gameFramework.SettingsEngine");
+        Class<?> checksumClass = classOrNull("com.corrodinggames.rts.gameFramework.j.ak");
+        Class<?> connectorClass = classOrNull("com.corrodinggames.rts.gameFramework.j.an");
+        Class<?> peerClass = classOrNull("com.corrodinggames.rts.gameFramework.j.c");
+        settingsEngine = fieldOrNull(engineClass, "bQ");
+        settingsPort = fieldOrNull(settingsClass, "networkPort");
+        netHost = methodOrNull(netClass, "b", boolean.class);
+        netConnect = methodOrNull(netClass, "a", String.class, boolean.class, Runnable.class);
+        netAdopt = methodOrNull(netClass, "a", java.net.Socket.class);
+        netName = methodOrNull(netClass, "a", String.class);
+        netStarted = fieldOrNull(netClass, "B");
+        netHosting = fieldOrNull(netClass, "C");
+        netChecksumFrame = fieldOrNull(netClass, "ah");
+        netChecksumInterval = fieldOrNull(netClass, "ai");
+        netChecksum = fieldOrNull(netClass, "am");
+        netMatches = fieldOrNull(netClass, "aq");
+        netConnections = fieldOrNull(netClass, "aM");
+        netAssert = methodOrNull(netClass, "x");
+        checksumTotal = fieldOrNull(checksumClass, "a");
+        connectorError = fieldOrNull(connectorClass, "e");
+        connectorSocket = fieldOrNull(connectorClass, "g");
+        connectorCancel = methodOrNull(connectorClass, "a");
+        peerDesynced = fieldOrNull(peerClass, "v");
+        peerBroken = fieldOrNull(peerClass, "w");
+        peerMatches = fieldOrNull(peerClass, "x");
+        peerDesyncs = fieldOrNull(peerClass, "y");
+        peerName = methodOrNull(peerClass, "e");
     }
 
     // ---- reflection helpers --------------------------------------------------------------
@@ -256,6 +326,36 @@ final class Engine {
         }
         if (found == null) throw new NoSuchFieldException("no field of " + type.getName() + " on " + owner.getName());
         return found;
+    }
+
+    /**
+     * The lenient forms, for members whose absence must be survivable.
+     *
+     * Everything resolved strictly above is something without which an episode cannot be run at all, so failing at start up is the right answer for it. The network session members are not like that: a run that only ever hosts single player never touches one, and even a paired run would rather report that it cannot see the checksums than refuse to start.
+     */
+    private static Class<?> classOrNull(String name) {
+        try {
+            return Class.forName(name);
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
+    private static Field fieldOrNull(Class<?> owner, String name) {
+        try {
+            return owner == null ? null : field(owner, name);
+        } catch (Throwable e) {
+            // Throwable rather than Exception because enumerating a class's declared members loads the types in their signatures, and this game's classes declare methods over Android types that are not on the class path of a desktop run. What comes back is an Error, and an Error escaping here would stop the agent from starting at all rather than leaving one accessor unresolved.
+            return null;
+        }
+    }
+
+    private static Method methodOrNull(Class<?> owner, String name, Class<?>... parameters) {
+        try {
+            return owner == null ? null : method(owner, name, parameters);
+        } catch (Throwable e) {
+            return null;
+        }
     }
 
     private static Method method(Class<?> owner, String name, Class<?>... parameters) throws Exception {
@@ -636,5 +736,240 @@ final class Engine {
 
     Object staticField(Class<?> owner, String name) throws Exception {
         return field(owner, name).get(null);
+    }
+
+    // ---- the network session ---------------------------------------------------------------
+
+    /** The port a host binds, as the settings currently hold it. Zero when the settings cannot be reached. */
+    int networkPort(Object engine) {
+        try {
+            Object settings = settingsEngine == null ? null : settingsEngine.get(engine);
+            return settings == null || settingsPort == null ? 0 : settingsPort.getInt(settings);
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    boolean setNetworkPort(Object engine, int port) {
+        try {
+            Object settings = settingsEngine == null ? null : settingsEngine.get(engine);
+            if (settings == null || settingsPort == null) return false;
+            settingsPort.setInt(settings, port);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Opens a real multiplayer session, which is what lets a second process join this match.
+     *
+     * This is a different call from the single player server, and the difference is the whole point of it. A single player server is the entire session inside one process, so nothing can ever connect to it and the engine never has a second world to compare its own against; a host binds a TCP and a UDP acceptor, admits other processes, and from then on checksums the world for each of them.
+     *
+     * The port is written into the settings first because the engine reads it from there as it binds and never takes it as an argument, which is also why two hosts on one machine have to be given different ones. The call refuses outright if a session is already up, so whatever brought the previous one down has to have run first.
+     */
+    boolean hostNetworked(Object engine, int port) throws Exception {
+        if (netHost == null) return false;
+        // Refused rather than attempted when the port cannot be written. The engine reads the port from the settings as it binds and reports success either way, so a host that could not be told which port to use would come up listening on whatever was left in the preferences and every attempt to join it would be refused at an address that looks correct.
+        if (!setNetworkPort(engine, port)) return false;
+        return Boolean.TRUE.equals(netHost.invoke(net(engine), Boolean.FALSE));
+    }
+
+    /**
+     * Connects to a match another process is hosting and hands the connected socket to the engine, returning the reason it did not work or null once this process is part of the session.
+     *
+     * The engine's connector runs on a thread of its own and reports through a callback rather than blocking, but the wait is done here anyway: the caller has nothing useful to do until the answer is known, and the socket has to be given to the engine from the same place that asked for it. The connector touches nothing but the socket, so waiting on the game thread costs a stall and risks no deadlock.
+     *
+     * The address is host[:port] and a bare host means the engine's default port. TCP is forced because the alternative is the engine's own hole punching, which has nothing to do on a machine talking to itself.
+     */
+    String join(Object engine, String address) throws Exception {
+        if (netConnect == null || netAdopt == null) return "the engine's connect call could not be resolved";
+        Object net = net(engine);
+        long deadline = System.currentTimeMillis() + JOIN_TIMEOUT_SECONDS * 1000L;
+        String last = "no attempt was made";
+        // Tried again rather than once, because a host that is not listening yet refuses instantly rather than making the caller wait: the two processes are started together and the one that hosts has a map to load first, so the first several attempts are expected to fail and mean nothing.
+        while (System.currentTimeMillis() < deadline) {
+            String failure = attemptJoin(net, address);
+            if (failure == null) return null;
+            last = failure;
+            Thread.sleep(1000);
+        }
+        return last;
+    }
+
+    private String attemptJoin(Object net, String address) throws Exception {
+        final java.util.concurrent.CountDownLatch finished = new java.util.concurrent.CountDownLatch(1);
+        Object connector = netConnect.invoke(net, address, Boolean.TRUE, new Runnable() {
+            public void run() {
+                finished.countDown();
+            }
+        });
+        if (!finished.await(CONNECT_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)) {
+            if (connectorCancel != null) connectorCancel.invoke(connector);
+            return "no answer from " + address;
+        }
+        Object failure = connectorError == null ? null : connectorError.get(connector);
+        if (failure != null) return String.valueOf(failure);
+        Object socket = connectorSocket == null ? null : connectorSocket.get(connector);
+        if (socket == null) return "connected to " + address + " but the socket was not handed back";
+        // The engine tears down whatever it was doing before it takes the socket over, and it does so inside the call below rather than needing to be asked; asking separately would go through the strict resolver and turn a renamed method into a failure to start an episode at all, which is what resolving this whole block leniently was meant to rule out.
+        return Boolean.TRUE.equals(netAdopt.invoke(net, socket))
+                ? null : "the engine refused the connection to " + address;
+    }
+
+    /**
+     * Waits in the room until another process has connected, or gives up.
+     *
+     * A match is started by the host, and once it has been there is nothing more to join: the other process has to be in the room before the start, not after it. Since the host is the only side that knows when it has finished loading, waiting here is where the two are brought into order, and it costs a stall in a battleroom rather than anything a match would notice.
+     */
+    boolean awaitPeer(Object engine, int seconds) throws Exception {
+        long deadline = System.currentTimeMillis() + seconds * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            if (!connections(engine).isEmpty()) return true;
+            Thread.sleep(200);
+        }
+        return false;
+    }
+
+    /**
+     * The name this process answers to in a session.
+     *
+     * Written through the engine's own call rather than into the field behind it, because that call is also what strips the spaces the protocol cannot carry and what remembers the name for the next session. It is what a host's per client desync report names each client by, so it is worth setting to something that identifies which process this is.
+     */
+    void setNetworkName(Object engine, String name) throws Exception {
+        if (netName != null) netName.invoke(net(engine), name);
+    }
+
+    /** Whether a session of either kind is up. */
+    boolean networked(Object engine) {
+        return netBoolean(engine, netStarted);
+    }
+
+    /** Whether this process hosts the session it is in, which says nothing at all unless {@link #networked} is true. */
+    boolean isHost(Object engine) {
+        return netBoolean(engine, netHosting);
+    }
+
+    /** The frame the current checksum was taken at, or -1 when none has been taken yet. */
+    int checksumFrame(Object engine) {
+        return netInt(engine, netChecksumFrame, -1);
+    }
+
+    /** Frames between checksums, which is how far apart two processes can drift before either of them finds out. */
+    int checksumInterval(Object engine) {
+        return netInt(engine, netChecksumInterval, 0);
+    }
+
+    /** The aggregate over every checksummed subsystem, which is the number the two sides actually compare. */
+    long checksum(Object engine) {
+        try {
+            Object net = net(engine);
+            Object record = net == null || netChecksum == null ? null : netChecksum.get(net);
+            return record == null || checksumTotal == null ? 0L : checksumTotal.getLong(record);
+        } catch (Exception e) {
+            return 0L;
+        }
+    }
+
+    /** How many checksums this process has agreed with as a client. Stays at zero on a host, which compares nothing of its own. */
+    int checksumMatches(Object engine) {
+        return netInt(engine, netMatches, 0);
+    }
+
+    /**
+     * The connections this process holds, which on a host is one per client and is where the engine records that client's verdict.
+     *
+     * A client has one of these too : its connection to the server : but the four counters on it stay at their initial values for the whole match, because only the host's side of the checksum exchange ever writes them. A client's own evidence that it is in step is its count of matching checksums instead, so a reader that judged an episode by the counters alone would call every joined episode unsynchronised and throw away exactly the results a paired run exists to collect.
+     */
+    java.util.List<Object> connections(Object engine) {
+        java.util.List<Object> out = new java.util.ArrayList<Object>();
+        try {
+            Object net = net(engine);
+            Object queue = net == null || netConnections == null ? null : netConnections.get(net);
+            if (queue instanceof java.util.Collection) out.addAll((java.util.Collection<?>) queue);
+        } catch (Exception e) {
+            // A report that cannot be built comes back empty rather than thrown, because it is asked for in order to decide whether an episode counts and not in order to run one.
+        }
+        return out;
+    }
+
+    String peerName(Object connection) {
+        try {
+            return peerName == null ? "" : String.valueOf(peerName.invoke(connection));
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** Whether this client is out of step at this moment. */
+    boolean peerDesynced(Object connection) {
+        return peerBoolean(connection, peerDesynced);
+    }
+
+    /** Whether this client is out of step and could not be brought back, which is the end of the match as a comparable thing. */
+    boolean peerBroken(Object connection) {
+        return peerBoolean(connection, peerBroken);
+    }
+
+    /** How many checksums this client has agreed with. None at all after a while of playing is as bad a sign as a disagreement. */
+    int peerMatches(Object connection) {
+        return peerInt(connection, peerMatches);
+    }
+
+    /** How many separate times this client has fallen out of step, which counts the ones it was brought back from as well. */
+    int peerDesyncs(Object connection) {
+        return peerInt(connection, peerDesyncs);
+    }
+
+    /**
+     * The engine's own verdict on the session, as the message it would fail with, or null when it is content.
+     *
+     * The engine ships this as an assertion that throws, which is no use as a report: a run wants to record that an episode drifted and then go on to the next one, not stop at the point of asking. The counters above say the same thing without the exception, and this exists for when the engine's own wording is what is wanted. It is a harsh test as well as a loud one, and complains about a client that has simply not been sent a checksum yet.
+     */
+    String desyncComplaint(Object engine) {
+        try {
+            if (netAssert == null) return null;
+            netAssert.invoke(net(engine));
+            return null;
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            return cause == null ? e.toString() : String.valueOf(cause.getMessage());
+        } catch (Exception e) {
+            return e.toString();
+        }
+    }
+
+    private boolean netBoolean(Object engine, Field which) {
+        try {
+            Object net = net(engine);
+            return net != null && which != null && which.getBoolean(net);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private int netInt(Object engine, Field which, int fallback) {
+        try {
+            Object net = net(engine);
+            return net == null || which == null ? fallback : which.getInt(net);
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    private static boolean peerBoolean(Object connection, Field which) {
+        try {
+            return connection != null && which != null && which.getBoolean(connection);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static int peerInt(Object connection, Field which) {
+        try {
+            return connection == null || which == null ? 0 : which.getInt(connection);
+        } catch (Exception e) {
+            return 0;
+        }
     }
 }

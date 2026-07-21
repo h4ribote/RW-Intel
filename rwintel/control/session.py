@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -61,6 +62,8 @@ class EpisodeSettings:
     fog: int = 2
     seed: int = 12345
     max_seconds: int = 900
+    #: Holds the episode open when only one side has anything standing, which is what an episode used to construct engagements in needs: it starts empty, so the ordinary end test would finish it before the first unit was spawned.
+    arena: bool = False
 
 
 @dataclass
@@ -80,6 +83,10 @@ class EpisodeRecord:
     settings: dict = field(default_factory=dict)
     #: What each layer did, which is what separates a bad result from a result and says which layer it came from.
     statistics: dict = field(default_factory=dict)
+    #: What anyone outside the chain did to this episode, and to which squads. Kept beside the statistics rather than inside them because it is not a measure of the run: it is what a later learning run reads to decide which squads' results it must throw away, since a squad that was taken over or emptied half way through its mission was not the chain's to be judged on.
+    interference: dict = field(default_factory=dict)
+    #: What the engine said about whether the processes sharing this match were still simulating the same one. Empty for the ordinary case of one process to a match, where the question does not arise; where it does, an episode that drifted apart part way through describes nothing and its numbers must not be used.
+    synchronisation: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -87,6 +94,7 @@ class EpisodeRecord:
             "seconds": self.seconds, "winner": self.winner, "alive_teams": self.alive_teams,
             "timeout": self.timeout, "team": self.team, "standing": self.standing,
             "settings": self.settings, "statistics": self.statistics,
+            "interference": self.interference, "synchronisation": self.synchronisation,
         }
 
     @property
@@ -112,16 +120,22 @@ class EpisodeRecord:
 
 class Session:
     def __init__(self, connection, address, settings: EpisodeSettings, arms,
-                 assets: Optional[AssetPaths] = None, episodes: int = 1, journal=None):
+                 assets: Optional[AssetPaths] = None, episodes: int = 1, journal=None,
+                 outside=None):
         self.connection = connection
         self.address = address
         self.settings = settings
+        self._sending = threading.Lock()
         #: The policies to run, as (name, factory) pairs. More than one makes the run a comparison.
         self.arms = list(arms)
         self.assets = assets or AssetPaths.default()
         #: Episodes each arm is to run, so a session plays this many times the number of arms.
         self.episodes_wanted = episodes * len(self.arms)
         self.journal = journal
+        #: Ways of building a commander outside the chain, called once per episode with this session. A factory rather than a commander so that what a person or an intruder holds is a fact about one match: a squad number means a different squad next episode, and a holding carried across would be a squad nobody took.
+        self.outside_factories = list(outside or [])
+        #: The outside commanders of the episode currently running.
+        self.outside: List = []
         self.arm = self.arms[0][0]
 
         self.instance = -1
@@ -131,9 +145,18 @@ class Session:
         self.map_content: Optional[MapContent] = None
         self.regions: List[Region] = []
         self.home: Optional[Region] = None
+        #: The player list the game reported when the episode began, and which of those players an arena episode's opposing side belongs to.
+        self.players: List[dict] = []
+        self.sparring_slot = -1
         self.policy = None
+        #: How this instance takes part in a match shared with another process, or None for the ordinary case of one process to a match.
+        self.pairing = None
+        #: What the engine last said about whether the processes in this session are still simulating the same match.
+        self.sync: dict = {}
         self.records: List[EpisodeRecord] = []
         self.observations = 0
+        #: The last observation decoded, kept so that anything asking this session what the board looks like — the intervention console above all — reads the same frame the policy last decided on rather than a frame of its own.
+        self.observation: Optional[Observation] = None
         self.started_at = time.time()
 
     @staticmethod
@@ -152,13 +175,39 @@ class Session:
     # ---- outgoing --------------------------------------------------------------------
 
     def _send(self, kind: Kind, body: bytes) -> None:
-        self.connection.sendall(encode(kind, max(0, self.instance), body))
+        # One frame at a time, because more than one thread can be sending. A link that drops mid period is replaced by a new one while the old one is still inside a policy decision, and the two would otherwise interleave their bytes on the same socket; what the agent then reads is a header out of the middle of somebody else's body, and the connection fails on the magic number rather than on anything that says what happened.
+        with self._sending:
+            self.connection.sendall(encode(kind, max(0, self.instance), body))
 
-    def _control(self, payload: dict) -> None:
+    def control(self, payload: dict) -> None:
+        """Sends one control instruction. Public because a policy may need to reach for one — an engagement is constructed with `scenario`, and the arena that trains the tactical layer is a policy."""
         self._send(Kind.CONTROL, json.dumps(payload).encode("utf-8"))
 
+    def scenario(self, spawns: List[float], sandbox: Optional[bool] = None) -> None:
+        """Builds a situation on the board: the sandbox flag, and units to create as flat rows of type index, player slot, x, y and how many.
+
+        Every unit goes in through the engine's own spawn command rather than being assigned into its state, which is what keeps a lockstep session in step. There is deliberately no instruction to clear the board, because the game has no command that removes a unit; an arena episode is begun with no starting units and filled in instead.
+        """
+        payload: Dict[str, object] = {"command": "scenario", "spawns": spawns}
+        if sandbox is not None:
+            payload["sandbox"] = sandbox
+        self.control(payload)
+
+    def abort(self) -> None:
+        self.control({"command": "abort"})
+
+    def set_speed(self, multiplier: float) -> None:
+        self.control({"command": "speed", "value": multiplier})
+
+    def set_omniscient(self, on: bool) -> None:
+        self.control({"command": "omniscient", "value": on})
+
+    def ask_for_sync(self, complain: bool = False) -> None:
+        """Asks the agent what the engine says about whether the processes in its session are still simulating the same match."""
+        self.control({"command": "sync", "assert": complain})
+
     def start_episode(self) -> None:
-        self._control({
+        instruction = {
             "command": "start",
             "map": self.settings.map,
             "opponents": self.settings.opponents,
@@ -170,7 +219,12 @@ class Session:
             "fog": self.settings.fog,
             "seed": self.settings.seed + len(self.records),
             "maxSeconds": self.settings.max_seconds,
-        })
+            "arena": self.settings.arena,
+            "name": f"rw-intel-{max(0, self.instance)}",
+        }
+        if self.pairing is not None:
+            instruction.update(self.pairing.instruction(self))
+        self.control(instruction)
 
     # ---- incoming --------------------------------------------------------------------
 
@@ -194,6 +248,11 @@ class Session:
         log.info("instance %d connected on build %s with %d unit types",
                  self.instance, self.build or "?", len(self.types))
 
+        # An instance that has already run everything asked of it is finished with, and a HELLO from it is the agent redialling because the link was closed on it. Starting another episode here would have it play on for ever, one episode per reconnection, and each of those episodes would also be counted.
+        if len(self.records) >= self.episodes_wanted:
+            log.debug("instance %d has run its episodes; ignoring its reconnection", self.instance)
+            return
+
         # A HELLO in the middle of a running episode is a reconnection, not a new instance. Starting the episode again would throw away a match the agent has been running on its own meanwhile, which is exactly what the degraded mode is for.
         if payload.get("running"):
             log.info("instance %d rejoined episode %d in progress", self.instance, payload.get("episode", 0))
@@ -204,8 +263,21 @@ class Session:
     def on_episode(self, body: bytes) -> None:
         payload = json.loads(body.decode("utf-8"))
         if payload.get("event") == "started":
+            self.sync = dict(payload.get("sync", {}))
             self._on_started(payload)
+            if self.pairing is not None:
+                self.pairing.started(self)
             return
+        if payload.get("event") == "sync":
+            # A report about synchronisation, not the end of anything. Counting it as an episode would have the two sides disagreeing about how many have been run.
+            self.sync = {key: value for key, value in payload.items() if key != "event"}
+            log.info("instance %d sync: %s", self.instance, self.sync)
+            return
+
+        # What the layers did is read off the policy before it is put down, and the policy is told the episode is over before anything is written down. A policy that is collecting decisions has trajectories still open at this point, and an errand that was still running when the match was called did not fail: it stopped being observed, which is a different thing and is scored differently.
+        statistics = self.policy.statistics.as_dict() if hasattr(self.policy, "statistics") else {}
+        self.sync = dict(payload.get("sync", self.sync))
+        self._close_policy()
 
         record = EpisodeRecord(
             episode=int(payload.get("episode", 0)),
@@ -218,7 +290,9 @@ class Session:
             arm=self.arm,
             instance=self.instance,
             settings=vars(self.settings).copy(),
-            statistics=self.policy.statistics.as_dict() if hasattr(self.policy, "statistics") else {},
+            statistics=statistics,
+            synchronisation=dict(payload.get("sync", {})),
+            interference=self._interference(),
         )
         self.records.append(record)
         if self.journal is not None:
@@ -231,11 +305,28 @@ class Session:
         else:
             log.info("instance %d has run its episodes", self.instance)
 
+    def _close_policy(self) -> None:
+        """Lets a policy finish with the episode. Nothing the script chain does needs this; a policy that is collecting for a learning run has state that only means anything once it knows no further observation is coming."""
+        closer = getattr(self.policy, "close", None)
+        try:
+            if closer is not None:
+                closer()
+        except Exception:
+            # A failure to tidy up must not lose the episode that was actually played, which is what the record about to be written is.
+            log.exception("instance %d failed to close its policy", self.instance)
+        # Put down rather than kept until the next episode replaces it. Between the end of one episode and the start of the next there is a map load, which is seconds to minutes of wall clock, and anything asking this session what it is doing in that window — a person at the console above all — has to be told that it is doing nothing rather than shown the match that has just ended.
+        self.policy = None
+        self.outside = []
+
     def _on_started(self, payload: dict) -> None:
         self._load_map(str(payload.get("map", "")))
+        self.players = list(payload.get("players", []))
+        # Which player the opposing side of a constructed engagement is spawned for. Settled game side, because it depends on how the room filled its free slots, which is not visible from here.
+        self.sparring_slot = int(payload.get("sparringSlot", -1))
         # Arms alternate within a session rather than one arm being run after the other. Two arms measured in sequence differ by whatever else changed about the machine between them, and the whole point of the comparison is that nothing else changed.
         self.arm, factory = self.arms[len(self.records) % len(self.arms)]
         self.policy = factory(self)
+        self._attach_outside()
         self.observations = 0
         log.info("instance %d episode %d on %s (%s): %d regions, players %s",
                  self.instance, payload.get("episode", 0), os.path.basename(str(payload.get("map", ""))),
@@ -246,6 +337,41 @@ class Session:
         self._load_map(map_path)
         self.arm, factory = self.arms[len(self.records) % len(self.arms)]
         self.policy = factory(self)
+        self._attach_outside()
+
+    def _attach_outside(self) -> None:
+        """Builds this episode's commanders outside the chain and hands them to the policy.
+
+        Each is given the organisation layer of the policy it is about to amend, because the cap of eight squads is kept there and nowhere else: a commander that wants a squad of its own for units it has pulled out of another borrows the slot rather than choosing a number, or two commanders would eventually name the same squad and the observation would describe whichever wrote last.
+
+        They are consulted in the order they were configured, and the last word about a squad belongs to whoever is consulted last, so a run with both an intruder and a person puts the person last.
+        """
+        self.outside = [make(self) for make in self.outside_factories]
+        for commander in self.outside:
+            commander.organisation = self.policy.organisation
+        if self.policy is not None:
+            # Added to whatever the policy brought with it rather than put in its place. A training run builds its own intruder inside the arm, because the run is not meaningful without one, and replacing the list here would quietly remove it.
+            self.policy.outside = list(getattr(self.policy, "outside", ())) + list(self.outside)
+
+    def _interference(self) -> dict:
+        """What the outside commanders did over the episode, gathered for the record.
+
+        Only a commander that keeps a log contributes, which in practice means the script intruder: a person's interventions are written to their own file as they happen, beside the board each was decided from, because that pairing is the imitation data and a summary at the end of the episode would have lost the state. What the record needs is the other half of the same fact — which squads a learning run must leave out of its signal — and for the intruder this is the only place it is written down.
+
+        What is asked is the policy's own list rather than the one attached here, because a policy may arrive with commanders of its own — a training arm builds its intruder inside itself, since the run means nothing without one — and an episode whose interference went unrecorded would be indistinguishable from an undisturbed one, which is exactly the confusion this field exists to prevent.
+        """
+        commanders = list(getattr(self.policy, "outside", ())) or self.outside
+        events: List[dict] = []
+        touched = set()
+        for commander in commanders:
+            log_of = getattr(commander, "log", None)
+            if log_of is None:
+                continue
+            events.extend(log_of.events)
+            touched.update(log_of.touched)
+        if not events and not touched:
+            return {}
+        return {"events": events, "touched": sorted(touched)}
 
     def _load_map(self, map_path: str) -> None:
         self.map_content = self._read_map(map_path)
@@ -262,7 +388,7 @@ class Session:
                 x, y = self.map_content.to_world(tile)
                 nearest = min(self.regions, key=lambda r: (r.x - x) ** 2 + (r.y - y) ** 2)
                 points.extend([round(x, 2), round(y, 2), float(nearest.id)])
-        self._control({"command": "regions", "regions": rows, "resourcePoints": points})
+        self.control({"command": "regions", "regions": rows, "resourcePoints": points})
 
     def _read_map(self, engine_path: str) -> Optional[MapContent]:
         """The engine reports a path relative to its own assets directory, which is where the reader looks anyway."""
@@ -277,6 +403,7 @@ class Session:
     def on_observation(self, body: bytes) -> None:
         observation = decode_observation(body)
         self.observations += 1
+        self.observation = observation
         if log.isEnabledFor(logging.DEBUG) and observation.regions:
             log.debug("instance %d t=%ds blocks=%x regions=%d(held %d/%d) squads=%d units=%d(%d enemy) events=%s home=%.0f..%.0f",
                       self.instance, observation.game_time_ms // 1000, observation.blocks, len(observation.regions),

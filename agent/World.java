@@ -78,6 +78,8 @@ final class World {
     static final class Squad {
         final int id;
         int commander;
+        /** Whose orders move this squad, as a player slot, or -1 for the player this process is. Only a constructed engagement uses anything else: with the sandbox flag set, one process drives both sides of a fight, and a command has to be taken out in the name of the player whose units it addresses. */
+        int owner = -1;
         final List<Long> units = new ArrayList<Long>();
         float value;
         float formedValue;
@@ -253,9 +255,10 @@ final class World {
     }
 
     /** Applies a membership decision. A unit belongs to at most one squad, so it is taken out of whatever held it. A squad handed an empty roster is disbanded, which is how the organisation layer retires one. */
-    void assign(int squadId, int commander, List<Long> units) {
+    void assign(int squadId, int commander, int owner, List<Long> units) {
         Squad squad = squad(squadId);
         squad.commander = commander;
+        squad.owner = owner;
         for (Long unit : squad.units) unitToSquad.remove(unit);
         squad.units.clear();
         for (Long unit : units) {

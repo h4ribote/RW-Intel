@@ -69,6 +69,8 @@ class Organisation:
         self.settling: Set[int] = set()
         #: Squads the game reported this period, which is what says whether a disband has to be sent at all or the game has already dropped an empty squad on its own.
         self.known_to_game: Set[int] = set()
+        #: Slots handed to someone outside the chain. The cap belongs to this layer and to nowhere else, so a human or an intruder that wants a squad of its own asks for the slot here rather than picking a number; otherwise two commanders would eventually name the same one and the observation would describe whichever wrote last.
+        self.reserved: Set[int] = set()
 
     def update(self, view: WorldView, shortfalls: List[Shortfall]) -> Tuple[List[SquadAssignment], List[SquadRecord], List[Replacement]]:
         """One period of organisation: fold in what the game reports, act on what happened, and say what the squads are and what they need."""
@@ -106,7 +108,24 @@ class Organisation:
                                            units=list(self.squads[squad_id].members))
                            for squad_id in sorted(changed) if squad_id in self.squads)
         records = [self.squads[squad_id] for squad_id in sorted(self.squads)]
+        # Carried on the record rather than kept here, because the layer that has to act on it is the one that hands out missions and it reads nothing of this layer but the records.
+        for record in records:
+            record.settling = record.id in self.settling
         return assignments, records, self._replacements(counts)
+
+    def reserve(self) -> Optional[int]:
+        """A squad slot for a commander outside the chain, or nothing when the cap leaves none. Handing one out is what keeps the cap true: the observation has eight slots whoever fills them, and a ninth squad would be invisible rather than merely surplus."""
+        if not self.free_ids or len(self.squads) + len(self.reserved) >= SQUAD_CAP:
+            return None
+        slot = self.free_ids.pop(0)
+        self.reserved.add(slot)
+        return slot
+
+    def release(self, squad_id: int) -> None:
+        """Takes a reserved slot back once its holder is finished with it."""
+        if squad_id in self.reserved:
+            self.reserved.discard(squad_id)
+            bisect.insort(self.free_ids, squad_id)
 
     # ---- what the game says ------------------------------------------------------------
 
@@ -116,6 +135,9 @@ class Organisation:
             return
         self.known_to_game = {state.id for state in observation.squads}
         for state in observation.squads:
+            # A slot lent to someone outside the chain describes a squad this layer neither formed nor may touch.
+            if state.id in self.reserved:
+                continue
             record = self.squads.get(state.id)
             if record is None:
                 record = self._adopt(state, observation)
@@ -126,6 +148,7 @@ class Organisation:
             record.x = state.x
             record.y = state.y
             record.spread = state.spread
+            record.losses = state.losses
             record.status = Status(state.status)
             record.commander = state.commander
 
@@ -312,7 +335,7 @@ class Organisation:
     def _form(self, pool: List[Sighting], counts: Dict[int, Dict[Role, int]],
               by_id: Dict[int, Sighting], changed: Set[int], returned: Set[int]) -> bool:
         """Raises one squad if the pool holds a doctrine's minimum and there is a slot for it. Returns whether anything was formed, since the caller alternates this with reinforcement."""
-        if len(self.squads) >= SQUAD_CAP or not self.free_ids:
+        if len(self.squads) + len(self.reserved) >= SQUAD_CAP or not self.free_ids:
             return False
         for doctrine in FORMATION_ORDER:
             picked = _muster(doctrine, pool, self.catalogue)

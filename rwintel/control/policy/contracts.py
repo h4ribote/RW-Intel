@@ -145,9 +145,13 @@ class SquadRecord:
     x: float = 0.0
     y: float = 0.0
     spread: float = 0.0
+    #: What has been lost since the current contract was issued, in credits, as the game side measures it. Reported rather than derived because the baseline it is taken from is the worth the squad held at the moment of issue, which only the game side witnesses.
+    losses: float = 0.0
     status: Status = Status.ACTIVE
     #: Which layers of this squad's command a human holds, as the bits the observation uses.
     commander: int = 0
+    #: True for the one operational period after this squad took in units somebody else had been moving. What was done with them is not knowable from here, so the squad holds its stance for a period and the operational layer looks at the new composition before deciding anything about it.
+    settling: bool = False
     #: The contract it is under, if any.
     contract: Optional["TaskContract"] = None
 

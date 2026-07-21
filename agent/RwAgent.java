@@ -36,6 +36,10 @@ public final class RwAgent {
 
     /** Set once the world is loaded and the episode is under way, cleared when it ends. */
     private static volatile boolean episodeRunning = false;
+    /** Set on a process that has joined another's match and has nothing to do but watch for the host to start one. */
+    private static volatile boolean awaitingHost = false;
+    /** Set on a process that has opened a room for a match another process is to join, and is waiting for it to appear. */
+    private static volatile boolean awaitingPeer = false;
     private static volatile int lastTacticalMs = Integer.MIN_VALUE;
     private static volatile int lastOperationalMs = Integer.MIN_VALUE;
     private static volatile boolean catalogueSent = false;
@@ -149,12 +153,13 @@ public final class RwAgent {
      */
     private static void pump(Object game) throws Exception {
         long lastAttempt = 0;
+        long lastJoinPoll = 0;
         while (true) {
+            long wall = System.currentTimeMillis();
             if (!link.connected()) {
                 // The episode is left running, and the squads keep the contracts they were last given: the engine goes on advancing them, which is a better thing to be doing while out of touch than standing still.
-                long now = System.currentTimeMillis();
-                if (now - lastAttempt >= 1000) {
-                    lastAttempt = now;
+                if (wall - lastAttempt >= 1000) {
+                    lastAttempt = wall;
                     if (link.connect()) {
                         catalogueSent = false;
                         log("reconnected to the control process");
@@ -162,10 +167,14 @@ public final class RwAgent {
                 }
             } else if (!queued.get()) {
                 int now = engine.gameTime(game);
+                // A process waiting on a host has no episode of its own to pace against, and cannot pace against the game clock either, because the clock it will be running on is the one the host is about to hand it. So it is looked at on the wall clock, often enough that the wait costs nothing worth measuring.
+                boolean waiting = (awaitingHost || awaitingPeer) && wall - lastJoinPoll >= 200;
                 boolean due = !catalogueSent
                         || link.hasControl()
+                        || waiting
                         || (episodeRunning && (lastTacticalMs == Integer.MIN_VALUE || now - lastTacticalMs >= tacticalMs));
                 if (due && queued.compareAndSet(false, true)) {
+                    if (waiting) lastJoinPoll = wall;
                     try {
                         engine.post(game, STEP);
                     } catch (Exception e) {
@@ -197,6 +206,23 @@ public final class RwAgent {
 
         String control;
         while ((control = link.takeControl()) != null) handleControl(game, control);
+
+        // A host with an open room has nothing to report until somebody is in it, and the room only fills while this loop keeps running.
+        if (awaitingPeer) {
+            if (!driver.beginWhenReady(game)) return;
+            awaitingPeer = false;
+            beginEpisode(game);
+            return;
+        }
+
+        // A process that joined another's match has nothing of its own to report until the host starts one, and no say in when that is.
+        if (awaitingHost) {
+            if (!driver.running(game)) return;
+            awaitingHost = false;
+            driver.joined(game);
+            beginEpisode(game);
+            return;
+        }
 
         if (!episodeRunning) return;
 
@@ -286,7 +312,7 @@ public final class RwAgent {
         if (command == null) return;
         if (command.equals("start")) {
             MatchDriver.Settings settings = new MatchDriver.Settings();
-            settings.map = Wire.field(json, "map") == null ? "" : Wire.field(json, "map");
+            settings.map = text(json, "map", "");
             settings.opponents = Wire.intField(json, "opponents", 1);
             settings.difficulty = Wire.intField(json, "difficulty", 1);
             settings.contestants = Wire.intField(json, "contestants", 0);
@@ -296,27 +322,44 @@ public final class RwAgent {
             settings.fog = Wire.intField(json, "fog", 2);
             settings.seed = Wire.intField(json, "seed", 12345);
             settings.maxSeconds = Wire.intField(json, "maxSeconds", 0);
+            settings.arena = Wire.boolField(json, "arena", false);
+            settings.networked = Wire.boolField(json, "host", false);
+            settings.networkPort = Wire.intField(json, "port", settings.networkPort);
+            settings.joinAddress = text(json, "join", "");
+            // Named after the instance by default, because the name is what a host's desync report calls each client by and the instance number is the only thing that tells one agent from another.
+            settings.name = text(json, "name", "rw-" + instance);
             world.reset();
-            driver.start(game, settings);
-            episodeRunning = true;
-            lastTacticalMs = Integer.MIN_VALUE;
-            lastOperationalMs = Integer.MIN_VALUE;
-
-            // Any decision left over from the episode that just ended names units that no longer exist.
-            link.takeAction();
-
+            if (settings.joinAddress.isEmpty()) {
+                if (driver.start(game, settings)) {
+                    beginEpisode(game);
+                } else {
+                    // A networked host has opened its room and is waiting for the other process to finish joining it, which cannot happen while this thread stands still.
+                    awaitingPeer = true;
+                    link.takeAction();
+                    log("hosting on port " + settings.networkPort + ", waiting for another process to join");
+                }
+            } else {
+                driver.join(game, settings);
+                awaitingHost = true;
+                // A decision left over from the episode that just ended names units that no longer exist, and the wait for the host is long enough for one to arrive.
+                link.takeAction();
+                log("joined " + settings.joinAddress + ", waiting for the host to start a match");
+            }
+        } else if (command.equals("sync")) {
             Wire.Json event = new Wire.Json();
-            event.put("event", "started");
+            event.put("event", "sync");
             event.put("episode", driver.episode());
-            event.put("map", driver.map());
-            event.put("seed", settings.seed);
-            event.raw("players", driver.players());
+            event.put("running", episodeRunning);
+            event.raw("sync", driver.synchronisation(game));
+            // The engine ships its own assertion over the same counters, which throws rather than answers, and which counts a client it has not yet sent a checksum to as a failure. It is asked only when the caller wants the engine's own wording.
+            if (Wire.boolField(json, "assert", false)) event.put("complaint", engine.desyncComplaint(game));
             sendEpisodeEvent(event.toString());
         } else if (command.equals("regions")) {
             world.setRegions(parseRows(json, "regions", 4));
             world.setResourcePoints(parseRows(json, "resourcePoints", 3));
             log("region table: " + world.regions.size() + " regions");
         } else if (command.equals("abort")) {
+            awaitingHost = false;
             if (episodeRunning) endEpisode(game);
         } else if (command.equals("speed")) {
             speed = Wire.floatField(json, "value", speed);
@@ -326,6 +369,38 @@ public final class RwAgent {
         } else if (command.equals("scenario")) {
             buildScenario(game, json);
         }
+    }
+
+    /** A string field of a control frame, or a default when it is absent. */
+    private static String text(String json, String key, String fallback) {
+        String value = Wire.field(json, key);
+        return value == null ? fallback : value;
+    }
+
+    /**
+     * Marks an episode as under way and tells the control process about it.
+     *
+     * This is the same whether the match was started here or by a host this process joined, and it is written once for that reason: the control process counts episodes off these frames, and a joined episode that announced itself differently would be an episode it had to count differently.
+     */
+    private static void beginEpisode(Object game) throws Exception {
+        episodeRunning = true;
+        lastTacticalMs = Integer.MIN_VALUE;
+        lastOperationalMs = Integer.MIN_VALUE;
+
+        // Any decision left over from the episode that just ended names units that no longer exist.
+        link.takeAction();
+
+        Wire.Json event = new Wire.Json();
+        event.put("event", "started");
+        event.put("episode", driver.episode());
+        event.put("map", driver.map());
+        // Read back from the engine rather than repeated from what was asked for, because a process that joined a match was not asked and the host's seed is the one being played.
+        event.put("seed", driver.seed(game));
+        event.raw("players", driver.players());
+        // Which player an arena episode's opposing side belongs to. Decided here because it is decided by how the room filled itself, which only this side sees.
+        event.put("sparringSlot", driver.sparringSlot());
+        event.raw("sync", driver.synchronisation(game));
+        sendEpisodeEvent(event.toString());
     }
 
     /**
@@ -392,6 +467,8 @@ public final class RwAgent {
         event.put("team", self == null ? -1 : engine.team(self));
         event.put("timeout", driver.settings().maxSeconds > 0 && seconds >= driver.settings().maxSeconds);
         event.raw("standing", driver.standing(game));
+        // An episode that fell out of step half way through is not one whose result may be used, so the verdict travels with the result rather than having to be asked for afterwards, by which time the next episode has already reset it.
+        event.raw("sync", driver.synchronisation(game));
         sendEpisodeEvent(event.toString());
         log("episode " + driver.episode() + " finished at " + seconds + "s, alive teams " + alive);
     }

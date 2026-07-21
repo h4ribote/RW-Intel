@@ -5,6 +5,8 @@ Writing the whole chain as a script comes first, and it does four jobs at once. 
 The layers are wired to periods, not to each other. Each runs when its period comes round, reads the contract its superior left, and leaves a contract for its subordinate; nothing calls down the chain. That is what makes it possible to freeze four layers and replace the fifth, which is the whole plan for learning, and it is the same seam a human takes over through.
 
 Periods are counted in game time, never in steps or in wall clock. A step carries a different amount of game time at a different speed multiplier, and wall clock would make the policy depend on how busy the machine is.
+
+Anything that is not one of the five layers and still wants to command reaches the game through `outside`. A human at the intervention interface is one such thing and the script intruder that trains against interruption is another, and neither is given a private channel: both amend the action the chain has just built, in the chain's own contract form, after every layer has had its say. That ordering is the ownership rule made mechanical — the last word about a squad belongs to whoever holds it — and it is why a squad taken over stops being written about here without any layer having to know that anyone was taken over from.
 """
 
 from __future__ import annotations
@@ -57,6 +59,8 @@ class Statistics:
     expired: int = 0
     production: int = 0
     squads_formed: int = 0
+    #: Decisions taken by someone other than the chain — a human, or the script intruder. Recorded because the design says the results of squads that were interfered with are to be kept out of the learning signal, and a count is the first thing that says whether there were any.
+    interventions: int = 0
 
     @property
     def fulfilment(self) -> float:
@@ -80,6 +84,8 @@ class ScriptPolicy:
 
         self.home_id: Optional[int] = None
         self.last_strategic_ms: Optional[int] = None
+        #: The region table as it last arrived, carried between the operational frames that bring it so that the layers running in between are not handed a board with no places on it.
+        self.last_regions: List = []
 
         self.economy_orders: Optional[EconomyOrders] = None
         self.operations_orders: Optional[OperationsOrders] = None
@@ -87,6 +93,8 @@ class ScriptPolicy:
         self.shortfalls: List[Shortfall] = []
         self.replacements: List[Replacement] = []
         self.reports: List = []
+        #: Commanders outside the chain, consulted in order once the chain has decided. A human's interface and the script intruder are both of these; nothing here knows which.
+        self.outside: List = []
 
         self.statistics = Statistics()
         #: The status each squad's mission was last seen in, so that reaching a new one is counted once rather than every period.
@@ -97,9 +105,19 @@ class ScriptPolicy:
         self._lost_at: List[int] = []
 
     def decide(self, observation: Observation) -> Optional[bytes]:
+        action, view = self.plan(observation)
+        for commander in self.outside:
+            self.statistics.interventions += len(commander.intervene(action, view, self.squads, observation) or ())
+        if not (action.squads or action.contracts or action.deviations or action.production):
+            return None
+        return encode_action(action)
+
+    def plan(self, observation: Observation):
+        """What the chain alone decides, before anyone outside it has amended anything. Separate from `decide` so that a layer can be swapped for a learnt one, or the action inspected, without the amendment step having to be repeated in each caller."""
         if self.home_id is None:
             self.home_id = home_region_id(observation)
-        view = build_view(observation, self.catalogue, self.home_id)
+        view = build_view(observation, self.catalogue, self.home_id, self.last_regions)
+        self.last_regions = view.regions
         now = observation.game_time_ms
         action = Action()
 
@@ -146,9 +164,7 @@ class ScriptPolicy:
                       len(action.contracts),
                       [self.catalogue.kind(p.type_index).lookup for p in action.production])
 
-        if not (action.squads or action.contracts or action.deviations or action.production):
-            return None
-        return encode_action(action)
+        return action, view
 
     def _count_outcomes(self) -> None:
         """Counts a mission's outcome once, when it first reaches it. A status is a state and not an event, so counting it every period would report the length of a stall rather than the number of them."""

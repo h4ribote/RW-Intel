@@ -50,12 +50,13 @@ final class Commander {
         for (int i = 0; i < squadCount; i++) {
             int squadId = in.getShort() & 0xFFFF;
             int commander = in.get() & 0xFF;
-            in.get();  // padding
+            // Nought is the player this process is; anything else is that player's slot plus one.
+            int owner = (in.get() & 0xFF) - 1;
             int members = in.getShort() & 0xFFFF;
             in.getShort();  // padding
             List<Long> units = new ArrayList<Long>(members);
             for (int j = 0; j < members; j++) units.add(Long.valueOf(in.getInt() & 0xFFFFFFFFL));
-            world.assign(squadId, commander, units);
+            world.assign(squadId, commander, owner, units);
         }
 
         int contractCount = in.getShort() & 0xFFFF;
@@ -64,20 +65,20 @@ final class Commander {
             int task = in.get() & 0xFF;
             int stance = in.get() & 0xFF;
             int region = in.get() & 0xFF;
-            in.get();
+            boolean override = (in.get() & 0xFF) != 0;
             in.getShort();  // padding
             float budget = in.getFloat();
             int deadline = in.getInt();
             int issuedAt = in.getInt();
-            applyContract(game, self, squadId, task, stance, region, budget, deadline, issuedAt);
+            applyContract(game, self, squadId, task, stance, region, budget, deadline, issuedAt, override);
         }
 
         int deviationCount = in.getShort() & 0xFFFF;
         for (int i = 0; i < deviationCount; i++) {
             int squadId = in.getShort() & 0xFFFF;
             int deviation = in.get() & 0xFF;
-            in.get();  // padding
-            applyDeviation(game, self, squadId, deviation);
+            boolean override = (in.get() & 0xFF) != 0;
+            applyDeviation(game, self, squadId, deviation, override);
         }
 
         int productionCount = in.getShort() & 0xFFFF;
@@ -98,12 +99,13 @@ final class Commander {
      * A contract that is the same one again is not re-applied. Re-issuing resets the value the losses are measured from, so a contract re-sent every period would report a squad as having lost nothing however much of it had been destroyed.
      */
     private void applyContract(Object game, Object self, int squadId, int task, int stance,
-                               int region, float budget, int deadline, int issuedAt) throws Exception {
+                               int region, float budget, int deadline, int issuedAt,
+                               boolean override) throws Exception {
         World.Squad squad = world.squads.get(Integer.valueOf(squadId));
         // A contract for a squad that does not exist is not an instruction to invent one. Squads are formed by handing over a roster, and creating one here would put a phantom into a slot the observation reports.
         if (squad == null) return;
-        // A squad a human has taken the operational command of is not ours to re-task. The observation still describes it, because the display the human works from is that observation, but the orders come from them.
-        if ((squad.commander & World.HUMAN_OPERATIONS) != 0) return;
+        // A squad someone else has taken the operational command of is not the operational layer's to re-task, and the override bit is how the one who did take it says so. Refusing both would make taking a squad over a way of silencing it rather than a way of commanding it, which is the opposite of what the intervention interface is for.
+        if ((squad.commander & World.HUMAN_OPERATIONS) != 0 && !override) return;
         boolean changed = squad.task != task || squad.targetRegion != region
                 || squad.stance != stance || squad.issuedAtMs != issuedAt;
         squad.task = task;
@@ -128,12 +130,13 @@ final class Commander {
      *
      * Everything but holding has to be re-issued every period, because each is a reaction to where things are at that moment. Holding is issued once, when the squad returns to its contract, and then left to the engine, which is already advancing it.
      */
-    private void applyDeviation(Object game, Object self, int squadId, int deviation) throws Exception {
+    private void applyDeviation(Object game, Object self, int squadId, int deviation,
+                                boolean override) throws Exception {
         World.Squad squad = world.squads.get(Integer.valueOf(squadId));
         if (squad == null || squad.units.isEmpty()) return;
         // A departure is a departure from a contract, so a squad that has never been given one is left alone. Without this a squad nobody has tasked reads its target as region zero and is marched to whatever happens to be there, which on a map between two players is the other player's base.
         if (squad.issuedAtMs == 0) return;
-        if ((squad.commander & World.HUMAN_TACTICS) != 0) return;
+        if ((squad.commander & World.HUMAN_TACTICS) != 0 && !override) return;
         World.Region target = world.regionAt(squad.targetRegion);
         if (target == null) return;
 
@@ -146,8 +149,19 @@ final class Commander {
         if (deviation != HOLD) squad.lastDeviation = deviation;
     }
 
+    /**
+     * The player whose name an order to this squad goes out in.
+     *
+     * Ordinarily that is this process's own player and the question does not arise. It arises in a constructed engagement, where the sandbox flag lets one process drive both sides: a command is taken out of the pool for a player, and one taken out for the wrong player addresses units that are not that player's.
+     */
+    private Object issuer(Object game, Object self, World.Squad squad) throws Exception {
+        if (squad.owner < 0) return self;
+        Object player = engine.playerAt(squad.owner);
+        return player == null ? self : player;
+    }
+
     private void advance(Object game, Object self, World.Squad squad, World.Region target, int stance) throws Exception {
-        Object command = engine.command(game, self);
+        Object command = engine.command(game, issuer(game, self, squad));
         if (!addAll(command, squad)) {
             squad.lastDeviation = -1;
             return;
@@ -157,13 +171,22 @@ final class Commander {
         squad.lastDeviation = HOLD;
     }
 
+    /**
+     * Whether a unit is on the other side from this squad.
+     *
+     * Hostility is recorded from this process's own point of view, which is the only point of view an ordinary match has. A constructed engagement drives both sides, so the squad standing in for the opponent has to read the flag the other way round or it would concentrate its fire on its own side.
+     */
+    private static boolean opposes(World.Squad squad, World.Seen seen) {
+        return seen.hostile == (squad.owner < 0);
+    }
+
     /** Every unit onto the weakest enemy within reach, which removes an enemy from the fight sooner than spreading the damage. Reach is the squad's own weapon range, not a fixed distance: an order to attack something the squad has to walk to is an order to break formation. */
     private void focus(Object game, Object self, World.Squad squad) throws Exception {
         float reach = reachOf(squad);
         World.Seen best = null;
         float bestHealth = Float.MAX_VALUE;
         for (World.Seen seen : world.visible) {
-            if (!seen.hostile) continue;
+            if (!opposes(squad, seen)) continue;
             float dx = seen.x - squad.x;
             float dy = seen.y - squad.y;
             if (dx * dx + dy * dy > reach * reach) continue;
@@ -173,7 +196,7 @@ final class Commander {
             }
         }
         if (best == null || best.handle == null) return;
-        Object command = engine.command(game, self);
+        Object command = engine.command(game, issuer(game, self, squad));
         if (!addAll(command, squad)) return;
         engine.setStance(command, squad.stance);
         engine.attack(command, best.handle);
@@ -187,7 +210,7 @@ final class Commander {
             Object unit = world.handle(id.longValue());
             if (unit == null || !engine.armedClass.isInstance(unit)) continue;
             double angle = 2 * Math.PI * index++ / Math.max(1, members);
-            Object command = engine.command(game, self);
+            Object command = engine.command(game, issuer(game, self, squad));
             engine.addUnit(command, unit);
             engine.moveTo(command, squad.x + (float) (Math.cos(angle) * SPREAD),
                     squad.y + (float) (Math.sin(angle) * SPREAD));
@@ -205,7 +228,7 @@ final class Commander {
             dy = 0f;
             length = 1f;
         }
-        Object command = engine.command(game, self);
+        Object command = engine.command(game, issuer(game, self, squad));
         if (!addAll(command, squad)) return;
         engine.setStance(command, stance);
         engine.moveTo(command, squad.x + dx / length * distance, squad.y + dy / length * distance);
@@ -241,7 +264,7 @@ final class Commander {
     private float enemyReachNear(World.Squad squad) {
         float reach = 0f;
         for (World.Seen seen : world.visible) {
-            if (!seen.hostile || seen.handle == null) continue;
+            if (!opposes(squad, seen) || seen.handle == null) continue;
             float dx = seen.x - squad.x;
             float dy = seen.y - squad.y;
             if (dx * dx + dy * dy > FALL_BACK * FALL_BACK) continue;

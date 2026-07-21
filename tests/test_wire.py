@@ -49,8 +49,8 @@ from rwintel.wire.observation import (
 )
 
 
-def test_protocol_version_is_two():
-    assert PROTOCOL_VERSION == 2
+def test_protocol_version_is_three():
+    assert PROTOCOL_VERSION == 3
 
 
 def test_block_sizes_match_the_agent():
@@ -91,8 +91,8 @@ def test_action_round_trip():
     )
     restored = decode_action(encode_action(action))
 
-    assert [(s.squad, s.commander, s.units) for s in restored.squads] == [
-        (0, Commander.MACHINE, [7, 9, 11]), (1, Commander.OPERATIONS, [])]
+    assert [(s.squad, s.commander, s.units, s.owner) for s in restored.squads] == [
+        (0, Commander.MACHINE, [7, 9, 11], -1), (1, Commander.OPERATIONS, [], -1)]
     contract = restored.contracts[0]
     assert (contract.squad, contract.task, contract.stance) == (0, Task.ATTACK, Stance.AGGRESSIVE)
     assert contract.target_region == 5
@@ -109,6 +109,29 @@ def test_action_round_trip():
 
 def test_empty_action_round_trip():
     assert decode_action(encode_action(Action())) == Action()
+
+
+def test_an_outside_commanders_decisions_are_marked_as_such():
+    """The one thing on the wire that separates a decision by whoever holds a squad from a decision by the layer whose job it ordinarily is. Without it the game side, which refuses the layer's decisions about a squad someone has taken over, would refuse the holder's too, and taking a squad over would silence it rather than transfer it."""
+    action = Action(
+        contracts=[Contract(squad=2, task=Task.DEFEND, target_region=3, override=True),
+                   Contract(squad=3, task=Task.RAID, target_region=4)],
+        deviations=[SquadDeviation(squad=2, deviation=Deviation.SPREAD, override=True),
+                    SquadDeviation(squad=3, deviation=Deviation.FOCUS)],
+    )
+    restored = decode_action(encode_action(action))
+    assert [row.override for row in restored.contracts] == [True, False]
+    assert [row.override for row in restored.deviations] == [True, False]
+    assert restored == action
+
+
+def test_a_squad_may_be_owned_by_another_player():
+    """How one process drives both sides of a constructed engagement. Nought on the wire is this process's own player, so the ordinary case never has to say anything, and a slot travels as itself plus one."""
+    action = Action(squads=[SquadAssignment(squad=0, units=[1], owner=-1),
+                            SquadAssignment(squad=1, units=[2], owner=0),
+                            SquadAssignment(squad=2, units=[3], owner=4)])
+    restored = decode_action(encode_action(action))
+    assert [row.owner for row in restored.squads] == [-1, 0, 4]
 
 
 _COUNT = struct.Struct("<H")

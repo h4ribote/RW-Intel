@@ -39,20 +39,18 @@ class WorldView:
     #: Ours, able to fight or build, and in no squad. This is what the organisation layer forms and reinforces from.
     unassigned: List[Sighting] = field(default_factory=list)
     home: Optional[RegionState] = None
-
-    @property
-    def regions(self) -> List[RegionState]:
-        return self.observation.regions
+    #: The region table, which is the last one that arrived rather than necessarily this frame's. Regions ride the operational frame and the tactical layer runs ten times as often, so a view built on a frame without one would report a board with no places on it — and a policy reading that would see every distance and every balance of force fall to nothing every period and come back two hundred milliseconds later. What is a period out of date about a region is its force totals, which move at the rate an army walks.
+    regions: List[RegionState] = field(default_factory=list)
 
     def region(self, region_id: int) -> Optional[RegionState]:
-        return next((r for r in self.observation.regions if r.id == region_id), None)
+        return next((r for r in self.regions if r.id == region_id), None)
 
     def from_home(self) -> List[RegionState]:
         """Regions ordered outward from our own base, which is the order every layer names places in.
 
         Ordering egocentrically rather than by the map's own numbering is what lets a policy read a map it was not written against: the first is always home and the last always the far side, whatever the map. The wire keeps the map's numbering because home is not known until something has been built, so the translation happens here.
         """
-        return sorted(self.observation.regions, key=lambda r: (r.distance_from_home, r.id))
+        return sorted(self.regions, key=lambda r: (r.distance_from_home, r.id))
 
     def value_of(self, units: List[int]) -> float:
         by_id = {s.unit.id: s for s in self.ours}
@@ -69,8 +67,10 @@ class WorldView:
         return found
 
 
-def build(observation: Observation, catalogue: Catalogue, home_id: Optional[int]) -> WorldView:
-    view = WorldView(observation=observation, catalogue=catalogue)
+def build(observation: Observation, catalogue: Catalogue, home_id: Optional[int],
+          regions: Optional[List[RegionState]] = None) -> WorldView:
+    view = WorldView(observation=observation, catalogue=catalogue,
+                     regions=list(observation.regions) if observation.regions else list(regions or ()))
     for unit in observation.unit_states:
         kind = catalogue.kind(unit.type_index)
         sighting = Sighting(unit=unit, kind=kind, role=catalogue.role(unit.type_index))
@@ -90,8 +90,8 @@ def build(observation: Observation, catalogue: Catalogue, home_id: Optional[int]
 
     if home_id is not None:
         view.home = view.region(home_id)
-    if view.home is None and observation.regions:
-        view.home = min(observation.regions, key=lambda r: r.distance_from_home)
+    if view.home is None and view.regions:
+        view.home = min(view.regions, key=lambda r: r.distance_from_home)
     return view
 
 
