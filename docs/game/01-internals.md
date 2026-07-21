@@ -113,6 +113,34 @@ delta = 実経過時間 * bt * H
 
 `game.i.k` は外部から安全にゲームへ介入するための唯一の入口である。シミュレーション本体の直前に、毎フレーム、中身が空になるまで `Runnable` が取り出されて実行される。ゲームへの介入がここを通らなければならない理由は二つある。コマンドのプールが同期化されていないこと([04-actions.md](04-actions.md))と、マップの読み込みが OpenGL コンテキストを要求すること([05-match-control.md](05-match-control.md))である。
 
+### 自分自身を再投入する処理はゲームを止める
+
+**「空になるまで」は文字どおりである。** 実行された `Runnable` が自分自身をこのキューへ入れ直すと、同じフレームの排出でそれがまた取り出される。排出は終わらず、シミュレーションにも描画にも到達しない。
+
+毎フレームのフックが欲しくてこれを試したところ、**ゲームが完全に停止した**。ログの出力もそこで途切れる。毎フレームの処理が必要な場合は、別スレッドから 1 個ずつ投入し、実行が終わってから次を投入する。
+
+### 早すぎるクラス参照はゲームごと壊す
+
+Java はクラスを最初に参照した時点で静的初期化子を走らせる。**プレイヤークラス `game.n` の静的初期化子はユニットを構築する**ため、ゲーム自身がそこへ到達する前に外部から `Class.forName("com.corrodinggames.rts.game.n")` を呼ぶと、その中で `NullPointerException` になる。
+
+```
+Caused by: java.lang.NullPointerException
+	at com.corrodinggames.rts.game.units.am.<init>(SourceFile:965)
+	...
+	at com.corrodinggames.rts.game.n.<clinit>(SourceFile:750)
+```
+
+問題は失敗そのものではなく、**静的初期化子が失敗したクラスはプロセスが終わるまで壊れたままになる**ことである。以降そのクラスへ触れるものはすべて `NoClassDefFoundError` を受け取り、ゲーム本体のループがこれで落ちる。
+
+```
+java.lang.NoClassDefFoundError: Could not initialize class com.corrodinggames.rts.game.n
+	at com.corrodinggames.rts.game.i.a(SourceFile:627)
+	...
+	at com.corrodinggames.rts.java.b.gameLoop(SourceFile:146)
+```
+
+**したがって外部からクラスを解決する前に、ゲームループが動き出すのを待つ必要がある。** 待つ間に触ってよいのは `gameFramework.l` だけである。フレーム数 `l.bx` はそのクラスだけで読めるので、これが一定数を超えるまで待てばよい。`agent/RwAgent.java` は 300 フレームを閾値にしている。
+
 ### シミュレーションの対象
 
 | クラス | 役割 | 確認 |

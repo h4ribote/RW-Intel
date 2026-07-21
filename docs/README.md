@@ -8,6 +8,8 @@ docs/
   project/   RW-Intel の方針、実行基盤、モデル設計
 ```
 
+実装が対応する文書は次のとおりである。`agent/` と `rwintel/wire` が [project/05-interface.md](project/05-interface.md)、`rwintel/data` が [game/06-content.md](game/06-content.md)、`rwintel/control/policy.py` が [project/06-script-policy.md](project/06-script-policy.md) である。
+
 ## `game/` — ゲームの仕様と内部構造
 
 Rusted Warfare 1.15 build #28 を逆アセンブルし、実行時に検証した結果である。クラス名とフィールド名は難読化されているため、各項目には **実行時確認 / 逆アセンブル確認 / 推定** の別を付けてある。
@@ -29,8 +31,8 @@ Rusted Warfare 1.15 build #28 を逆アセンブルし、実行時に検証し�
 | [02-runtime.md](project/02-runtime.md) | ゲームの複製、並列実行の構成、計測エージェント |
 | [03-throughput.md](project/03-throughput.md) | 速度と並列数の実測値。学習のサンプル収集予算 |
 | [04-model-design.md](project/04-model-design.md) | 機械学習モデルの骨格。層の構成、制約、報酬、人間の介入。**未実装** |
-| [05-interface.md](project/05-interface.md) | 観測と行動の外部化。通信、形式、周期、領域の切り出し。**未実装** |
-| [06-script-policy.md](project/06-script-policy.md) | 契約の項目と値域、部隊管理、スクリプト方策。**未実装** |
+| [05-interface.md](project/05-interface.md) | 観測と行動の外部化。通信、形式、周期、領域の切り出し。**シナリオ構築を除き実装済み** |
+| [06-script-policy.md](project/06-script-policy.md) | 契約の項目と値域、部隊管理、スクリプト方策。**最初の一本のみ実装** |
 | [07-evaluation.md](project/07-evaluation.md) | 方策の比較手順と必要なエピソード数。**未実装** |
 
 ## 読む順序

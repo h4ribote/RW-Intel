@@ -16,9 +16,9 @@ import os
 import statistics
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rwdata import AssetPaths, read_unit_catalog
+from rwintel.data import AssetPaths, read_unit_catalog
 
 
 def correlation(xs, ys) -> float:

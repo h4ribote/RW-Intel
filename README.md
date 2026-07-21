@@ -4,7 +4,7 @@ Rusted Warfare を機械学習でプレイするシステム。生産、アッ�
 
 ## 現状
 
-ゲームへの接続方式を決定し、ゲーム内部の解析と性能実測を終え、**モデルの設計を実装に着手できる粒度まで決めた段階**である。**まだコードとして存在するのは計測用の道具だけであり、学習モデルも制御プロセスも実装されていない。**
+ゲームへの接続方式を決定し、ゲーム内部の解析と性能実測を終え、モデルの設計を決め、**観測と行動を外部プロセスへ出す経路を実装した段階**である。制御プロセスからゲームを動かして試合を回し、結果を採点するところまで動く。**学習モデルはまだ存在せず、方策は手書きの最初の一本だけである。**
 
 決定した方式は、ゲーム本体のプロセスに `-javaagent` で入り込み、エンジンの内部状態を直接読んでコマンドを直接発行するというものである。ネットワークプロトコルを解析して独自クライアントを作る案は、マルチプレイが決定論的ロックステップであり状態が一切通信されないため、シミュレーションの完全な再実装を伴うことになり退けた。判断の詳細は [docs/project/01-approach.md](docs/project/01-approach.md) にある。
 
@@ -33,7 +33,10 @@ Rusted Warfare を機械学習でプレイするシステム。生産、アッ�
 
 ```
 docs/     解析結果と設計
+agent/    ゲームプロセスに入る javaagent。観測と行動と進行制御を運ぶ
+rwintel/  制御プロセス。方策、通信形式、マップとユニット定義の読み取り
 tools/    計測と実行のための道具
+tests/    通信形式の突き合わせ
 local/    ゲームの複製と実行時の作業領域(バージョン管理対象外)
 ```
 
@@ -66,4 +69,14 @@ python .\tools\Show-MapRegions.py
 python .\tools\Show-UnitCatalog.py
 ```
 
-詳細は [docs/project/02-runtime.md](docs/project/02-runtime.md) にある。
+## 動かす
+
+制御プロセスを先に起動し、そこへゲームを接続する。エージェントは接続できるまで待つ。
+
+```powershell
+.\agent\build.ps1
+python -m rwintel.control --instances 2 --episodes 2 --map Lake --max-seconds 300
+.\tools\Start-RwAgents.ps1 -Count 2 -Speed 10
+```
+
+エピソードごとに勝敗と、決着しなかった場合の軍事価値差が報告される。詳細は [docs/project/05-interface.md](docs/project/05-interface.md) と [docs/project/02-runtime.md](docs/project/02-runtime.md) にある。

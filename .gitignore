@@ -14,3 +14,7 @@ preferences.ini
 /replays/
 /cache/
 __pycache__/
+
+# Build output of agent
+agent/classes/
+agent/*.jar

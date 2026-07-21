@@ -1,0 +1,2 @@
+Premain-Class: RwAgent
+Can-Retransform-Classes: false

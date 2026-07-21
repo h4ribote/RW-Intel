@@ -16,10 +16,10 @@ import os
 import statistics
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rwdata import AssetPaths, decompose, list_skirmish_maps, read_map
-from rwdata.regions import DEFAULT_MERGE_DISTANCE
+from rwintel.data import AssetPaths, decompose, list_skirmish_maps, read_map
+from rwintel.data.regions import DEFAULT_MERGE_DISTANCE
 
 
 def main() -> int:

@@ -51,6 +51,8 @@ java.lang.UnsatisfiedLinkError: rocketConnector64.dll: Can't find dependent libr
 | 道具 | 用途 |
 | --- | --- |
 | `tools/New-RwInstance.ps1` | インスタンス用ディレクトリを作成する |
+| `agent/build.ps1` | 制御エージェントをビルドする |
+| `tools/Start-RwAgents.ps1` | 制御プロセスへ接続するインスタンスを起動する |
 | `tools/probe-agent/build.ps1` | 計測エージェントをビルドする |
 | `tools/Start-RwProbe.ps1` | 指定数のインスタンスを起動し、速度を集計する |
 | `tools/Measure-MatchOutcomes.ps1` | 同一の対戦を多数のエピソード回し、勝敗と長さの分布を報告する |
@@ -63,7 +65,30 @@ java.lang.UnsatisfiedLinkError: rocketConnector64.dll: Can't find dependent libr
 .\tools\Start-RwProbe.ps1 -Count 8 -Speed 10 -Seconds 90
 ```
 
-Python の二つはゲームを起動せずに動く。読むのはエンジンが読むのと同じファイルであり、追加の依存はない。共通の読み取りは `tools/rwdata` にある。
+Python の二つはゲームを起動せずに動く。読むのはエンジンが読むのと同じファイルであり、追加の依存はない。共通の読み取りは `rwintel/data` にある。
+
+## 二つのエージェント
+
+**`agent/` が本体、`tools/probe-agent/` が計測用**である。役割が違うので統合しない。
+
+| | `agent/` | `tools/probe-agent/` |
+| --- | --- | --- |
+| 目的 | 制御プロセスの指示で観測と行動を運ぶ | ゲームへの介入が成立することを確かめる |
+| 相手 | 制御プロセス | ログ |
+| 使う場面 | 学習と評価 | 解析、性能計測、文書に載せた実測の再現 |
+
+計測エージェントは文書中の実測値を再現する手段でもあるため、本体が育っても残す。
+
+## 制御プロセスとの起動順序
+
+**制御プロセスを先に起動する。** エージェントは接続できるまで待ち、接続してから初めてエピソードが始まる。試合の設定は制御プロセス側にあり、エージェントは自分では何も始めない。
+
+```powershell
+python -m rwintel.control --instances 2 --episodes 2 --map Lake --max-seconds 300
+.\tools\Start-RwAgents.ps1 -Count 2 -Speed 10
+```
+
+制御プロセスは待ち受けポートを排他で確保する。**同じポートで二重に起動すると、Windows では後から起動した側も待ち受けに成功してしまい**、どちらが接続を受け取るかが不定になる。古いプロセスが生き残ったまま新しいコードを試していたことに気づかない、という形で現れる。
 
 ## 計測エージェント
 
