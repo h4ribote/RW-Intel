@@ -95,6 +95,11 @@ final class Engine {
     private final Field playerSlotCount; // n.c
     private final Method playerReset;    // n.F(), the static slot reset
 
+    /** game.a.a, the class the room creates a computer player as. The thinking lives here and not on the ordinary player, which is why an ordinary player cannot be turned into one. */
+    private final Class<?> aiPlayerClass;
+    /** a.a.aX, read at the top of the computer player's own update and returning immediately when it is set. */
+    private final Field aiHalted;
+
     // ---- type methods --------------------------------------------------------------------
 
     private final Method typeName;       // as.v()
@@ -171,6 +176,7 @@ final class Engine {
         armedClass = Class.forName("com.corrodinggames.rts.game.units.y");
         objectClass = Class.forName("com.corrodinggames.rts.gameFramework.w");
         playerClass = Class.forName("com.corrodinggames.rts.game.n");
+        aiPlayerClass = Class.forName("com.corrodinggames.rts.game.a.a");
         typeInterface = Class.forName("com.corrodinggames.rts.game.units.as");
         typeRegistry = Class.forName("com.corrodinggames.rts.game.units.ar");
         stanceClass = Class.forName("com.corrodinggames.rts.game.units.a");
@@ -182,6 +188,8 @@ final class Engine {
         definedTypeClass = Class.forName("com.corrodinggames.rts.game.units.custom.l");
         logicBooleanClass = Class.forName(
                 "com.corrodinggames.rts.game.units.custom.logicBooleans.LogicBoolean");
+
+        aiHalted = field(aiPlayerClass, "aX");
 
         engineSingleton = engineClass.getMethod("B");
         frameCounter = field(engineClass, "bx");
@@ -505,6 +513,19 @@ final class Engine {
     int slot(Object player) throws Exception { return playerSlot.getInt(player); }
     int team(Object player) throws Exception { return playerTeam.getInt(player); }
     void setTeam(Object player, int team) throws Exception { playerTeam.setInt(player, team); }
+
+    /**
+     * Stops a computer player from thinking, and says whether there was one to stop.
+     *
+     * This is the one place anything outside the command route is written, and it is written to the deciding half of a player rather than to the simulation: the flag is read at the top of the computer player's own update and makes it return without doing anything, so no unit, no health and no credit is touched by it. Nothing it would have decided is lost either, because a player that never decides never issues a command.
+     *
+     * It is safe only where there is no second process to disagree with. A lockstep peer runs the same computer players over the same frames and reaches the same commands, so silencing one on one side and not the other is exactly the divergence the whole design is arranged to avoid. The caller is therefore expected to use this only on a board it alone is simulating.
+     */
+    boolean haltAi(Object player) throws Exception {
+        if (player == null || !aiPlayerClass.isInstance(player)) return false;
+        aiHalted.setBoolean(player, true);
+        return true;
+    }
     String name(Object player) throws Exception { return (String) playerName.get(player); }
     boolean isAi(Object player) throws Exception { return playerIsAi.getBoolean(player); }
     int aiLevel(Object player) throws Exception { return playerAiLevel.getInt(player); }

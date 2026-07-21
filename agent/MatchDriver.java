@@ -219,11 +219,13 @@ final class MatchDriver {
     }
 
     /**
-     * Leaves an arena episode with one opponent that owns nothing and can therefore do nothing.
+     * Leaves an arena episode with one opponent that does not think, so that both sides of a constructed engagement are driven from the control process and by nothing else.
      *
-     * A board on which engagements are constructed has to be a board on which nothing else is happening, and the room does not offer one. The starting-unit setting was measured to have no effect through this start sequence: every value tried produced a command centre and a builder for each player who had a starting position, so an empty board cannot simply be asked for. What can be arranged is that the only other player left in the match is one the map has no starting position for. The room fills every free slot with an AI whatever was asked for, and on a map for two, the slots past the second are created and wiped out immediately for want of anywhere to appear; such a player has no base, no income and nothing to think about, which is exactly the sparring partner an arena wants. Everyone else, the player with the second base included, goes to the spectators so that no second match is played in the background.
+     * A board on which engagements are constructed has to be a board on which nothing else is happening, and the room does not offer one. Two ways of asking for it were tried and neither works. The starting-unit setting has no effect through this start sequence: every value produced a command centre and a builder for each player with a starting position. Handing the opposing side to a slot the map has nowhere to put does produce a player with no base, and it also ends the match on the first step, because a player who never appeared is read as beaten and the last team standing wins; measured, the episode then never advances at all.
      *
-     * The last slot is chosen rather than a slot searched for by whether it has a starting position, because the engine offers no way to ask that question directly and the answer is only interesting on the maps for two that the arena runs on, where the last slot never has one.
+     * What is left is to keep the ordinary second player and take away its judgement rather than its base. Its computer player is halted, which stops it building, expanding and forming attack groups, so the units the arena spawns for it answer to the control process alone. Its command centre and builder stay on the board and do nothing; engagements are built away from whatever is standing, so they are not in any fight. Everyone else goes to the spectators, so that no second match is played in the background.
+     *
+     * Without the halt the opposing side of every engagement is the tactical layer plus a second opinion, and the second opinion also builds an economy: measured over ten game minutes, the opposing player reached an income of two hundred a second and a hundred units worth seventy thousand credits, against a side that was only ever given what the arena spawned for it. Every number the arena produced under those conditions was a number about a match nobody meant to play.
      */
     private void chooseSparringPartner() throws Exception {
         int slots = engine.slotCount();
@@ -235,16 +237,21 @@ final class MatchDriver {
             partner = i;
             break;
         }
+        int halted = 0;
         for (int i = 0; i < slots; i++) {
             Object player = engine.playerAt(i);
-            if (player == null || player == local || i == partner) continue;
-            engine.setTeam(player, SPECTATOR);
+            if (player == null || player == local) continue;
+            // Every computer player in the room is stopped from thinking, the sparring partner included. A partner with nowhere to appear has no base to build from, but it is still a computer player, and one that thinks will form its own attack groups out of the units the arena spawns for it and give them orders of its own. The opposing side of a constructed engagement has to be driven by the layer under study and by nothing else, or what is measured is that layer against itself plus a second opinion.
+            if (engine.haltAi(player)) halted++;
+            if (i != partner) engine.setTeam(player, SPECTATOR);
         }
         if (partner >= 0 && local != null && engine.team(engine.playerAt(partner)) == engine.team(local)) {
             engine.setTeam(engine.playerAt(partner), engine.team(local) + 1);
         }
         sparringSlot = partner;
+        RwAgent.log("arena: sparring slot " + partner + " of " + slots + " slot(s), " + halted + " computer player(s) halted");
     }
+
 
     /** The slot an arena episode's opposing side is spawned for, or -1 outside an arena episode. The control process is told, because it is what decides which player each constructed unit belongs to. */
     int sparringSlot() {
