@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from typing import Optional
 
 from ..control.intruder import Intruder
@@ -32,6 +33,9 @@ from .rollout import Rollout
 from .train import Optimiser, Trainer
 
 log = logging.getLogger(__name__)
+
+#: When the process started, so that a run can report what it produced against the wall clock it took, which is the only thing an optimisation of the arena can be judged against.
+_started_at = time.time()
 
 #: Game seconds an arena episode runs for by default. Long, because the cost the arena exists to avoid is the cost of starting a match, and one arena episode holds dozens of engagements.
 ARENA_SECONDS = 1800
@@ -122,8 +126,10 @@ def train_tactics(arguments) -> int:
                              session.instance)
 
     def arm(session):
-        return Arena(session, tactics=learnt, seed=arguments.seed + session.instance,
-                     opponent=None if arguments.script_opponent else learnt)
+        # Both sides script is how the arena itself is measured rather than a policy: it is the baseline a learnt layer has to beat, and it is the only setting in which what the arena produces says something about the arena rather than about whatever the policy currently happens to do.
+        ours = None if arguments.script else learnt
+        return Arena(session, tactics=ours, seed=arguments.seed + session.instance,
+                     opponent=None if (arguments.script or arguments.script_opponent) else learnt)
 
     journal = Journal(arguments.record or default_path("tactics"))
     try:
@@ -135,13 +141,33 @@ def train_tactics(arguments) -> int:
     _save(net, arguments.save)
 
     # Counted from the episode records rather than from the policies, which are put down as each episode ends: what the arena did is a fact about the episodes it did it in, and the record is where that is kept.
-    fights = sum(int(record.statistics.get("engagements", 0))
-                 for session in sessions for record in session.records)
-    log.info("%d engagement(s) over %d instance(s); batched inference averaged %.1f per call",
-             fights, len(sessions), batcher.batch_size)
+    _report_arena(sessions, batcher)
     if report is not None:
         log.info("last update: %s", report.as_dict())
     return 0
+
+
+def _report_arena(sessions, batcher) -> None:
+    """What an arena run produced, in the terms it is optimised against: how much of the time went into fights that happened, how those fights ended, and how much the inference actually batched."""
+    records = [record for session in sessions for record in session.records]
+    if not records:
+        return
+    total = {key: sum(int(r.statistics.get(key, 0)) for r in records)
+             for key in ("engagements", "stillborn", "fought", "won", "lost", "drawn", "decisions")}
+    seconds = sum(r.seconds for r in records)
+    wall = max(1.0, sum(r.wall_seconds for r in records) / max(1, len(sessions)))
+    log.info("%d engagement(s) built, %d never appeared (%.0f%% wasted), %d fought: %d won %d lost %d drawn (%.0f%% drawn)",
+             total["engagements"], total["stillborn"],
+             100.0 * total["stillborn"] / max(1, total["engagements"]), total["fought"],
+             total["won"], total["lost"], total["drawn"],
+             100.0 * total["drawn"] / max(1, total["fought"]))
+    speeds = [r.speed for r in records if r.speed > 0]
+    per_instance = sum(speeds) / len(speeds) if speeds else 0.0
+    log.info("%d game second(s) over %d episode(s), %.1fx per instance and %.0fx over %d of them: %.1f fight(s) and %d decision(s) per game minute, %.0f decision(s) per wall second",
+             seconds, len(records), per_instance, per_instance * len(sessions), len(sessions),
+             60.0 * total["fought"] / max(1, seconds), int(60.0 * total["decisions"] / max(1, seconds)),
+             total["decisions"] / max(1.0, wall))
+    log.info("batched inference averaged %.1f per call over %d call(s)", batcher.batch_size, batcher.calls)
 
 
 # ---- the operational run ------------------------------------------------------------------
@@ -264,6 +290,8 @@ def main(argv=None) -> int:
     parser.add_argument("--batch", type=int, default=1024, help="steps that make an update")
     parser.add_argument("--intruder", action="store_true",
                         help="inject the script intruder, which the design requires for the operational layer")
+    parser.add_argument("--script", action="store_true",
+                        help="run the handwritten layer on both sides, which is the baseline and the way to measure the arena itself")
     parser.add_argument("--script-opponent", action="store_true",
                         help="fight the script tactical layer rather than the policy being trained")
     parser.add_argument("--record", default=None, help="where decisions or episodes are written")

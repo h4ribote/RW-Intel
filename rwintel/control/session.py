@@ -85,6 +85,8 @@ class EpisodeRecord:
     statistics: dict = field(default_factory=dict)
     #: What anyone outside the chain did to this episode, and to which squads. Kept beside the statistics rather than inside them because it is not a measure of the run: it is what a later learning run reads to decide which squads' results it must throw away, since a squad that was taken over or emptied half way through its mission was not the chain's to be judged on.
     interference: dict = field(default_factory=dict)
+    #: Wall clock seconds the episode took, against which its game seconds give the speed actually achieved. The multiplier asked for is a request; what an instance sustains depends on how much is on the board and how many other instances are sharing the machine, and only this says which.
+    wall_seconds: float = 0.0
     #: What the engine said about whether the processes sharing this match were still simulating the same one. Empty for the ordinary case of one process to a match, where the question does not arise; where it does, an episode that drifted apart part way through describes nothing and its numbers must not be used.
     synchronisation: dict = field(default_factory=dict)
 
@@ -95,7 +97,13 @@ class EpisodeRecord:
             "timeout": self.timeout, "team": self.team, "standing": self.standing,
             "settings": self.settings, "statistics": self.statistics,
             "interference": self.interference, "synchronisation": self.synchronisation,
+            "wall_seconds": round(self.wall_seconds, 1),
         }
+
+    @property
+    def speed(self) -> float:
+        """The multiplier the episode actually ran at, which is what an instance sustained rather than what was asked of it."""
+        return self.seconds / self.wall_seconds if self.wall_seconds > 0 else 0.0
 
     @property
     def value_edge(self) -> float:
@@ -148,6 +156,8 @@ class Session:
         #: The player list the game reported when the episode began, and which of those players an arena episode's opposing side belongs to.
         self.players: List[dict] = []
         self.sparring_slot = -1
+        #: When the episode now running began, in wall clock, so that what it cost can be told from what it simulated.
+        self.episode_started_at = time.time()
         self.policy = None
         #: How this instance takes part in a match shared with another process, or None for the ordinary case of one process to a match.
         self.pairing = None
@@ -293,6 +303,7 @@ class Session:
             statistics=statistics,
             synchronisation=dict(payload.get("sync", {})),
             interference=self._interference(),
+            wall_seconds=max(0.0, time.time() - self.episode_started_at),
         )
         self.records.append(record)
         if self.journal is not None:
@@ -319,6 +330,7 @@ class Session:
         self.outside = []
 
     def _on_started(self, payload: dict) -> None:
+        self.episode_started_at = time.time()
         self._load_map(str(payload.get("map", "")))
         self.players = list(payload.get("players", []))
         # Which player the opposing side of a constructed engagement is spawned for. Settled game side, because it depends on how the room filled its free slots, which is not visible from here.

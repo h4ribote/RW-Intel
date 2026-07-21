@@ -17,7 +17,6 @@ from rwintel.control.policy.catalogue import Catalogue
 from rwintel.control.policy.contracts import Doctrine, SquadRecord, TaskContract
 from rwintel.control.policy.view import build as build_view
 from rwintel.control.session import UnitType
-from rwintel.learn.arena import mirror
 from rwintel.learn.encoding import (
     OPERATIONAL_SIZE,
     REGION_FEATURES,
@@ -303,17 +302,22 @@ def test_a_trajectory_that_is_still_running_is_left_alone_by_a_drain():
 
 # ---- driving both sides of a fight ---------------------------------------------------------
 
-def test_the_mirrored_board_exchanges_the_sides_and_nothing_else():
-    """How one process fights both sides of a constructed engagement: the opposing tactical layer reads the same frame with hostility reversed, and everything else a tactical layer looks at is symmetric already."""
+def test_the_board_read_from_the_other_side_exchanges_the_sides_and_nothing_else():
+    """How one process fights both sides of a constructed engagement: the opposing tactical layer reads the same frame with the sides the other way round, and everything else a tactical layer looks at is symmetric already.
+
+    Read rather than copied. Copying every unit with its hostility flipped is the obvious way and it measured three to five times the cost of building the whole view, twice a period, which made it the most expensive thing in a frame.
+    """
     observation = _observation(
         units=[_unit(1, 10.0, 10.0), _unit(2, 20.0, 20.0, hostile=1)],
         regions=[_region(0, ours=100.0, theirs=900.0)])
-    flipped = mirror(observation)
+    ours = build_view(observation, _CATALOGUE, None)
+    theirs = build_view(observation, _CATALOGUE, None, invert=True)
 
-    assert [unit.hostile for unit in flipped.unit_states] == [1, 0]
-    assert [(unit.id, unit.x) for unit in flipped.unit_states] == [(1, 10.0), (2, 20.0)]
-    assert (flipped.regions[0].our_value, flipped.regions[0].enemy_value) == (900.0, 100.0)
-    # The original is untouched, because both sides are decided from it in the same period.
+    assert [s.unit.id for s in ours.ours] == [1] and [s.unit.id for s in ours.enemies] == [2]
+    assert [s.unit.id for s in theirs.ours] == [2] and [s.unit.id for s in theirs.enemies] == [1]
+    assert (theirs.regions[0].our_value, theirs.regions[0].enemy_value) == (900.0, 100.0)
+    # Nothing is copied, so the two views are of the very same units and the observation is untouched.
+    assert ours.ours[0].unit is theirs.enemies[0].unit
     assert [unit.hostile for unit in observation.unit_states] == [0, 1]
 
 

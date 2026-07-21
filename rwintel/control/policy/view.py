@@ -6,7 +6,7 @@ Every layer reads the same observation but wants a different cut of it, and each
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional
 
 from ...wire import NO_SQUAD, Observation, RegionState, UnitState
@@ -68,13 +68,21 @@ class WorldView:
 
 
 def build(observation: Observation, catalogue: Catalogue, home_id: Optional[int],
-          regions: Optional[List[RegionState]] = None) -> WorldView:
-    view = WorldView(observation=observation, catalogue=catalogue,
-                     regions=list(observation.regions) if observation.regions else list(regions or ()))
+          regions: Optional[List[RegionState]] = None, invert: bool = False) -> WorldView:
+    """The board sorted for the layers, optionally from the other side's point of view.
+
+    Inverting is what lets one process drive both sides of a constructed engagement. It is a parameter here rather than a transformation of the observation because the obvious way to write it — copy every unit with its hostility flag flipped — is by a wide margin the most expensive thing that happens in a frame: it allocates a dataclass per unit twice a period, which measured at three to five times the cost of building the whole view. Reading the flag the other way round costs nothing and produces the same answer.
+    """
+    rows = list(observation.regions) if observation.regions else list(regions or ())
+    if invert:
+        rows = [replace(region, our_value=region.enemy_value, enemy_value=region.our_value,
+                        held_by_us=region.held_by_enemy, held_by_enemy=region.held_by_us)
+                for region in rows]
+    view = WorldView(observation=observation, catalogue=catalogue, regions=rows)
     for unit in observation.unit_states:
         kind = catalogue.kind(unit.type_index)
         sighting = Sighting(unit=unit, kind=kind, role=catalogue.role(unit.type_index))
-        if unit.hostile:
+        if bool(unit.hostile) != invert:
             view.enemies.append(sighting)
             continue
         view.ours.append(sighting)

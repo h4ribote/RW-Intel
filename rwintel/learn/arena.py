@@ -2,7 +2,7 @@
 
 The tactical layer's sample budget is not the match budget. An errand lasts ten to sixty seconds and a match lasts fifteen minutes, so training the tactical layer inside matches would spend the overwhelming majority of the wall clock simulating economies, build orders and marches that its decision has no bearing on. Everything needed to avoid that is already there: the engine's own spawn command creates units through the ordinary command route, the room settings can start a match with nothing on the board, and the sandbox flag makes every player's units answerable to this one process. Put together, that is an arena — one long episode in which engagements are constructed, fought, swept away and constructed again.
 
-Both sides are driven from here, which is the point of the sandbox flag and is what makes the opponent something other than the built-in AI. The opposing side runs the same tactical layer against a mirrored view of the same board, so that what a learnt layer is measured against is the script layer doing exactly its job, and so that self-play needs no second process and no network.
+Both sides are driven from here, which is the point of the sandbox flag and is what makes the opponent something other than the built-in AI. The opposing side runs the same tactical layer over the same board read from the other side, so that what a learnt layer is measured against is the script layer doing exactly its job, and so that self-play needs no second process and no network.
 
 There is no instruction that removes a unit, because the game has none: the only way to unmake a unit is to kill it. So an engagement is not cleared, it is finished — the survivors of both sides are set on each other until there are none — and the next engagement is built somewhere else on the map. That is slower than deleting them would be and it is the only method that keeps every change on the command route, which is the property the whole approach depends on.
 """
@@ -42,11 +42,18 @@ FIGHT_MS = 60000
 #: How long the survivors are given to finish each other off before the next engagement is built anyway. A remainder is tolerable — the next site is chosen away from it — but an unbounded wait is not.
 SWEEP_MS = 20000
 
-#: How long to wait for spawned units to appear before giving up on an engagement and trying again. Spawning goes through the command queue, so it takes a step or two rather than being instantaneous.
-SPAWN_WAIT_MS = 4000
+#: How long a fight may go without a casualty on either side before it is called.
+#:
+#: Two forces that have stopped hurting each other are not about to start. Measured: an engagement that ends with somebody destroyed takes twenty to thirty seconds, and one that ends on the clock spends its whole minute with both sides nearly intact, so waiting the full minute for those buys nothing and costs the arena a third of its time. Long enough that a squad manoeuvring for position is not mistaken for one that has given up.
+STALL_MS = 12000
 
-#: World units between the two sides when they are put down. Far enough that neither starts inside the other's reach, which would decide the fight before either layer had chosen anything; near enough that they are in contact within a few seconds.
-SEPARATION = 700.0
+#: How long to wait for spawned units to appear before giving up on an engagement and trying again. Spawning goes through the command queue, so it takes a step or two rather than being instantaneous.
+SPAWN_WAIT_MS = 12000
+
+#: World units between the two sides when they are put down.
+#:
+#: Measured rather than chosen. At seven hundred the two sides converged to a median of a hundred and sixty and stopped there, which is outside a tank's reach of a hundred and thirty, and three quarters of the engagements then stood off until the clock ran out with almost nobody hurt: the engine's attack-move halts a unit when it acquires something, and acquisition happens at sight range while shooting needs weapon range, so two forces walking at each other come to rest in the gap between the two and stay there. Starting inside that gap is what makes the fight begin. It is still outside the reach of the shorter-ranged types, so which side shoots first is still something the layer's choice can affect.
+SEPARATION = 250.0
 
 #: Credits each side is built out of, drawn uniformly. Small fights and large ones teach different things and the layer has to answer both.
 FORCE_VALUE = (1200.0, 5000.0)
@@ -72,10 +79,16 @@ class Engagement:
     ours_left: int = 0
     theirs_left: int = 0
     seconds: float = 0.0
+    #: True when the fight was called because neither side had hurt the other for a while, rather than because it ended or ran out of time.
+    stalled: bool = False
+    #: How close the two sides ever came to each other, in world units. A fight in which this never falls below the weapons' reach was not a fight, and telling that case from a fight that was genuinely even is the difference between an arena that produces engagements and one that produces marches.
+    closest: float = 1e9
 
     def as_dict(self) -> dict:
         return {"index": self.index, "our_value": round(self.our_value), "their_value": round(self.their_value),
-                "ours_left": self.ours_left, "theirs_left": self.theirs_left, "seconds": round(self.seconds, 1)}
+                "ours_left": self.ours_left, "theirs_left": self.theirs_left,
+                "seconds": round(self.seconds, 1), "closest": round(self.closest),
+                "stalled": self.stalled}
 
 
 @dataclass
@@ -84,6 +97,8 @@ class Statistics:
 
     engagements: int = 0
     spawned: int = 0
+    #: Engagements that were built but where the units never appeared, so no fight took place. Counted separately because it is wasted time rather than a result, and because it is the first thing to look at when the arena is producing less than it should.
+    stillborn: int = 0
     won: int = 0
     lost: int = 0
     drawn: int = 0
@@ -91,22 +106,15 @@ class Statistics:
     decisions: int = 0
     history: List[dict] = field(default_factory=list)
 
+    @property
+    def fought(self) -> int:
+        return self.won + self.lost + self.drawn
+
     def as_dict(self) -> dict:
-        return {"engagements": self.engagements, "spawned": self.spawned, "won": self.won,
+        return {"engagements": self.engagements, "spawned": self.spawned,
+                "stillborn": self.stillborn, "fought": self.fought, "won": self.won,
                 "lost": self.lost, "drawn": self.drawn, "tactical": self.tactical,
                 "decisions": self.decisions, "history": self.history[-32:]}
-
-
-def mirror(observation: Observation) -> Observation:
-    """The same board seen from the other side.
-
-    Hostility in the observation is recorded from this process's point of view, which is the only point of view an ordinary match has. Driving both sides of a fight needs the opposing tactical layer to read the same frame with the sides exchanged, and flipping the flag is the whole of that: everything else a tactical layer reads — positions, health, ranges, who is shooting at whom — is symmetric already.
-    """
-    units = [replace(unit, hostile=0 if unit.hostile else 1) for unit in observation.unit_states]
-    regions = [replace(region, our_value=region.enemy_value, enemy_value=region.our_value,
-                       held_by_us=region.held_by_enemy, held_by_enemy=region.held_by_us)
-               for region in observation.regions]
-    return replace(observation, unit_states=units, regions=regions)
 
 
 class Arena:
@@ -132,6 +140,9 @@ class Arena:
         self.sites: List[Tuple[float, float]] = []
         self.last_regions: List = []
         self._sandbox_sent = False
+        #: How many units were standing in the current fight when its count last changed, and when that was, which is how a fight that has stopped being one is recognised.
+        self._alive = 0
+        self._changed_ms = 0
 
     # ---- the one entry point ----------------------------------------------------------
 
@@ -208,8 +219,12 @@ class Arena:
         theirs = [unit.id for unit in fresh if unit.hostile]
         if not ours or not theirs:
             if now >= self.until_ms:
-                log.info("engagement %d never appeared, trying another",
-                         self.engagement.index if self.engagement else -1)
+                log.info("engagement %d at %.0f,%.0f never appeared, trying another",
+                         self.engagement.index if self.engagement else -1,
+                         self.engagement.site[0] if self.engagement else 0.0,
+                         self.engagement.site[1] if self.engagement else 0.0)
+                self.statistics.stillborn += 1
+                self._blame_site()
                 self.phase = "clear"
             return
 
@@ -237,6 +252,8 @@ class Arena:
 
         self.phase = "fighting"
         self.until_ms = deadline
+        self._alive = len(ours) + len(theirs)
+        self._changed_ms = now
         if self.engagement is not None:
             self.engagement.seconds = 0.0
 
@@ -249,20 +266,31 @@ class Arena:
             self.phase = "clear"
             return
 
+        if ours.members and theirs.members and self.engagement is not None:
+            self.engagement.closest = min(self.engagement.closest,
+                                          math.hypot(ours.x - theirs.x, ours.y - theirs.y))
+
         deviations, _ = self.tactics.decide(view, [ours], now)
         action.deviations.extend(deviations)
-        their_view = build_view(mirror(observation), self.catalogue, None, self.last_regions)
+        their_view = build_view(observation, self.catalogue, None, self.last_regions, invert=True)
         their_deviations, _ = self.opponent.decide(their_view, [theirs], now)
         action.deviations.extend(their_deviations)
         self.statistics.tactical += 1
         self.statistics.decisions += len(deviations)
 
-        if ours.members and theirs.members and now < self.until_ms:
+        if not ours.members or not theirs.members or now >= self.until_ms:
+            self._call(ours, theirs, now)
             return
-        self._call(ours, theirs, now)
+        alive = len(ours.members) + len(theirs.members)
+        if alive != self._alive:
+            self._alive, self._changed_ms = alive, now
+        elif now - self._changed_ms >= STALL_MS:
+            self._call(ours, theirs, now, stalled=True)
 
-    def _call(self, ours: SquadRecord, theirs: SquadRecord, now: int) -> None:
+    def _call(self, ours: SquadRecord, theirs: SquadRecord, now: int, stalled: bool = False) -> None:
         engagement = self.engagement
+        if engagement is not None:
+            engagement.stalled = stalled
         if engagement is not None:
             engagement.ours_left = len(ours.members)
             engagement.theirs_left = len(theirs.members)
@@ -278,27 +306,29 @@ class Arena:
         self.until_ms = now + SWEEP_MS
 
     def _sweep(self, observation: Observation, action: Action, now: int) -> None:
-        """Sets whatever is left of both sides on each other, because there is no command that removes a unit and a board that is never cleared fills up."""
+        """Sets whatever is left of both sides on each other, because there is no command that removes a unit and a board that is never cleared fills up.
+
+        There is only anything to do here while both sides still have somebody. A fight that ended by one side being destroyed has nothing left to set against anything, and waiting out the sweep in that case is the commonest thing the arena did with its time: the winner stands about for twenty seconds while the next engagement, which is built somewhere else on the map regardless, waits for a clock that is measuring nothing.
+        """
         ours = self.squads.get(OURS)
         theirs = self.squads.get(THEIRS)
-        left = (ours.members if ours else []) + (theirs.members if theirs else [])
-        if not left or now >= self.until_ms:
+        contested = (ours is not None and theirs is not None and ours.members and theirs.members)
+        if not contested or now >= self.until_ms:
             self.phase = "clear"
             self.squads = {}
             return
-        if ours is not None and theirs is not None and ours.members and theirs.members:
-            for squad_id, other in ((OURS, THEIRS), (THEIRS, OURS)):
-                squad = self.squads[squad_id]
-                if squad.contract is None:
-                    continue
-                target = self._region_of(self.squads[other])
-                if target == squad.contract.target_region:
-                    continue
-                squad.contract = replace(squad.contract, target_region=target, issued_at_ms=now)
-                action.contracts.append(Contract(
-                    squad=squad_id, task=Task.ATTACK, stance=Stance.AGGRESSIVE,
-                    target_region=target, cost_budget=squad.contract.cost_budget,
-                    deadline_ms=now + SWEEP_MS, issued_at_ms=now, override=True))
+        for squad_id, other in ((OURS, THEIRS), (THEIRS, OURS)):
+            squad = self.squads[squad_id]
+            if squad.contract is None:
+                continue
+            target = self._region_of(self.squads[other])
+            if target == squad.contract.target_region:
+                continue
+            squad.contract = replace(squad.contract, target_region=target, issued_at_ms=now)
+            action.contracts.append(Contract(
+                squad=squad_id, task=Task.ATTACK, stance=Stance.AGGRESSIVE,
+                target_region=target, cost_budget=squad.contract.cost_budget,
+                deadline_ms=now + SWEEP_MS, issued_at_ms=now, override=True))
 
     # ---- keeping the two squads in step with the board ---------------------------------
 
@@ -335,7 +365,22 @@ class Arena:
     # ---- where and what ----------------------------------------------------------------
 
     def _sites(self) -> List[Tuple[float, float]]:
-        return [(region.x, region.y) for region in getattr(self.session, "regions", ())]
+        """Places an engagement may be built on.
+
+        Region centres and resource points both, because a region centre is the mean of the points that formed it and can therefore fall on water or on a cliff, where the engine refuses to place anything and the engagement is stillborn. A resource point is ground something can be built on by definition, so it is ground a unit can be put on. Measured before this: with region centres alone, one instance in a run of eight lost fourteen of its twenty-two engagements to placements that never appeared.
+        """
+        places = [(region.x, region.y) for region in getattr(self.session, "regions", ())]
+        content = getattr(self.session, "map_content", None)
+        if content is not None:
+            places.extend(content.to_world(tile) for tile in content.resources)
+        return places
+
+    def _blame_site(self) -> None:
+        """Takes the site of a stillborn engagement out of the pool. Whether ground will take a unit is not something this side can ask, so the only way to find out is to try, and the only thing worth doing with the answer is to remember it."""
+        if self.engagement is None or len(self.sites) <= 2:
+            return
+        site = self.engagement.site
+        self.sites = [place for place in self.sites if place != site]
 
     def _site(self, observation: Observation) -> Optional[Tuple[float, float]]:
         """Somewhere to build the next fight, as far as possible from whatever is still standing. Survivors of an earlier engagement that could not be swept must not wander into the next one, or the fight the layer is paid for is not the fight it was given."""
