@@ -13,6 +13,7 @@ import statistics
 import sys
 
 from ..data import AssetPaths
+from ..eval.journal import Journal
 from .policy import script_policy
 from .server import Server, ServerSettings
 from .session import EpisodeSettings
@@ -32,6 +33,8 @@ def main(argv=None) -> int:
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--max-seconds", type=int, default=900, help="game time an episode is cut off at")
     parser.add_argument("--assets", default=None)
+    parser.add_argument("--record", default=None,
+                        help="write every episode to this file as it finishes, one JSON object per line")
     parser.add_argument("--verbose", action="store_true")
     arguments = parser.parse_args(argv)
 
@@ -41,12 +44,14 @@ def main(argv=None) -> int:
         datefmt="%H:%M:%S",
     )
 
+    journal = Journal(arguments.record) if arguments.record else None
     settings = ServerSettings(
         host=arguments.host,
         port=arguments.port,
         instances=arguments.instances,
         episodes=arguments.episodes,
         assets=AssetPaths.at(arguments.assets) if arguments.assets else AssetPaths.default(),
+        journal=journal,
         episode=EpisodeSettings(
             map=arguments.map,
             opponents=arguments.opponents,
@@ -64,6 +69,9 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         server.stop()
         return 1
+    finally:
+        if journal is not None:
+            journal.close()
 
     records = [record for session in sessions for record in session.records]
     logging.info("%d episode(s) over %d instance(s)", len(records), len(sessions))

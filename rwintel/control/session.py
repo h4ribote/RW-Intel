@@ -73,6 +73,21 @@ class EpisodeRecord:
     #: The team the observations were taken from, or -3 when it only watched.
     team: int = -1
     standing: List[dict] = field(default_factory=list)
+    #: Which arm of a comparison this episode belongs to. One name for a plain run.
+    arm: str = ""
+    instance: int = -1
+    #: The settings the episode was played under, so that two numbers are only ever compared when they were produced the same way.
+    settings: dict = field(default_factory=dict)
+    #: What each layer did, which is what separates a bad result from a result and says which layer it came from.
+    statistics: dict = field(default_factory=dict)
+
+    def as_dict(self) -> dict:
+        return {
+            "arm": self.arm, "instance": self.instance, "episode": self.episode,
+            "seconds": self.seconds, "winner": self.winner, "alive_teams": self.alive_teams,
+            "timeout": self.timeout, "team": self.team, "standing": self.standing,
+            "settings": self.settings, "statistics": self.statistics,
+        }
 
     @property
     def value_edge(self) -> float:
@@ -96,14 +111,18 @@ class EpisodeRecord:
 
 
 class Session:
-    def __init__(self, connection, address, settings: EpisodeSettings, policy_factory,
-                 assets: Optional[AssetPaths] = None, episodes: int = 1):
+    def __init__(self, connection, address, settings: EpisodeSettings, arms,
+                 assets: Optional[AssetPaths] = None, episodes: int = 1, journal=None):
         self.connection = connection
         self.address = address
         self.settings = settings
-        self.policy_factory = policy_factory
+        #: The policies to run, as (name, factory) pairs. More than one makes the run a comparison.
+        self.arms = list(arms)
         self.assets = assets or AssetPaths.default()
-        self.episodes_wanted = episodes
+        #: Episodes each arm is to run, so a session plays this many times the number of arms.
+        self.episodes_wanted = episodes * len(self.arms)
+        self.journal = journal
+        self.arm = self.arms[0][0]
 
         self.instance = -1
         self.build = ""
@@ -196,8 +215,14 @@ class Session:
             timeout=bool(payload.get("timeout", False)),
             team=int(payload.get("team", -1)),
             standing=list(payload.get("standing", [])),
+            arm=self.arm,
+            instance=self.instance,
+            settings=vars(self.settings).copy(),
+            statistics=self.policy.statistics.as_dict() if hasattr(self.policy, "statistics") else {},
         )
         self.records.append(record)
+        if self.journal is not None:
+            self.journal.write(record)
         log.info("instance %d episode %d finished: %ds winner=%d timeout=%s edge=%+.3f standing=%s",
                  self.instance, record.episode, record.seconds, record.winner,
                  record.timeout, record.value_edge, record.standing)
@@ -208,16 +233,19 @@ class Session:
 
     def _on_started(self, payload: dict) -> None:
         self._load_map(str(payload.get("map", "")))
-        self.policy = self.policy_factory(self)
+        # Arms alternate within a session rather than one arm being run after the other. Two arms measured in sequence differ by whatever else changed about the machine between them, and the whole point of the comparison is that nothing else changed.
+        self.arm, factory = self.arms[len(self.records) % len(self.arms)]
+        self.policy = factory(self)
         self.observations = 0
-        log.info("instance %d episode %d on %s: %d regions, players %s",
+        log.info("instance %d episode %d on %s (%s): %d regions, players %s",
                  self.instance, payload.get("episode", 0), os.path.basename(str(payload.get("map", ""))),
-                 len(self.regions), payload.get("players", []))
+                 self.arm, len(self.regions), payload.get("players", []))
 
     def _resume(self, map_path: str) -> None:
         """Picks an episode back up after a reconnection. The squads are still there; what has to be rebuilt is this side's view of them, and the observation carries the identifiers that does it."""
         self._load_map(map_path)
-        self.policy = self.policy_factory(self)
+        self.arm, factory = self.arms[len(self.records) % len(self.arms)]
+        self.policy = factory(self)
 
     def _load_map(self, map_path: str) -> None:
         self.map_content = self._read_map(map_path)

@@ -10,9 +10,11 @@ Periods are counted in game time, never in steps or in wall clock. A step carrie
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from ...wire import Action, BLOCK_REGIONS, Contract, Observation, encode_action
+from ...wire.action import Status
 from .catalogue import Catalogue
 from .contracts import (
     EconomyOrders,
@@ -38,6 +40,33 @@ STRATEGIC_MS = 10000
 LOST_REGION_MEMORY_MS = 60000
 
 
+@dataclass
+class Statistics:
+    """What the chain did over an episode, which is what says which layer a result came from.
+
+    A score on its own tells you that an episode went badly and nothing about where. These counts separate the two questions the design keeps apart: how often each layer got to decide, which is a property of the periods, and how its decisions turned out, which is a property of the layer. A run where the operational layer issued forty contracts and completed two is a different failure from one where it issued two.
+    """
+
+    strategic: int = 0
+    operational: int = 0
+    tactical: int = 0
+    contracts: int = 0
+    completed: int = 0
+    stalled: int = 0
+    losing: int = 0
+    expired: int = 0
+    production: int = 0
+    squads_formed: int = 0
+
+    @property
+    def fulfilment(self) -> float:
+        """The share of contracts that ended in the target being taken and held, which is the operational layer's own measure of itself."""
+        return self.completed / self.contracts if self.contracts else 0.0
+
+    def as_dict(self) -> Dict[str, float]:
+        return {**vars(self), "fulfilment": round(self.fulfilment, 4)}
+
+
 class ScriptPolicy:
     def __init__(self, session) -> None:
         self.session = session
@@ -59,6 +88,9 @@ class ScriptPolicy:
         self.replacements: List[Replacement] = []
         self.reports: List = []
 
+        self.statistics = Statistics()
+        #: The status each squad's mission was last seen in, so that reaching a new one is counted once rather than every period.
+        self._status: Dict[int, Status] = {}
         #: How many resource points each region was last seen held with, so that losing one can be noticed.
         self._held: Dict[int, int] = {}
         #: When each region was last taken from us, so that being pushed back is something that stops being true.
@@ -76,9 +108,11 @@ class ScriptPolicy:
         if operational or observation.events:
             assignments, self.squads, self.replacements = self.organisation.update(view, self.shortfalls)
             action.squads.extend(assignments)
+            self.statistics.squads_formed += sum(1 for a in assignments if a.units)
 
         if self.last_strategic_ms is None or now - self.last_strategic_ms >= STRATEGIC_MS:
             self.last_strategic_ms = now
+            self.statistics.strategic += 1
             self._note_lost_regions(view, now)
             self.economy_orders, self.operations_orders = self.strategy.decide(
                 self._front_report(view), view.regions, now)
@@ -91,12 +125,18 @@ class ScriptPolicy:
                 Contract(squad=c.squad, task=c.task, stance=c.stance, target_region=c.target_region,
                          cost_budget=c.cost_budget, deadline_ms=c.deadline_ms, issued_at_ms=c.issued_at_ms)
                 for c in contracts)
+            self.statistics.operational += 1
+            self.statistics.contracts += len(contracts)
 
         if operational and self.economy_orders is not None:
-            action.production.extend(self.economy.decide(view, self.economy_orders, self.replacements))
+            orders = self.economy.decide(view, self.economy_orders, self.replacements)
+            action.production.extend(orders)
+            self.statistics.production += len(orders)
 
         deviations, self.reports = self.tactics.decide(view, self.squads, now)
         action.deviations.extend(deviations)
+        self.statistics.tactical += 1
+        self._count_outcomes()
 
         if operational:
             log.debug("t=%5ds %s squads=%d units=%d(%d enemy) credits=%.0f contracts=%d production=%s",
@@ -109,6 +149,25 @@ class ScriptPolicy:
         if not (action.squads or action.contracts or action.deviations or action.production):
             return None
         return encode_action(action)
+
+    def _count_outcomes(self) -> None:
+        """Counts a mission's outcome once, when it first reaches it. A status is a state and not an event, so counting it every period would report the length of a stall rather than the number of them."""
+        live = set()
+        for squad in self.squads:
+            live.add(squad.id)
+            if self._status.get(squad.id) is squad.status:
+                continue
+            self._status[squad.id] = squad.status
+            if squad.status is Status.COMPLETE:
+                self.statistics.completed += 1
+            elif squad.status is Status.STALLED:
+                self.statistics.stalled += 1
+            elif squad.status is Status.LOSING:
+                self.statistics.losing += 1
+            elif squad.status is Status.EXPIRED:
+                self.statistics.expired += 1
+        for squad_id in [k for k in self._status if k not in live]:
+            del self._status[squad_id]
 
     def _note_lost_regions(self, view, now: int) -> None:
         """Counts regions that used to have one of our extractors on them and no longer do. A posture change to defending is the answer to being pushed off ground, and there is nothing else in the observation that says it is happening."""

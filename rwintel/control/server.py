@@ -11,7 +11,7 @@ import logging
 import socket
 import threading
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from ..data import AssetPaths
 from ..wire import Kind, read_frame
@@ -25,15 +25,22 @@ class ServerSettings:
     host: str = "127.0.0.1"
     port: int = 8642
     instances: int = 1
+    #: Episodes each arm runs on each instance.
     episodes: int = 1
     episode: EpisodeSettings = field(default_factory=EpisodeSettings)
     assets: Optional[AssetPaths] = None
+    #: The policies to run as (name, factory) pairs. More than one turns the run into a comparison, with the arms alternating within each instance.
+    arms: List[Tuple[str, Callable]] = field(default_factory=list)
+    #: Where every episode is written as it finishes, or None to keep nothing.
+    journal: Optional[object] = None
 
 
 class Server:
-    def __init__(self, settings: ServerSettings, policy_factory: Callable[[Session], object]):
+    def __init__(self, settings: ServerSettings, policy_factory: Optional[Callable[[Session], object]] = None):
         self.settings = settings
-        self.policy_factory = policy_factory
+        self.arms = list(settings.arms) or [("script", policy_factory)]
+        if any(factory is None for _, factory in self.arms):
+            raise ValueError("a server needs either arms or a policy factory")
         self.sessions: List[Session] = []
         self._lock = threading.Lock()
         self._done = threading.Event()
@@ -43,7 +50,8 @@ class Server:
         with self._lock:
             if len(self.sessions) < self.settings.instances:
                 return False
-            return all(len(session.records) >= self.settings.episodes for session in self.sessions)
+            wanted = self.settings.episodes * len(self.arms)
+            return all(len(session.records) >= wanted for session in self.sessions)
 
     def serve(self) -> List[Session]:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -85,8 +93,8 @@ class Server:
                 if session.instance == instance:
                     session.rebind(connection, address)
                     return session
-            session = Session(connection, address, self.settings.episode, self.policy_factory,
-                              self.settings.assets, self.settings.episodes)
+            session = Session(connection, address, self.settings.episode, self.arms,
+                              self.settings.assets, self.settings.episodes, self.settings.journal)
             self.sessions.append(session)
             return session
 
@@ -108,7 +116,7 @@ class Server:
                     session.on_episode(frame.body)
                 elif frame.kind == Kind.OBSERVATION:
                     session.on_observation(frame.body)
-                if session is not None and len(session.records) >= self.settings.episodes:
+                if session is not None and len(session.records) >= session.episodes_wanted:
                     break
         except (ConnectionError, OSError) as error:
             log.info("link %s ended: %s", address, error)

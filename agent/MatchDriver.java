@@ -164,9 +164,13 @@ final class MatchDriver {
         return teams;
     }
 
-    /** Units and their worth per playing team, which is what a position with no winner has to be scored from. */
+    /**
+     * Where each playing side stands, which is what a match with no winner has to be scored from.
+     *
+     * Three quantities per team, because the design scores an unfinished match on all three: what is standing and what it is worth, what is coming in, and what has been traded. None of them can be worked out from outside the process for the enemy, so all of them go over here.
+     */
     String standing(Object game) throws Exception {
-        TreeMap<Integer, int[]> byTeam = new TreeMap<Integer, int[]>();
+        TreeMap<Integer, long[]> byTeam = new TreeMap<Integer, long[]>();
         Object[] units = engine.unitArray();
         int count = engine.unitCount();
         for (int i = 0; i < count && i < units.length; i++) {
@@ -175,22 +179,45 @@ final class MatchDriver {
             Object owner = engine.owner(unit);
             if (owner == null) continue;
             int team = engine.team(owner);
-            // Negative teams are the spectators and the neutral owner that holds resource crystals and scenery, neither of which is a side in the match.
+            // Negative teams are the spectators and the neutral owner that holds the scenery, neither of which is a side in the match.
             if (team < 0) continue;
             if (engine.built(unit) < 1f) continue;
-            int[] tally = byTeam.get(Integer.valueOf(team));
-            if (tally == null) byTeam.put(Integer.valueOf(team), tally = new int[2]);
+            long[] tally = tallyFor(byTeam, team);
             tally[0]++;
             tally[1] += engine.price(unit);
         }
+
+        int slots = engine.slotCount();
+        for (int i = 0; i < slots; i++) {
+            Object player = engine.playerAt(i);
+            if (player == null) continue;
+            int team = engine.team(player);
+            if (team < 0) continue;
+            long[] tally = tallyFor(byTeam, team);
+            tally[2] += engine.income(player);
+            Object record = engine.record(game, player);
+            tally[3] += engine.recordInt(record, "c") + engine.recordInt(record, "d");
+            tally[4] += engine.recordInt(record, "f") + engine.recordInt(record, "g");
+        }
+
         StringBuilder out = new StringBuilder("[");
-        for (java.util.Map.Entry<Integer, int[]> entry : byTeam.entrySet()) {
+        for (java.util.Map.Entry<Integer, long[]> entry : byTeam.entrySet()) {
+            long[] tally = entry.getValue();
             if (out.length() > 1) out.append(',');
             out.append("{\"team\":").append(entry.getKey())
-                    .append(",\"units\":").append(entry.getValue()[0])
-                    .append(",\"value\":").append(entry.getValue()[1]).append('}');
+                    .append(",\"units\":").append(tally[0])
+                    .append(",\"value\":").append(tally[1])
+                    .append(",\"income\":").append(tally[2])
+                    .append(",\"killed\":").append(tally[3])
+                    .append(",\"lost\":").append(tally[4]).append('}');
         }
         return out.append(']').toString();
+    }
+
+    private static long[] tallyFor(TreeMap<Integer, long[]> byTeam, int team) {
+        long[] tally = byTeam.get(Integer.valueOf(team));
+        if (tally == null) byTeam.put(Integer.valueOf(team), tally = new long[5]);
+        return tally;
     }
 
     String players() throws Exception {
