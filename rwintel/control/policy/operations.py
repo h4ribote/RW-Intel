@@ -103,6 +103,9 @@ class Operations:
         held_now: set = set()
 
         for squad in squads:
+            # A doctrine with no task of its own is one this layer does not command. That is the engineers: the economy drives them, and a contract here would override the placement a builder is walking to.
+            if not DOCTRINES[squad.doctrine].tasks:
+                continue
             if not squad.ours_to_task:
                 held_now.add(squad.id)
                 continue
@@ -149,6 +152,27 @@ class Operations:
 
     def _target(self, view: WorldView, orders: OperationsOrders, squad: SquadRecord,
                 allowed: tuple, avoid: Optional[int]) -> Optional[Tuple[Task, RegionState]]:
+        chosen = self._pick(view, orders, squad, avoid)
+        return self._settled(view, orders, squad, chosen, avoid)
+
+    def _settled(self, view: WorldView, orders: OperationsOrders, squad: SquadRecord,
+                 chosen: Optional[Tuple[Task, RegionState]], avoid: Optional[int]):
+        """Keeps a squad on the mission it is already running unless something has said to stop.
+
+        Two regions of nearly equal worth trade places whenever a shot lands in either of them, and a squad re-tasked on that difference spends the match walking between them and arriving at neither. So the score is not what re-tasks a squad; a reason is. The reasons are the ones the mission reports carry — a stall, a mission going badly, one finished, one out of time — and while a mission is simply running it is left to run. That is the same rule that governs re-issuing a contract at all, applied one level up: a decision restated is not a decision.
+        """
+        held = squad.contract
+        if chosen is None or held is None or squad.status is not Status.ACTIVE:
+            return chosen
+        if held.target_region == avoid:
+            return chosen
+        current = view.region(held.target_region)
+        if current is None:
+            return chosen
+        return held.task, current
+
+    def _pick(self, view: WorldView, orders: OperationsOrders, squad: SquadRecord,
+              avoid: Optional[int]) -> Optional[Tuple[Task, RegionState]]:
         if squad.doctrine == Doctrine.VANGUARD:
             return self._vanguard(view, orders, squad, avoid)
         if squad.doctrine == Doctrine.GARRISON:

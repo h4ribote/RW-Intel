@@ -9,6 +9,7 @@ Two things are worth stating because they are not visible in the code. Placement
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Dict, List, Sequence, Set, Tuple
@@ -22,14 +23,16 @@ from .view import WorldView
 #: A building standing on a resource point is within this of it, and nothing else is.
 ON_RESOURCE = 40.0
 
-#: How long a placement is assumed to be on its way before the ground it was sent to is offered again. Opening value: the structure appears in the observation within a period or two of the builder reaching it, and the walk is the part that varies.
-PLACEMENT_GRACE_MS = 15000
+#: How long a placement is assumed to be on its way before the ground it was sent to is offered again. Opening value: long enough to cover the walk to a neighbouring region as well as the seventeen seconds of building, since a point offered again while a builder is still walking to it is a point two builders are sent to.
+PLACEMENT_GRACE_MS = 45000
 
-#: How long a builder may be left on one placement before it is given something else to do. Opening value: an extractor takes about seventeen seconds to raise and the walk to a neighbouring region rather less than a minute, so anything past this is a builder that is not going to arrive — sent across water it cannot cross, or blocked. Without it the one builder an opening has can be lost to a single unreachable point for the whole match.
-PLACEMENT_TIMEOUT_MS = 45000
+#: How long a builder may be left on one placement before it is given something else to do. Opening value: comfortably longer than a walk to a neighbouring region plus the seventeen seconds of building, because this is a last resort for a builder sent somewhere it cannot reach. Set anywhere near the honest length of the job it interrupts the job instead of rescuing it, and the builder starts over every time without ever finishing.
+PLACEMENT_TIMEOUT_MS = 120000
 
-#: How long a factory is assumed to be occupied by what it was last told to make. Opening value, standing in for a "busy" flag the observation does not carry.
-FACTORY_BUSY_MS = 8000
+#: How long a factory is left alone after being told to make something. Opening value: one operational period, which is to say almost nothing.
+#:
+#: The engine gives a factory a queue and works through it on its own, so what this layer owes it is a queue that is never empty, not an estimate of how long each unit takes. Modelling the factory as busy for the length of a build looks careful and is not: the estimate is always wrong, and every period it is wrong by is a period the factory stood idle with credits in the treasury. The real bound on production is what can be paid for, and that is already enforced.
+FACTORY_BUSY_MS = 2000
 
 #: Extractors that have to be standing before the first factory is worth 700 credits.
 FACTORY_EXTRACTORS = 2
@@ -40,8 +43,10 @@ BUILDER_TARGET = 2
 #: Military share above which the factory is worth running at all. Opening value, set below the lowest share any posture carries so that even an expanding opening keeps something in the field.
 MILITARY_SHARE_THRESHOLD = 0.15
 
-#: Economy share above which a second builder is worth its 500 credits rather than another extractor. Opening value, set between the arming postures and the expanding ones.
-EXPANSION_SHARE_THRESHOLD = 0.35
+#: Economy share above which a second builder is worth its 500 credits rather than another extractor. Opening value: below the arming postures rather than between them, so that only a final battle stops us keeping two.
+#:
+#: Set above the arming share it reads as "stop expanding", which is not what arming means. A match turns to arming early, and with the threshold above that share the whole of it is then played on the one builder it started with: nothing is left to raise a second factory while the first is busy, or to replace the builder when it dies, and the economy stops growing at the moment the army starts costing.
+EXPANSION_SHARE_THRESHOLD = 0.25
 
 #: Share above which ground that has seen the enemy is worth a turret. Opening value; read off the military share for want of a defensive one, so only the postures that are arming fortify.
 DEFENCE_SHARE_THRESHOLD = 0.45
@@ -64,8 +69,8 @@ ESTABLISHED_ENEMY = 700.0
 #: How far from the placing builder a factory goes, far enough not to fight the builder for its own footprint.
 FACTORY_OFFSET = 120.0
 
-#: Income above which the economy can keep a second factory fed. Opening value in the engine's own income units, roughly what four extractors bring in.
-SECOND_FACTORY_INCOME = 40.0
+#: Income above which the economy can keep a second factory fed. Opening value in the engine's own income units, roughly what two extractors bring in: a single factory cannot spend the income of a working expansion, and credits sitting in the treasury are an army that was not built.
+SECOND_FACTORY_INCOME = 25.0
 
 #: How much the squads' stated shortfall counts against the posture's target mix when the two disagree. Opening value: half, so a mix is bent towards what the front is asking for without being overridden by it.
 REPLACEMENT_WEIGHT = 0.5
@@ -77,6 +82,8 @@ FIELDED_ROLES = (Role.ARMOUR, Role.ARTILLERY, Role.ANTI_AIR, Role.FAST)
 FACTORY_LOOKUP = "landFactory"
 
 _LONG_AGO = -10 ** 9
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -110,6 +117,7 @@ class Economy:
         #: The type that may only stand on a resource pool, which is what an extractor is and the only way to know one without reading its name.
         self.extractor = _cheapest(k for k in catalogue.types if k.extractor)
         self.radius: Dict[int, float] = {region.id: region.radius for region in session.regions}
+        self.spawns = [region for region in session.regions if region.spawn]
         #: When each placement or production was last issued, keyed by what it was for. This is the whole of the layer's memory.
         self.issued_at: Dict[object, int] = {}
 
@@ -121,7 +129,11 @@ class Economy:
         out: List[Production] = []
         tech = self._tech(view, orders)
 
-        extractors = sum(1 for s in view.buildings if s.kind is not None and s.kind.extractor and s.unit.built >= 255)
+        # An extractor counts towards the factory as soon as it is committed, not only once it is standing. It takes about seventeen seconds to raise and the credits it will bring are already spent; waiting for it to finish before placing the factory costs the opening that whole time for no decision that could still change.
+        extractors = sum(1 for s in view.buildings if s.kind is not None and s.kind.extractor)
+        extractors += sum(1 for point in self.points
+                          if 0 <= now - self.issued_at.get(point.index, _LONG_AGO) < PLACEMENT_GRACE_MS
+                          and not self._occupied(view, point))
         factories = [s for s in view.buildings if s.kind is not None and s.kind.lookup == FACTORY_LOOKUP]
         free = [s.unit for s in factories
                 if s.unit.built >= 255 and now - self.issued_at.get(("factory", s.unit.id), _LONG_AGO) >= FACTORY_BUSY_MS]
@@ -137,11 +149,13 @@ class Economy:
         if built == 0 and extractors >= FACTORY_EXTRACTORS:
             self._place_factory(out, purse, idle, now)
 
-        if orders.allocation.military >= MILITARY_SHARE_THRESHOLD and free:
+        # Every factory that is standing idle, not one of them. A factory is the only thing that turns credits into an army, and an opening that leaves one waiting a period at a time while the treasury grows has already lost the match it is saving for.
+        while free and orders.allocation.military >= MILITARY_SHARE_THRESHOLD:
             role = self._wanted(view, orders, replacements)
             kind = self.catalogue.cheapest(role, tech, producer=FACTORY_LOOKUP)
-            if kind is not None and purse.afford(kind.price):
-                self._produce(out, purse, free.pop(0), kind, now)
+            if kind is None or not purse.afford(kind.price):
+                break
+            self._produce(out, purse, free.pop(0), kind, now)
 
         self._extract(out, view, purse, idle, now, self._adjacent_held(view))
 
@@ -156,16 +170,31 @@ class Economy:
         if built == 1 and view.observation.income >= SECOND_FACTORY_INCOME:
             self._place_factory(out, purse, idle, now)
 
+        # The build order is a ladder of conditions, and what a stalled economy needs said is which rung it stopped on. Every term of every gate, once a period, is small beside a period and is the difference between reading a stall and guessing at one.
+        log.debug("credits=%.0f left=%.0f builders=%d/%d extractors=%d factories=%d(%d) idlefactories=%d want=%s openings=%d/%d ordered=%s",
+                  view.observation.credits, purse.credits, len(idle), len(view.builders),
+                  extractors, len(factories), built, len(free),
+                  self.catalogue.cheapest(self._wanted(view, orders, replacements), tech, producer=FACTORY_LOOKUP),
+                  self._open_points(view, now, {view.home.id} if view.home else set()),
+                  self._open_points(view, now, self._adjacent_held(view)),
+                  [self.catalogue.kind(p.type_index).lookup for p in out])
+
         return out
 
     # ---- steps -----------------------------------------------------------------------
 
     def _extract(self, out: List[Production], view: WorldView, purse: _Purse, idle: List,
                  now: int, regions: Set[int]) -> None:
-        """An extractor onto every unheld point in the given regions that there is a builder and the money for, nearest pair first."""
+        """An extractor onto every unheld point in the given regions that there is a builder and the money for, safest and nearest to home first.
+
+        Ground is ranked from home rather than from the builder that would walk to it. The two orderings differ exactly where it matters: on a map between two players the nearest unclaimed pool to a builder that has just finished at home is often the one in the middle, and sending the only builder an opening has into the middle is how an opening ends. Ranking from home, and putting any region an enemy is standing in behind every region where none is, keeps the expansion behind the front instead of through it.
+        """
         kind = self.extractor
         if kind is None or not regions:
             return
+        contested = {region.id for region in view.regions if region.enemy_value > 0 or region.held_by_enemy > 0}
+        home = view.home
+        safety = self._safety(home)
         while idle and purse.afford(kind.price):
             open_points = [point for point in self.points
                            if point.region in regions
@@ -173,14 +202,21 @@ class Economy:
                            and not self._occupied(view, point)]
             if not open_points:
                 return
-            builder, point = min(((b, p) for b in idle for p in open_points),
-                                 key=lambda pair: math.hypot(pair[1].x - pair[0].x, pair[1].y - pair[0].y))
+            point = min(open_points, key=lambda p: (p.region in contested, safety(p)))
+            builder = min(idle, key=lambda b: math.hypot(point.x - b.x, point.y - b.y))
             self.issued_at[point.index] = now
             self.issued_at[("builder", builder.id)] = now
             idle.remove(builder)
             purse.spend(kind.price)
             out.append(Production(producer=builder.id, type_index=kind.index,
                                   kind=ProductionKind.BUILDING, x=point.x, y=point.y))
+
+    def _open_points(self, view: WorldView, now: int, regions: Set[int]) -> int:
+        """Resource points in those regions that are neither taken nor already being walked to."""
+        return sum(1 for point in self.points
+                   if point.region in regions
+                   and now - self.issued_at.get(point.index, _LONG_AGO) >= PLACEMENT_GRACE_MS
+                   and not self._occupied(view, point))
 
     def _available(self, builder, now: int) -> bool:
         """Whether a builder may be given a placement. Nothing queued means it is free; a placement it has been sitting on for too long means it is not going to arrive, and giving it another is how it is recovered."""
@@ -271,6 +307,25 @@ class Economy:
 
     def _occupied(self, view: WorldView, point: ResourcePoint) -> bool:
         return any(math.hypot(s.unit.x - point.x, s.unit.y - point.y) < ON_RESOURCE for s in view.buildings)
+
+    def _safety(self, home):
+        """Ranks ground to expand onto: how far it is from home, less how much deeper into our own half it lies than the enemy's.
+
+        Distance alone sends an opening into the middle of the board. On a map between two players the centre pool is usually the nearest unclaimed one, and it is nearer the enemy's approach than anything behind it: it is where the first army arrives, and the only builder an opening has is what would be standing there. Subtracting the margin — how much closer the point is to us than to them — makes a slightly further pool deep in our own ground beat a slightly nearer one on the line, which is the trade an opening wants. Whether an enemy is standing there right now is a separate and stronger test, applied ahead of this one.
+        """
+        enemies = []
+        if home is not None and len(self.spawns) >= 2:
+            start = min(self.spawns, key=lambda r: math.hypot(r.x - home.x, r.y - home.y))
+            enemies = [r for r in self.spawns if r.id != start.id]
+
+        def rank(point: ResourcePoint) -> float:
+            reach = math.hypot(point.x - home.x, point.y - home.y) if home is not None else 0.0
+            if not enemies:
+                return reach
+            theirs = min(math.hypot(point.x - r.x, point.y - r.y) for r in enemies)
+            return reach - (theirs - reach)
+
+        return rank
 
     def _adjacent_held(self, view: WorldView) -> Set[int]:
         """Nearby regions our side holds, meaning ones we are not being out-weighed in and the enemy has not already drawn from.

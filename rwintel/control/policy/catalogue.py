@@ -7,7 +7,7 @@ The thresholds are opening values. Which side of a line a type falls on decides 
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from ...data import read_unit_catalog
 from .contracts import Doctrine, DOCTRINES, Role
@@ -45,7 +45,7 @@ class Catalogue:
     def __init__(self, types: Iterable, assets=None) -> None:
         self.types: List = list(types)
         self.roles: Dict[int, Role] = {kind.index: role_of(kind) for kind in self.types}
-        self.built_from: Dict[str, Set[str]] = _build_links(assets)
+        self.built_from, self.declares_maker = _build_links(assets)
 
     def role(self, type_index: int) -> Role:
         return self.roles.get(type_index, Role.OTHER)
@@ -72,10 +72,13 @@ class Catalogue:
     def builds(self, producer: str, kind) -> bool:
         """Whether a producer can make this type.
 
-        The link is read from the definition files, since the type interface the agent reports through carries what a type is and not what makes it. It is read as an exclusion rather than a permission: a definition that names its makers is taken at its word, and one that names none is a type the standard chain produces. The core units — the tank and everything alongside it — have no definition file naming a factory, because the factory that makes them is itself code rather than a definition; whitelisting would throw away exactly the units an opening is built on, while excluding what names a different maker still keeps the factory from being asked for the creatures out of a scenario.
+        The link is read from the definition files, since the type interface the agent reports through carries what a type is and not what makes it. Three answers are possible and all three matter. A definition that names its makers is taken at its word. A definition that names its maker as none is stating that nothing produces it — the creatures a nest spawns, the deployed and airborne forms of something else — and must not be offered to a factory. A definition that says nothing at all is a core unit, whose factory is code rather than a definition, and those are exactly the units an opening is built on.
         """
-        makers = self.built_from.get(kind.lookup) or self.built_from.get(kind.name)
-        return not makers or producer in makers
+        declared = self.declares_maker.get(kind.lookup, self.declares_maker.get(kind.name, False))
+        if not declared:
+            return True
+        makers = self.built_from.get(kind.lookup) or self.built_from.get(kind.name) or ()
+        return producer in makers
 
     def accepts(self, doctrine: Doctrine, type_index: int) -> bool:
         """Whether a squad of this doctrine will take this unit: the role has to be one it is built from, and the movement type one it keeps to, so that a squad moves as one thing."""
@@ -98,13 +101,15 @@ class Catalogue:
         return float(kind.price) if kind is not None else 0.0
 
 
-def _build_links(assets) -> Dict[str, Set[str]]:
-    """Which buildings can produce each type, by name.
+def _build_links(assets) -> Tuple[Dict[str, Set[str]], Dict[str, bool]]:
+    """Which buildings can produce each type, and which types said anything about it at all.
 
-    Read from the definition files rather than from the running game, because the type interface the agent reports through has no such link on it. These are the same files the engine loads, so the answer is the engine's own; a type with no definition file is a building or the builder, and nothing produces those from a factory anyway.
+    Read from the definition files rather than from the running game, because the type interface the agent reports through has no such link on it. These are the same files the engine loads, so the answer is the engine's own.
     """
     links: Dict[str, Set[str]] = {}
+    declared: Dict[str, bool] = {}
     for name, definition in read_unit_catalog(assets).items():
+        declared[name] = definition.built_from_declared
         if definition.built_from:
             links[name] = set(definition.built_from)
-    return links
+    return links, declared

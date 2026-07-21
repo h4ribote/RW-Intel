@@ -131,6 +131,8 @@ final class Commander {
     private void applyDeviation(Object game, Object self, int squadId, int deviation) throws Exception {
         World.Squad squad = world.squads.get(Integer.valueOf(squadId));
         if (squad == null || squad.units.isEmpty()) return;
+        // A departure is a departure from a contract, so a squad that has never been given one is left alone. Without this a squad nobody has tasked reads its target as region zero and is marched to whatever happens to be there, which on a map between two players is the other player's base.
+        if (squad.issuedAtMs == 0) return;
         if ((squad.commander & World.HUMAN_TACTICS) != 0) return;
         World.Region target = world.regionAt(squad.targetRegion);
         if (target == null) return;

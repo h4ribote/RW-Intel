@@ -87,7 +87,7 @@ DOCTRINES: Dict[Doctrine, DoctrineSpec] = {
         minimum={Role.ARMOUR: 2},
         establishment={Role.ARMOUR: 4, Role.ANTI_AIR: 2},
         movement=frozenset({"LAND", "HOVER"}),
-        tasks=(Task.DEFEND,),
+        tasks=(Task.DEFEND, Task.ESCORT),
     ),
     Doctrine.RAID: DoctrineSpec(
         minimum={Role.FAST: 3},
@@ -95,11 +95,12 @@ DOCTRINES: Dict[Doctrine, DoctrineSpec] = {
         movement=frozenset({"AIR", "HOVER"}),
         tasks=(Task.RAID, Task.WITHDRAW),
     ),
+    # Engineers are what an escort escorts, not what is sent anywhere. They are grouped so that the organisation layer can keep count of them and so that a squad can be told to cover them, but the layer that moves them is the economy, which addresses each one by name to place a building. A contract on an engineer squad would put a move order on top of the placement it was in the middle of, and the half built structure would be a total loss.
     Doctrine.ENGINEER: DoctrineSpec(
         minimum={Role.BUILDER: 1},
         establishment={Role.BUILDER: 3},
         movement=frozenset({"LAND", "HOVER"}),
-        tasks=(Task.ESCORT,),
+        tasks=(),
     ),
 }
 

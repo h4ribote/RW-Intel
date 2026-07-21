@@ -52,6 +52,8 @@ class UnitDefinition:
     area_damage: float = 0.0
     shoot_delay_frames: float = 0.0
     built_from: List[str] = field(default_factory=list)
+    #: Whether the definition said anything at all about what produces it. A definition that names its producer as none is stating that nothing does, which is a different thing from a definition that is silent: the core units say nothing because the factory that makes them is code rather than a definition.
+    built_from_declared: bool = False
     builds: List[str] = field(default_factory=list)
 
     @property
@@ -172,7 +174,11 @@ def _definition(path: str, sections: Dict[str, Dict[str, str]]) -> Optional[Unit
         unit.is_building = True
 
     for index in range(1, 9):
-        source = (core.get(f"builtFrom_{index}_name") or "").strip()
+        declared = core.get(f"builtFrom_{index}_name")
+        if declared is None:
+            continue
+        unit.built_from_declared = True
+        source = declared.strip()
         if source and source.lower() not in _ABSENT:
             unit.built_from.append(source)
     return unit
