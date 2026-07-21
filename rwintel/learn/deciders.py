@@ -70,8 +70,9 @@ def evaluate_tactical(net, requests: Sequence[tuple], device=None, greedy: bool 
     with torch.no_grad():
         logits, values = net(states, masks)
         actions, log_probs = sample(logits, greedy)
-    return [Choice(action=int(action), log_prob=float(log_prob), value=float(value))
-            for action, log_prob, value in zip(actions, log_probs, values)]
+        answers = _fetch(actions, log_probs, values)
+    return [Choice(action=int(action), log_prob=log_prob, value=value)
+            for action, log_prob, value in zip(*answers)]
 
 
 def evaluate_operational(net, requests: Sequence[tuple], device=None, greedy: bool = False) -> List[Choice]:
@@ -87,10 +88,20 @@ def evaluate_operational(net, requests: Sequence[tuple], device=None, greedy: bo
         region_logits, task_logits, values = net(states, slots, regions, tasks)
         chosen_regions, region_log = sample(region_logits, greedy)
         chosen_tasks, task_log = sample(task_logits, greedy)
-    return [Choice(action=int(region), log_prob=float(region_lp), value=float(value),
-                   second=int(task), second_log_prob=float(task_lp))
-            for region, region_lp, task, task_lp, value
-            in zip(chosen_regions, region_log, chosen_tasks, task_log, values)]
+        answers = _fetch(chosen_regions, region_log, values, chosen_tasks, task_log)
+    return [Choice(action=int(region), log_prob=region_lp, value=value,
+                   second=int(task), second_log_prob=task_lp)
+            for region, region_lp, value, task, task_lp in zip(*answers)]
+
+
+def _fetch(*tensors):
+    """Brings a batch of answers back from the device in one transfer.
+
+    Reading them one number at a time is what an obvious implementation does and it is ruinous: every scalar taken off a device tensor waits for the device to finish, so a batch of sixty-four costs a couple of hundred round trips and the batching that was supposed to make inference cheap makes it slower per decision than not batching at all. Stacking first means one wait for the whole batch, whatever its size.
+    """
+    import torch
+
+    return torch.stack([tensor.float() for tensor in tensors]).cpu().tolist()
 
 
 def tactical_batcher(net, device=None, greedy: bool = False, **kwargs) -> Batcher:

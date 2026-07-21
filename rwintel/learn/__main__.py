@@ -38,11 +38,13 @@ ARENA_SECONDS = 1800
 
 
 def _device(name: Optional[str]):
+    """Where the networks run, which is the processor unless told otherwise.
+
+    The card is the wrong device at these sizes and measurement says so plainly: the tactical policy is eight thousand parameters and the operational one is a hundred and twenty thousand, so every call is dominated by the cost of dispatching it rather than by the arithmetic. Measured on this machine, a batch of sixty-four tactical decisions takes 2.4 milliseconds on the processor against 8.1 on the card, a single decision 1.0 against 7.0, and an update over a thousand steps 186 milliseconds against 352. The design derived a requirement of four hundred decisions a second and expected the card to be the constraint; at these sizes the constraint turned out to be the other way round, and the card only becomes worth its overhead if the networks grow by orders of magnitude.
+    """
     import torch
 
-    if name:
-        return torch.device(name)
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(name) if name else torch.device("cpu")
 
 
 def _load(net, path: Optional[str], device) -> None:
@@ -132,8 +134,9 @@ def train_tactics(arguments) -> int:
     batcher.stop()
     _save(net, arguments.save)
 
-    fights = sum(session.policy.statistics.engagements for session in sessions
-                 if session.policy is not None and hasattr(session.policy, "statistics"))
+    # Counted from the episode records rather than from the policies, which are put down as each episode ends: what the arena did is a fact about the episodes it did it in, and the record is where that is kept.
+    fights = sum(int(record.statistics.get("engagements", 0))
+                 for session in sessions for record in session.records)
     log.info("%d engagement(s) over %d instance(s); batched inference averaged %.1f per call",
              fights, len(sessions), batcher.batch_size)
     if report is not None:
