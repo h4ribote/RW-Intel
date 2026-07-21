@@ -14,7 +14,7 @@ final class Wire {
     /** ASCII "RWIN", so a stream that has lost sync fails at the next header rather than silently. */
     static final int MAGIC = 0x4E495752;
 
-    static final int PROTOCOL_VERSION = 1;
+    static final int PROTOCOL_VERSION = 2;
 
     static final int HEADER_SIZE = 16;
 
@@ -27,6 +27,7 @@ final class Wire {
     static final int BLOCK_REGIONS = 1;
     static final int BLOCK_SQUADS = 2;
     static final int BLOCK_UNITS = 4;
+    static final int BLOCK_EVENTS = 8;
 
     private Wire() {
     }
@@ -149,10 +150,13 @@ final class Wire {
             return text.append('"');
         }
 
+        public String toString() {
+            return text.toString() + "}";
+        }
+
         byte[] toBytes() {
-            String body = text.toString() + "}";
             try {
-                return body.getBytes("UTF-8");
+                return toString().getBytes("UTF-8");
             } catch (java.io.UnsupportedEncodingException e) {
                 throw new IllegalStateException(e);
             }

@@ -31,6 +31,20 @@ class UnitType:
     building: bool
     builder: bool
     movement: str
+    #: Maximum attack range in world units, zero for something that cannot shoot.
+    range: float = 0.0
+    hits_air: bool = False
+    hits_land: bool = True
+    #: True for a building that may only stand on a resource pool, which is what an extractor is.
+    extractor: bool = False
+
+    @property
+    def armed(self) -> bool:
+        return self.range > 0.0
+
+    @property
+    def mobile(self) -> bool:
+        return not self.building and self.movement not in ("", "NONE", "BUILDING")
 
 
 @dataclass
@@ -92,6 +106,7 @@ class Session:
         self.episodes_wanted = episodes
 
         self.instance = -1
+        self.build = ""
         self.types: List[UnitType] = []
         self.by_lookup: Dict[str, UnitType] = {}
         self.map_content: Optional[MapContent] = None
@@ -101,6 +116,19 @@ class Session:
         self.records: List[EpisodeRecord] = []
         self.observations = 0
         self.started_at = time.time()
+
+    @staticmethod
+    def instance_in(hello: bytes) -> int:
+        """The instance number out of a HELLO body, which is what says whether a connection is a new instance or one coming back."""
+        return int(json.loads(hello.decode("utf-8")).get("instance", 0))
+
+    def rebind(self, connection, address) -> None:
+        try:
+            self.connection.close()
+        except OSError:
+            pass
+        self.connection = connection
+        self.address = address
 
     # ---- outgoing --------------------------------------------------------------------
 
@@ -130,17 +158,29 @@ class Session:
     def on_hello(self, body: bytes) -> None:
         payload = json.loads(body.decode("utf-8"))
         self.instance = int(payload.get("instance", 0))
+        self.build = str(payload.get("build", ""))
         self.types = [
             UnitType(index=i, name=entry["name"], lookup=entry.get("lookup", entry["name"]),
                      price=int(entry.get("price", 0)), tech=int(entry.get("tech", 1)),
                      building=bool(entry.get("building", False)),
                      builder=bool(entry.get("builder", False)),
-                     movement=str(entry.get("movement", "")))
+                     movement=str(entry.get("movement", "")),
+                     range=float(entry.get("range", 0.0)),
+                     hits_air=bool(entry.get("hitsAir", False)),
+                     hits_land=bool(entry.get("hitsLand", True)),
+                     extractor=bool(entry.get("extractor", False)))
             for i, entry in enumerate(payload.get("unitTypes", []))
         ]
         self.by_lookup = {t.lookup: t for t in self.types}
-        log.info("instance %d connected with %d unit types", self.instance, len(self.types))
-        self.start_episode()
+        log.info("instance %d connected on build %s with %d unit types",
+                 self.instance, self.build or "?", len(self.types))
+
+        # A HELLO in the middle of a running episode is a reconnection, not a new instance. Starting the episode again would throw away a match the agent has been running on its own meanwhile, which is exactly what the degraded mode is for.
+        if payload.get("running"):
+            log.info("instance %d rejoined episode %d in progress", self.instance, payload.get("episode", 0))
+            self._resume(str(payload.get("map", "")))
+        else:
+            self.start_episode()
 
     def on_episode(self, body: bytes) -> None:
         payload = json.loads(body.decode("utf-8"))
@@ -167,20 +207,34 @@ class Session:
             log.info("instance %d has run its episodes", self.instance)
 
     def _on_started(self, payload: dict) -> None:
-        map_path = payload.get("map", "")
+        self._load_map(str(payload.get("map", "")))
+        self.policy = self.policy_factory(self)
+        self.observations = 0
+        log.info("instance %d episode %d on %s: %d regions, players %s",
+                 self.instance, payload.get("episode", 0), os.path.basename(str(payload.get("map", ""))),
+                 len(self.regions), payload.get("players", []))
+
+    def _resume(self, map_path: str) -> None:
+        """Picks an episode back up after a reconnection. The squads are still there; what has to be rebuilt is this side's view of them, and the observation carries the identifiers that does it."""
+        self._load_map(map_path)
+        self.policy = self.policy_factory(self)
+
+    def _load_map(self, map_path: str) -> None:
         self.map_content = self._read_map(map_path)
         self.regions = decompose(self.map_content) if self.map_content else []
         self.home = None
-        self.policy = self.policy_factory(self)
-        self.observations = 0
-
+        # The region table goes over in the order the map decomposition produced, which is stable across runs and across a reconnection. The egocentric order the design asks for is applied where a layer is handed the table, not on the wire: home is not known until something has been built, and renumbering the slots part way through an episode would move the ground under a policy that had learnt what a slot means.
         rows: List[float] = []
         for region in self.regions:
-            rows.extend([round(region.x, 2), round(region.y, 2), float(region.resources), 0.0])
-        self._control({"command": "regions", "regions": rows})
-        log.info("instance %d episode %d on %s: %d regions, players %s",
-                 self.instance, payload.get("episode", 0), os.path.basename(map_path),
-                 len(self.regions), payload.get("players", []))
+            rows.extend([round(region.x, 2), round(region.y, 2), float(region.resources), 1.0 if region.spawn else 0.0])
+        # The resource points go over with the table because a pool is not an object in the world: it is a flag on a map tile, and until an extractor is built there is nothing at the position to find. The game side needs the positions to say who holds what.
+        points: List[float] = []
+        if self.map_content is not None and self.regions:
+            for tile in self.map_content.resources:
+                x, y = self.map_content.to_world(tile)
+                nearest = min(self.regions, key=lambda r: (r.x - x) ** 2 + (r.y - y) ** 2)
+                points.extend([round(x, 2), round(y, 2), float(nearest.id)])
+        self._control({"command": "regions", "regions": rows, "resourcePoints": points})
 
     def _read_map(self, engine_path: str) -> Optional[MapContent]:
         """The engine reports a path relative to its own assets directory, which is where the reader looks anyway."""
@@ -195,6 +249,15 @@ class Session:
     def on_observation(self, body: bytes) -> None:
         observation = decode_observation(body)
         self.observations += 1
+        if log.isEnabledFor(logging.DEBUG) and observation.regions:
+            log.debug("instance %d t=%ds blocks=%x regions=%d(held %d/%d) squads=%d units=%d(%d enemy) events=%s home=%.0f..%.0f",
+                      self.instance, observation.game_time_ms // 1000, observation.blocks, len(observation.regions),
+                      sum(r.held_by_us for r in observation.regions), sum(r.held_by_enemy for r in observation.regions),
+                      len(observation.squads), len(observation.unit_states),
+                      sum(1 for u in observation.unit_states if u.hostile),
+                      [(e.kind, e.unit) for e in observation.events],
+                      min(r.distance_from_home for r in observation.regions),
+                      max(r.distance_from_home for r in observation.regions))
         if self.policy is None:
             return
         if self.home is None and observation.unit_states:

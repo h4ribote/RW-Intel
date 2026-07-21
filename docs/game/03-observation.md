@@ -84,10 +84,13 @@ flowchart TD
 | 命令キュー長 | `y.av()` | `int` | 実行時確認 |
 | i 番目の命令 | `y.k(int)` | `au` | 逆アセンブル確認 |
 | 現在の命令 | `y.ar()` | `au` | 逆アセンブル確認 |
+| 現在の命令の種別 | `y.ar().a` | `game.units.av` | 実行時確認 |
 | 命令なしか | `y.aq()` | `boolean` | 逆アセンブル確認 |
 | 交戦スタンス | `y.P` | `game.units.a` | 逆アセンブル確認 |
 
 命令キューの実体は容量 30 の配列 `y.g` である。命令オブジェクト `game.units.au` の構造は [04-actions.md](04-actions.md) に記す。
+
+**そのユニットが今どの種類の命令を実行しているかは `au.a` から取れる。** 種別は enum `game.units.av` の定数であり、定数は 17 個ある。観測が運ぶのはこの定数の列挙上の位置である。
 
 交戦スタンス `game.units.a` の定数は順に `outOfRange`、`onlyInRange`、`returnFire`、`holdFire`、`guardArea`、`aggressive`、`mixed` である。
 
@@ -135,7 +138,7 @@ flowchart TD
 
 武器はタレット定義 `custom.bn`(連射間隔 `m`、射程 `ab`、エネルギー消費 `u`)と投射体定義 `custom.bh`(直接ダメージ `b`、範囲ダメージ `c`、範囲半径 `i`、速度 `w`)に分かれる。
 
-組み込みのユニット種別は enum `game.units.ar` に定数名が平文で残っている。`extractor`、`landFactory`、`commandCenter`、`builder`、`tank` などである。このうち `crystalResource` が資源地点にあたる。マップ側での表現は [06-content.md](06-content.md) に記す。
+組み込みのユニット種別は enum `game.units.ar` に定数名が平文で残っている。`extractor`、`landFactory`、`commandCenter`、`builder`、`tank` などである。`crystalResource` もここに登録されているが、**この種別の実体が盤面に置かれることはない**。資源地点はゲームオブジェクトではなくタイルの属性である。マップ側での表現は [06-content.md](06-content.md) に記す。
 
 ## プレイヤー
 
@@ -188,7 +191,13 @@ flowchart TD
 
 視界は各プレイヤーの `n.N` に `[タイルX][タイルY]` の二次元配列で入っている。値は 5 未満が現在可視、5 以上が探索済みだが現在は不可視、10 が未探索である。判定用の API として、あるプレイヤーからユニットが見えるかを返す `am.d(n)` と、タイルが探索済みかを返す `b.b.a(n,int,int)` がある。**霧を考慮した観測を作る際はこれらを使う。**
 
-資源は地形の属性ではなく `crystalResource` という種別のゲームオブジェクトとして配置されている。
+### 資源地点はタイルのフラグであり、実行中のプロセスからは取れない
+
+**資源地点はゲームオブジェクトではなく、マップタイルの属性である。** マップ読み込みの `com.corrodinggames.rts.game.b.g` がタイル属性 `res_pool` を読み、タイルオブジェクト `game.b.g` の `boolean` フィールド `i` を立てる。**逆アセンブル確認**である。`res_pool` の文字列は jar 全体でこの 1 クラスにしか現れず、属性の読み出しに続くバイトコードは `putfield ... Field i:Z` である。
+
+**実行時確認**でも裏が取れている。資源地点が 9 個ある組み込みマップ Lake (2p) で、全ゲームオブジェクトのコレクション `w.dK()` が保持していたのはちょうど 24 個、内訳は樹木 `game.units.al` が 20 個と司令部 2 個と建設機 2 個であり、`crystalResource` 種別のオブジェクトは一つもなかった。
+
+したがって**資源地点の位置は実行中のプロセスからは取れず、マップファイルから読むしかない**。制御プロセスが TMX から読んだ位置をゲーム側へ渡し、ゲーム側はその位置と自軍・敵軍の採掘施設を突き合わせて占有を数える。マップ側の表現は [06-content.md](06-content.md)、受け渡しの経路は [../project/05-interface.md](../project/05-interface.md) に記す。
 
 ## ユニットの列挙
 

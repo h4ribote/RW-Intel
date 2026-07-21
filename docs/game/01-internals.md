@@ -24,6 +24,7 @@ Rusted Warfare 1.15 build #28 (Game Code 176) の内部構造のうち、プロ�
 | 経路 | 得られるもの |
 | --- | --- |
 | `Main.m` | `Main` インスタンス(静的) |
+| `Main.m.e` | `String` = ビルド番号。実行時に `#28` を返した |
 | `Main.m.k` | `java.b` = Slick コンテナ。フレームレート制御 |
 | `Main.m.j` | `java.u` = Slick ゲーム。描画とループ本体 |
 | `gameFramework.l.B()` | エンジンのシングルトン(静的メソッド) |
@@ -160,4 +161,4 @@ java.lang.NoClassDefFoundError: Could not initialize class com.corrodinggames.rt
 
 - ユニット系のパッケージは 642 クラスある。これが自作シミュレーションを非現実的にしている主因である。
 - デスクトップ版も内部に Android 互換層を抱えており、`android.graphics.Paint` などが実クラスとして jar に含まれる。難読化されたクラスの一覧を眺めるときに紛れるので注意する。
-- ここに記した対応は 1.15 build #28 に対するものである。ゲームが更新されれば難読化の割り当ては変わりうる。バージョンの検証は起動ログの `Build Number` と `Game Version` で行える。
+- ここに記した対応は 1.15 build #28 に対するものである。ゲームが更新されれば難読化の割り当ては変わりうる。バージョンの検証は起動ログの `Build Number` と `Game Version`、または実行中のプロセスから `Main.m.e` を読むことで行える。

@@ -23,6 +23,12 @@ final class Engine {
     final Class<?> actionClass;          // game.units.a.c, a special action handle
     final Class<?> loadModeClass;        // gameFramework.s
     final Class<?> mapKindClass;         // gameFramework.j.ai
+    final Class<?> orderClass;           // game.units.au, one entry of a unit's order queue
+    final Class<?> orderKindClass;       // game.units.av, what kind of order that is
+    /** game.units.custom.l, the type implementation a definition file produces. Null if the game ever stops having one. */
+    final Class<?> definedTypeClass;
+    /** The unobfuscated condition object a definition file's boolean keys are compiled into. */
+    final Class<?> logicBooleanClass;
 
     // ---- engine fields -------------------------------------------------------------------
 
@@ -53,6 +59,24 @@ final class Engine {
     private final Field unitStance;      // y.P
     private final Method unitTarget;     // y.ab()
     private final Method unitOrderCount; // y.av()
+    private final Method unitOrder;      // y.ar(), the order being carried out
+    private final Field orderKind;       // au.a, the av constant saying which kind it is
+    private final Object[] orderKinds;   // av.values(), so a kind can be reported as its ordinal
+
+    // ---- type internals ------------------------------------------------------------------
+
+    /** custom.l.cL, the stat block holding the numbers the type interface does not expose. */
+    private final Field definedTypeStats;
+    /** custom.as.i, maximum attack range in world units. */
+    private final Field statsRange;
+    /** custom.l.eq and custom.l.er, the canAttackFlyingUnits and canAttackLandUnits conditions. */
+    private final Field definedTypeHitsAir;
+    private final Field definedTypeHitsLand;
+    /** custom.l.aJ, the definition's placeOnlyOnResPool, which is what makes a building an extractor rather than a building that happens to stand near a pool. */
+    private final Field definedTypeOnResourcePool;
+    private final Method logicIsStaticTrue;
+    private final Method logicIsStaticFalse;
+    private final Method logicRead;
 
     // ---- player fields -------------------------------------------------------------------
 
@@ -87,6 +111,8 @@ final class Engine {
     // ---- commands ------------------------------------------------------------------------
 
     private final Method poolObtain;     // c.b(n), which queues the command as it hands it over
+    private final Method poolTake;       // c.b(), which does not queue, and is how a system command is taken
+    private final Method netSubmit;      // ad.a(e), the explicit submission a system command needs
     private final Method commandAddUnit; // e.a(am)
     private final Method commandMove;    // e.a(float, float)
     private final Method commandAttackMove; // e.b(float, float)
@@ -110,6 +136,11 @@ final class Engine {
         actionClass = Class.forName("com.corrodinggames.rts.game.units.a.c");
         loadModeClass = Class.forName("com.corrodinggames.rts.gameFramework.s");
         mapKindClass = Class.forName("com.corrodinggames.rts.gameFramework.j.ai");
+        orderClass = Class.forName("com.corrodinggames.rts.game.units.au");
+        orderKindClass = Class.forName("com.corrodinggames.rts.game.units.av");
+        definedTypeClass = Class.forName("com.corrodinggames.rts.game.units.custom.l");
+        logicBooleanClass = Class.forName(
+                "com.corrodinggames.rts.game.units.custom.logicBooleans.LogicBoolean");
 
         engineSingleton = engineClass.getMethod("B");
         frameCounter = field(engineClass, "bx");
@@ -136,6 +167,19 @@ final class Engine {
         unitStance = field(armedClass, "P");
         unitTarget = method(armedClass, "ab");
         unitOrderCount = method(armedClass, "av");
+        unitOrder = method(armedClass, "ar");
+        orderKind = fieldOfType(orderClass, orderKindClass);
+        orderKinds = (Object[]) orderKindClass.getMethod("values").invoke(null);
+
+        Class<?> statsClass = Class.forName("com.corrodinggames.rts.game.units.custom.as");
+        definedTypeStats = field(definedTypeClass, "cL");
+        statsRange = field(statsClass, "i");
+        definedTypeHitsAir = field(definedTypeClass, "eq");
+        definedTypeHitsLand = field(definedTypeClass, "er");
+        definedTypeOnResourcePool = field(definedTypeClass, "aJ");
+        logicIsStaticTrue = method(logicBooleanClass, "isStaticTrue", logicBooleanClass);
+        logicIsStaticFalse = method(logicBooleanClass, "isStaticFalse", logicBooleanClass);
+        logicRead = method(logicBooleanClass, "read", armedClass);
 
         playerCredits = field(playerClass, "o");
         playerSlot = field(playerClass, "k");
@@ -166,6 +210,8 @@ final class Engine {
         Class<?> poolClass = Class.forName("com.corrodinggames.rts.gameFramework.c");
         Class<?> commandClass = Class.forName("com.corrodinggames.rts.gameFramework.e");
         poolObtain = method(poolClass, "b", playerClass);
+        poolTake = method(poolClass, "b");
+        netSubmit = method(Class.forName("com.corrodinggames.rts.gameFramework.j.ad"), "a", commandClass);
         commandAddUnit = method(commandClass, "a", armedClass);
         commandAttack = method(commandClass, "a", unitClass);
         commandMove = method(commandClass, "a", float.class, float.class);
@@ -191,6 +237,25 @@ final class Engine {
             }
         }
         throw new NoSuchFieldException(name + " on " + owner.getName());
+    }
+
+    /**
+     * The one field of a class that holds a given type.
+     * Used where the obfuscated name would be a guess but the type makes the field unambiguous, which is the case for an order's kind: only one field of an order is an order kind.
+     */
+    private static Field fieldOfType(Class<?> owner, Class<?> type) throws Exception {
+        Field found = null;
+        for (Class<?> c = owner; c != null; c = c.getSuperclass()) {
+            for (Field candidate : c.getDeclaredFields()) {
+                if (candidate.getType() != type) continue;
+                if (found != null) throw new NoSuchFieldException(
+                        "more than one field of " + type.getName() + " on " + owner.getName());
+                candidate.setAccessible(true);
+                found = candidate;
+            }
+        }
+        if (found == null) throw new NoSuchFieldException("no field of " + type.getName() + " on " + owner.getName());
+        return found;
     }
 
     private static Method method(Class<?> owner, String name, Class<?>... parameters) throws Exception {
@@ -234,6 +299,18 @@ final class Engine {
 
     boolean defeat(Object engine) throws Exception {
         return defeat.getBoolean(engine);
+    }
+
+    /**
+     * The engine's sandbox flag, which makes every player's units answerable to this process and forces the fog off.
+     * A constructed engagement needs both sides driven from one process, and this is what allows it without a network session.
+     */
+    boolean sandbox(Object engine) throws Exception {
+        return field(engineClass, "bv").getBoolean(engine);
+    }
+
+    void setSandbox(Object engine, boolean on) throws Exception {
+        field(engineClass, "bv").setBoolean(engine, on);
     }
 
     void setSpeed(Object engine, float multiplier) throws Exception {
@@ -297,6 +374,17 @@ final class Engine {
     int orderCount(Object unit) throws Exception {
         Object value = unitOrderCount.invoke(unit);
         return value instanceof Integer ? ((Integer) value).intValue() : 0;
+    }
+
+    /** The kind of the order a unit is carrying out, as its position in the engine's own enumeration, or {@link #NO_ORDER} when it has none. */
+    static final int NO_ORDER = 255;
+
+    int orderKind(Object unit) throws Exception {
+        Object order = unitOrder.invoke(unit);
+        if (order == null) return NO_ORDER;
+        Object kind = orderKind.get(order);
+        for (int i = 0; i < orderKinds.length; i++) if (orderKinds[i] == kind) return i;
+        return NO_ORDER;
     }
 
     // ---- players -------------------------------------------------------------------------
@@ -389,6 +477,86 @@ final class Engine {
     float typeBuildSpeed(Object type) throws Exception { return ((Float) typeBuildSpeed.invoke(type)).floatValue(); }
     String typeMovement(Object type) throws Exception { return String.valueOf(typeMovement.invoke(type)); }
 
+    /**
+     * Maximum attack range in world units, or zero for a type that has none.
+     *
+     * Range is not on the type interface. A type that came from a definition file carries its numbers in a stat block, which is where the parser writes the file's maxAttackRange; a type that exists only as code in the game carries no such block, and every one of those is a building or the builder, none of which shoots.
+     */
+    float typeRange(Object type) {
+        try {
+            if (!definedTypeClass.isInstance(type)) return 0f;
+            Object stats = definedTypeStats.get(type);
+            return stats == null ? 0f : statsRange.getFloat(stats);
+        } catch (Exception e) {
+            return 0f;
+        }
+    }
+
+    /** Whether this type may only be placed on a resource pool, which is the definition of an extractor and the only way to tell one from any other building standing next to one. */
+    boolean typeOnResourcePool(Object type) {
+        try {
+            return definedTypeClass.isInstance(type) && definedTypeOnResourcePool.getBoolean(type);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Whether a type can shoot at flying units, or at land units. Null when the answer is a condition that only a live unit can settle. */
+    Boolean typeHitsAir(Object type) {
+        return staticCondition(type, definedTypeHitsAir);
+    }
+
+    Boolean typeHitsLand(Object type) {
+        return staticCondition(type, definedTypeHitsLand);
+    }
+
+    private Boolean staticCondition(Object type, Field which) {
+        try {
+            if (!definedTypeClass.isInstance(type)) return Boolean.FALSE;
+            Object condition = which.get(type);
+            if (condition == null) return Boolean.FALSE;
+            if (((Boolean) logicIsStaticTrue.invoke(null, condition)).booleanValue()) return Boolean.TRUE;
+            if (((Boolean) logicIsStaticFalse.invoke(null, condition)).booleanValue()) return Boolean.FALSE;
+            return null;
+        } catch (Exception e) {
+            return Boolean.FALSE;
+        }
+    }
+
+    /** Settles a condition that was not constant, using a unit of that type as the context it is asked about. */
+    private boolean readCondition(Object type, Field which, Object unit) {
+        try {
+            Object condition = which.get(type);
+            if (condition == null || !armedClass.isInstance(unit)) return false;
+            return ((Boolean) logicRead.invoke(condition, unit)).booleanValue();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    boolean unitHitsAir(Object type, Object unit) {
+        Boolean known = typeHitsAir(type);
+        return known != null ? known.booleanValue() : readCondition(type, definedTypeHitsAir, unit);
+    }
+
+    boolean unitHitsLand(Object type, Object unit) {
+        Boolean known = typeHitsLand(type);
+        return known != null ? known.booleanValue() : readCondition(type, definedTypeHitsLand, unit);
+    }
+
+    /** The build number the game reports at start up, so a control process can refuse a build the field names were not read from. */
+    String buildNumber() {
+        try {
+            Class<?> main = Class.forName("com.corrodinggames.rts.java.Main");
+            Object instance = field(main, "m").get(null);
+            if (instance == null) return "";
+            Object value = field(main, "e").get(instance);
+            return value == null ? "" : String.valueOf(value);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     // ---- commands ------------------------------------------------------------------------
 
     /**
@@ -423,6 +591,23 @@ final class Engine {
         if (stance < 0 || stance >= stances.length) return;
         commandStance.invoke(command, stances[stance]);
     }
+
+    /**
+     * Creates one unit of a type at a position, owned by a player, through the host's spawn system command.
+     *
+     * This is how a training situation is built. It is not an assignment to engine state: the command travels the same route a player's order does, which is what keeps a lockstep session in step. A command taken with no player is not queued as it is handed over, so unlike an ordinary order this one has to be submitted.
+     */
+    void spawn(Object engine, Object owner, Object type, float x, float y) throws Exception {
+        Object command = poolTake.invoke(commandPool.get(engine));
+        setField(command, "i", owner);
+        setField(command, "r", Boolean.TRUE);
+        setField(command, "u", Integer.valueOf(SYSTEM_SPAWN));
+        commandBuild.invoke(command, Float.valueOf(x), Float.valueOf(y), type, Integer.valueOf(1));
+        netSubmit.invoke(net(engine), command);
+    }
+
+    /** The system command that creates a unit outright. The engine refuses it unless the command also carries a build order with a type. */
+    private static final int SYSTEM_SPAWN = 5;
 
     /** Production and upgrades travel as a special action whose name is built from the type's own reported name. */
     void specialAction(Object command, String handle) throws Exception {

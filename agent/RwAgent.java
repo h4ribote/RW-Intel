@@ -27,18 +27,20 @@ public final class RwAgent {
     private static volatile int operationalMs = 2000;
     private static volatile boolean omniscient = true;
 
-    private static Engine engine;
-    private static World world;
-    private static Observer observer;
-    private static Commander commander;
-    private static MatchDriver driver;
-    private static Link link;
+    private static volatile Engine engine;
+    private static volatile World world;
+    private static volatile Observer observer;
+    private static volatile Commander commander;
+    private static volatile MatchDriver driver;
+    private static volatile Link link;
 
     /** Set once the world is loaded and the episode is under way, cleared when it ends. */
-    private static boolean episodeRunning = false;
-    private static int lastTacticalMs = Integer.MIN_VALUE;
-    private static int lastOperationalMs = Integer.MIN_VALUE;
-    private static boolean catalogueSent = false;
+    private static volatile boolean episodeRunning = false;
+    private static volatile int lastTacticalMs = Integer.MIN_VALUE;
+    private static volatile int lastOperationalMs = Integer.MIN_VALUE;
+    private static volatile boolean catalogueSent = false;
+    /** Set when an episode event could not be sent because the link was down, so that it goes out again once there is a link. */
+    private static volatile String pendingEpisodeEvent = null;
 
     public static void premain(String arguments, Instrumentation instrumentation) {
         parse(arguments);
@@ -146,8 +148,19 @@ public final class RwAgent {
      * Reading the clock from this thread is fine because nothing is done with it but scheduling. Reading the world would not be: the values would come from part way through a step.
      */
     private static void pump(Object game) throws Exception {
+        long lastAttempt = 0;
         while (true) {
-            if (link.connected() && !queued.get()) {
+            if (!link.connected()) {
+                // The episode is left running, and the squads keep the contracts they were last given: the engine goes on advancing them, which is a better thing to be doing while out of touch than standing still.
+                long now = System.currentTimeMillis();
+                if (now - lastAttempt >= 1000) {
+                    lastAttempt = now;
+                    if (link.connect()) {
+                        catalogueSent = false;
+                        log("reconnected to the control process");
+                    }
+                }
+            } else if (!queued.get()) {
                 int now = engine.gameTime(game);
                 boolean due = !catalogueSent
                         || link.hasControl()
@@ -176,6 +189,12 @@ public final class RwAgent {
             catalogueSent = true;
         }
 
+        if (pendingEpisodeEvent != null) {
+            String held = pendingEpisodeEvent;
+            pendingEpisodeEvent = null;
+            sendEpisodeEvent(held);
+        }
+
         String control;
         while ((control = link.takeControl()) != null) handleControl(game, control);
 
@@ -194,13 +213,17 @@ public final class RwAgent {
 
         int blocks = Wire.BLOCK_SQUADS | Wire.BLOCK_UNITS;
         if (lastOperationalMs == Integer.MIN_VALUE || now - lastOperationalMs >= operationalMs) {
-            blocks |= Wire.BLOCK_REGIONS;
+            // Events ride the operational frame because the layer that consumes them, the one that forms and retires squads, runs there. They are accumulated meanwhile rather than dropped.
+            blocks |= Wire.BLOCK_REGIONS | Wire.BLOCK_EVENTS;
             lastOperationalMs = now;
         }
         lastTacticalMs = now;
 
         byte[] body = observer.build(game, driver.episode(), blocks);
-        if (body != null) link.send(Wire.KIND_OBSERVATION, body);
+        if (body != null && link.send(Wire.KIND_OBSERVATION, body) && (blocks & Wire.BLOCK_EVENTS) != 0) {
+            // Cleared only once the frame carrying them has actually gone. An event describes a change, so reporting one twice is reporting a change that did not happen, but dropping one is worse: the layer that forms and retires squads has no other way to learn of it.
+            world.events.clear();
+        }
     }
 
     private static void sendHello(Object game) throws Exception {
@@ -219,10 +242,13 @@ public final class RwAgent {
             if (!lookupByName.containsKey(reported)) lookupByName.put(reported, entry.getKey());
         }
 
+        // Range and whether a type can shoot at aircraft are not on the type interface. A type a definition file produced carries both, and one that exists only as code in the game carries neither, which is right for those: every one of them is a building or the builder. The organisation layer sorts units into doctrines from these, so they travel with the catalogue rather than being worked out again on each side.
         StringBuilder catalogue = new StringBuilder("[");
         for (Object type : world.types()) {
             String reported = engine.typeName(type);
             String lookup = lookupByName.get(reported);
+            Boolean hitsAir = engine.typeHitsAir(type);
+            Boolean hitsLand = engine.typeHitsLand(type);
             if (catalogue.length() > 1) catalogue.append(',');
             catalogue.append("{\"name\":\"").append(reported).append('"')
                     .append(",\"lookup\":\"").append(lookup == null ? reported : lookup).append('"')
@@ -230,17 +256,26 @@ public final class RwAgent {
                     .append(",\"tech\":").append(engine.typeTech(type))
                     .append(",\"building\":").append(engine.typeIsBuilding(type))
                     .append(",\"builder\":").append(engine.typeIsBuilder(type))
+                    .append(",\"extractor\":").append(engine.typeOnResourcePool(type))
                     .append(",\"movement\":\"").append(engine.typeMovement(type)).append('"')
+                    .append(",\"range\":").append(world.rangeOfType(type))
+                    .append(",\"hitsAir\":").append(hitsAir == null ? "true" : hitsAir.toString())
+                    .append(",\"hitsLand\":").append(hitsLand == null ? "true" : hitsLand.toString())
                     .append('}');
         }
         catalogue.append(']');
 
         Wire.Json hello = new Wire.Json();
         hello.put("instance", instance);
+        hello.put("build", engine.buildNumber());
         hello.put("tacticalMs", tacticalMs);
         hello.put("operationalMs", operationalMs);
         hello.put("omniscient", omniscient);
         hello.put("slots", engine.slotCount());
+        hello.put("map", driver.map());
+        // A reconnection is a fresh HELLO in the middle of whatever was already going on, so it has to say what that was: the control process rebuilds its side from the squad identifiers rather than starting the episode over.
+        hello.put("episode", driver.episode());
+        hello.put("running", episodeRunning);
         hello.raw("unitTypes", catalogue.toString());
         link.send(Wire.KIND_HELLO, hello.toBytes());
         log("sent the catalogue: " + world.types().size() + " types");
@@ -267,15 +302,19 @@ public final class RwAgent {
             lastTacticalMs = Integer.MIN_VALUE;
             lastOperationalMs = Integer.MIN_VALUE;
 
+            // Any decision left over from the episode that just ended names units that no longer exist.
+            link.takeAction();
+
             Wire.Json event = new Wire.Json();
             event.put("event", "started");
             event.put("episode", driver.episode());
             event.put("map", driver.map());
             event.put("seed", settings.seed);
             event.raw("players", driver.players());
-            link.send(Wire.KIND_EPISODE, event.toBytes());
+            sendEpisodeEvent(event.toString());
         } else if (command.equals("regions")) {
-            world.setRegions(parseRegions(json));
+            world.setRegions(parseRows(json, "regions", 4));
+            world.setResourcePoints(parseRows(json, "resourcePoints", 3));
             log("region table: " + world.regions.size() + " regions");
         } else if (command.equals("abort")) {
             if (episodeRunning) endEpisode(game);
@@ -284,32 +323,55 @@ public final class RwAgent {
             if (speed > 0f) engine.setSpeed(game, speed);
         } else if (command.equals("omniscient")) {
             world.omniscient = Wire.boolField(json, "value", world.omniscient);
+        } else if (command.equals("scenario")) {
+            buildScenario(game, json);
         }
     }
 
     /**
-     * Reads the region table out of a control frame.
-     * The rows are a flat array of x, y, resource count and distance from home, four numbers each, because that avoids a general parser for the one message that carries a list.
+     * Builds an engagement to train the tactical layer on, without playing a match to reach it.
+     *
+     * Everything here goes through the host's spawn system command, which travels the route a player's order does. Nothing is assigned to engine state, because that is what breaks a lockstep session, and the whole reason for constructing situations is to train on them and then play with what was learnt.
+     *
+     * There is no instruction to clear the board, because the game offers no command that removes a unit: a scenario episode is started with no starting units instead, and then filled in. Its sandbox flag makes every player's units answerable here, which is what lets one process drive both sides of the engagement.
      */
-    private static List<float[]> parseRegions(String json) {
+    private static void buildScenario(Object game, String json) throws Exception {
+        if (Wire.field(json, "sandbox") != null) engine.setSandbox(game, Wire.boolField(json, "sandbox", false));
+
+        int made = 0;
+        for (float[] row : parseRows(json, "spawns", 5)) {
+            Object type = world.typeAt((int) row[0]);
+            Object owner = engine.playerAt((int) row[1]);
+            if (type == null || owner == null) continue;
+            int count = Math.max(1, (int) row[4]);
+            for (int i = 0; i < count; i++) {
+                engine.spawn(game, owner, type, row[2], row[3]);
+                made++;
+            }
+        }
+        log("scenario: spawned " + made + " unit(s)");
+    }
+
+    /**
+     * Reads a list out of a control frame as a flat array of numbers, a fixed count per row.
+     * Every list the control frames carry is a table of numbers, so this is enough and a general parser would be answering a question nobody asked. Regions are x, y, resource count and whether the region holds a starting position; scenario spawns are type, player slot, x, y and how many.
+     */
+    private static List<float[]> parseRows(String json, String key, int width) {
         java.util.List<float[]> rows = new java.util.ArrayList<float[]>();
-        int start = json.indexOf("\"regions\"");
+        int start = json.indexOf('"' + key + '"');
         if (start < 0) return rows;
         int open = json.indexOf('[', start);
         int close = json.indexOf(']', open);
         if (open < 0 || close < 0) return rows;
         String[] numbers = json.substring(open + 1, close).split(",");
-        for (int i = 0; i + 3 < numbers.length; i += 4) {
+        for (int i = 0; i + width - 1 < numbers.length; i += width) {
+            float[] row = new float[width];
             try {
-                rows.add(new float[]{
-                        Float.parseFloat(numbers[i].trim()),
-                        Float.parseFloat(numbers[i + 1].trim()),
-                        Float.parseFloat(numbers[i + 2].trim()),
-                        Float.parseFloat(numbers[i + 3].trim()),
-                });
+                for (int j = 0; j < width; j++) row[j] = Float.parseFloat(numbers[i + j].trim());
             } catch (NumberFormatException e) {
                 break;
             }
+            rows.add(row);
         }
         return rows;
     }
@@ -330,8 +392,23 @@ public final class RwAgent {
         event.put("team", self == null ? -1 : engine.team(self));
         event.put("timeout", driver.settings().maxSeconds > 0 && seconds >= driver.settings().maxSeconds);
         event.raw("standing", driver.standing(game));
-        link.send(Wire.KIND_EPISODE, event.toBytes());
+        sendEpisodeEvent(event.toString());
         log("episode " + driver.episode() + " finished at " + seconds + "s, alive teams " + alive);
+    }
+
+    /**
+     * Sends an episode event, holding on to it if the link is down.
+     *
+     * These are the two frames the control process counts episodes with. One lost frame and the two sides disagree about how many have been run: the control process would start another to make up a number it had already reached, or wait for one that had already finished.
+     */
+    private static void sendEpisodeEvent(String json) {
+        byte[] body;
+        try {
+            body = json.getBytes("UTF-8");
+        } catch (java.io.UnsupportedEncodingException e) {
+            throw new IllegalStateException(e);
+        }
+        if (!link.send(Wire.KIND_EPISODE, body)) pendingEpisodeEvent = json;
     }
 
     static void log(String message) {

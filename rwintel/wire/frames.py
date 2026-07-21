@@ -14,7 +14,7 @@ from typing import Optional
 #: ASCII "RWIN". Present so a stream that has lost sync fails loudly at the next header.
 MAGIC = 0x4E495752
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 _HEADER = struct.Struct("<IHHHHI")
 HEADER_SIZE = _HEADER.size
