@@ -4,6 +4,8 @@ There is one rule and the rest follows from it: a layer is paid for how well it 
 
 Both layers are shaped potentially. A shaping term of the form gamma times the potential after minus the potential before cannot change which policy is optimal, whatever the potential is, so a term that turns out to have been a bad idea costs sample efficiency and never correctness. Everything continuous here is therefore in a potential, and only the discrete outcome of an errand — taken and held, out of time, or lost — is paid directly.
 
+That guarantee holds on one condition, and it is a convention rather than an observation: the potential of the state an errand ended in is taken to be nought. The shaping only telescopes to the difference of two potentials if the last term is nought less what was being held, and a last term that used the real potential of the ending board would leave a residue which depends on where the errand ended, which is exactly the dependence potential shaping exists to remove. The terminal states are not board positions the potential is defined on anyway, so what they are worth is this side's to decide, and nought is the choice that makes the arithmetic hold.
+
 The potentials are written in shares rather than in credits for the same reason the features are: an errand fought over four tanks and an errand fought over forty are the same errand, and a reward that grew with the size of the armies would make the same behaviour worth more later in a match than earlier.
 """
 
@@ -16,9 +18,17 @@ from ..wire import Status
 from ..control.policy.contracts import SquadRecord
 from ..control.policy.view import WorldView
 
-#: How much of the tactical potential is standing on the ground the contract named, against how much is not having spent the budget. Holding weighs more because taking the region is what the errand is; the budget is a constraint on how, not the object.
-HOLDING_WEIGHT = 0.7
-SPENDING_WEIGHT = 0.3
+#: What the tactical potential is made of: standing on the ground the contract named, not having spent the allowance, and having destroyed more than has been lost.
+#:
+#: The exchange weighs most, and the reason is credit assignment rather than importance. An errand is about a hundred and twenty five decisions long at the tactical rate, and with a discount of a hundredth and a trace of five hundredths the terminal reaches the first of them weighted by about four ten-thousandths. Nothing the layer decides in the opening of a fight is therefore taught by how the fight ended; what teaches it is the shaping, and the shaping only teaches the right thing if it points where the terminal points. Trading well is what the terminal is, so trading well is what the dense term has to be. Measured before this term existed, two hundred updates moved the return not at all while the entropy of the policy climbed steadily, which is the signature of a gradient made of noise and a shaping term aimed elsewhere.
+#:
+#: The old pair on their own aimed somewhere else in a way worth naming: not having spent the allowance rewards not fighting, and a layer whose only dense signal says that will find the quietest way through every engagement.
+HOLDING_WEIGHT = 0.35
+SPENDING_WEIGHT = 0.15
+EXCHANGE_WEIGHT = 0.5
+
+#: Credits added to both sides of the exchange ratio before it is taken, so that a fight in which nothing has happened yet reads as even rather than swinging to one end on the first shot. A tank costs about this, which makes the first kill worth about two thirds rather than all of the term.
+EXCHANGE_PRIOR = 300.0
 
 #: Paid once, when an errand ends. Taking and holding the region is the errand done; running out of time is a failure that at least did not cost anything in particular; being reported as losing means the budget went and the region did not come, which is the outcome the whole cost budget mechanism exists to make expensive.
 COMPLETE_REWARD = 1.0
@@ -53,6 +63,8 @@ class Outcome:
     done: bool = False
     #: What ended the errand, for a log that has to be read by a person rather than by an optimiser.
     reason: str = ""
+    #: True on the period a new contract replaced the one a squad was working to. The errand that was replaced did not fail and did not finish; it stopped being the thing the squad is doing, so a caller keeping trajectories has to end the old one here rather than letting the decisions of two errands sit in one.
+    renewed: bool = False
 
 
 @dataclass
@@ -62,21 +74,42 @@ class _Mission:
     issued_at_ms: int
     potential: float = 0.0
     started: bool = False
+    #: True once this errand has been paid its one terminal, so that it cannot be paid another.
+    ended: bool = False
 
 
 class TacticalReward:
     """Pays the tactical layer for the errand it was given, one squad at a time.
 
     An errand is bounded by its contract. When the operational layer issues a new one the old episode ends and a new one begins, which is exactly the boundary the design wants the tactical horizon to close at: ten to sixty seconds, not a match. That the boundary is drawn by another layer's decision is not a problem to be solved but the arrangement itself — the contract is the unit of work, so it is the unit of pay.
+
+    An errand is paid one terminal and no more. The memory of a finished errand is therefore kept rather than dropped, keyed by the moment its contract was issued: the conditions that end one — the ground taken, the allowance gone, the deadline past — are read from the board and stay true for as long as the board stays that way, so an errand whose memory was dropped would be started afresh on the next period, meet the same condition, and be paid again. Measured before this was so, a squad reported as losing was paid the whole of that penalty every other period until its fight ended, and one run of three hundred and eighty three fights paid four thousand three hundred and forty nine of them.
+
+    Where an errand ends is not the same question everywhere it is used. In a match the operational layer reissues contracts, so the conditions of the contract are what bound the errand and it is right that they end it. On a board where engagements are constructed there is one contract for the whole fight and nothing reissues it, so ending the errand early would leave the rest of the fight unpaid while the squad went on fighting it. `status_terminals` is which of the two this is.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, status_terminals: bool = True) -> None:
         self.missions: Dict[int, _Mission] = {}
+        self.status_terminals = status_terminals
 
     def forget(self, squad_id: int) -> None:
         self.missions.pop(squad_id, None)
 
-    def step(self, squad: SquadRecord, view: WorldView, game_time_ms: int) -> Outcome:
+    def ended(self, squad_id: int) -> bool:
+        """Whether this squad's errand has already been paid its terminal, which is what a caller ending errands from outside has to ask before paying another."""
+        mission = self.missions.get(squad_id)
+        return mission is not None and mission.ended
+
+    def close(self, squad_id: int) -> float:
+        """Hands back the potential this squad's errand was last valued at and forgets the errand, so that a caller ending it from outside can pay the shaping term itself.
+
+        Shaping is only harmless if it telescopes to nothing over an episode, and it only does that if the potential of a terminal state is taken to be nought. An errand closed from outside has therefore to be paid its last shaping term as nought minus whatever was being held, and this is where that figure comes from. Nought when nothing is held, which is the case for a squad whose errand ended in the same period it was given, so the answer is always a number that can be paid.
+        """
+        mission = self.missions.pop(squad_id, None)
+        return mission.potential if mission is not None else 0.0
+
+    def step(self, squad: SquadRecord, view: WorldView, game_time_ms: int,
+             killed: float = 0.0) -> Outcome:
         contract = squad.contract
         if contract is None:
             self.forget(squad.id)
@@ -85,30 +118,42 @@ class TacticalReward:
         mission = self.missions.get(squad.id)
         if mission is None or mission.issued_at_ms != contract.issued_at_ms:
             # A fresh contract is a fresh errand. The potential is taken now and paid from the next period, so that the step which merely received the contract is not paid for the board it arrived on.
+            replaced = mission is not None
             mission = _Mission(issued_at_ms=contract.issued_at_ms,
-                               potential=self._potential(squad, view))
+                               potential=self._potential(squad, view, killed))
             self.missions[squad.id] = mission
+            return Outcome(renewed=replaced)
+
+        # An errand that has already been paid its terminal is over. Decisions taken about the squad afterwards belong to no errand until a contract issues a new one, and paying them would be paying for work nobody asked for.
+        if mission.ended:
             return Outcome()
 
-        potential = self._potential(squad, view)
+        terminal, reason = self._terminal(squad, contract)
+        if terminal is not None:
+            # The potential of a state an errand ended in is nought by convention, so the last shaping term is nought less whatever was being held rather than the discounted potential of the ending board. Paying the real potential would leave a residue proportional to it, the residue would differ between one ending and another, and a shaping term that differs by outcome is a term that moves which policy is best -- the single thing potential-based shaping was chosen to rule out. Taking the ground is where it bit hardest: that board scores near the top of the potential, so a completion was worth about two thirds of a point more than the terminal it is defined to be worth.
+            mission.ended = True
+            return Outcome(reward=(0.0 - mission.potential) + terminal, done=True, reason=reason)
+
+        potential = self._potential(squad, view, killed)
         reward = DISCOUNT * potential - mission.potential
         mission.potential = potential
+        return Outcome(reward=reward)
 
-        terminal, reason = self._terminal(squad, contract)
-        if terminal is None:
-            return Outcome(reward=reward)
-        self.forget(squad.id)
-        return Outcome(reward=reward + terminal, done=True, reason=reason)
-
-    def _potential(self, squad: SquadRecord, view: WorldView) -> float:
+    def _potential(self, squad: SquadRecord, view: WorldView, killed: float = 0.0) -> float:
         contract = squad.contract
         target = view.region(contract.target_region) if contract is not None else None
         holding = _share(target.our_value, target.enemy_value) if target is not None else 0.5
         budget = contract.cost_budget if contract is not None else 0.0
         spent = min(1.0, squad.losses / budget) if budget > 0 else 0.0
-        return HOLDING_WEIGHT * holding + SPENDING_WEIGHT * (1.0 - spent)
+        # Worth destroyed against worth lost, over the life of this contract, with a unit's price added to both so that nothing having happened reads as even. This is the running form of the figure an engagement is finally scored on, which is the whole reason it is here.
+        exchange = _share(killed + EXCHANGE_PRIOR, squad.losses + EXCHANGE_PRIOR)
+        return (HOLDING_WEIGHT * holding + SPENDING_WEIGHT * (1.0 - spent)
+                + EXCHANGE_WEIGHT * exchange)
 
     def _terminal(self, squad: SquadRecord, contract) -> Tuple[Optional[float], str]:
+        # Where one contract stands for a whole fight, what ends the fight ends the errand and nothing else does. Being reported as losing is then something the layer is meant to act on rather than something the errand is over because of, and the squad that acts on it goes on fighting under the same contract for another half minute; ending its errand there would leave every decision in that half minute unpaid. A squad destroyed is no exception, even though its errand plainly is over: what it is worth depends on how much it took with it, and the only figure that knows that is the score of the fight, which is handed in from outside.
+        if not self.status_terminals:
+            return None, ""
         if not squad.members:
             return WIPED_REWARD, "wiped"
         if squad.status is Status.COMPLETE:

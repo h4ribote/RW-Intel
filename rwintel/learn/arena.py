@@ -67,6 +67,26 @@ MAX_UNITS = 14
 #: The fewest units a side is built from, which is what bounds how expensive a type may be for the budget it is drawn against. A fight is between formations, and one machine against a formation is a different problem from the one the five departures are about.
 MINIMUM_FORCE = 3
 
+#: How much of a terminal reward the outcome of a fight is worth, for a fight that ended without the contract itself reaching one of its own conclusions. One means that destroying the other side without a scratch is paid exactly what taking the contracted ground is paid, which is the largest this can be set to without teaching a layer to prefer a massacre to the errand it was given.
+#:
+#: Something has to be paid here, and measurement is the reason. Most fights end neither by one side being destroyed nor on the clock: they end with two forces that have stopped hurting each other, and under a scheme that paid only the discrete conclusions those fights were worth precisely nothing to either side. Nothing is the best score available in a fight that can only go badly, so a layer paid that way is being taught to stand off and wait, which is the opposite of what the arena exists to teach.
+TERMINAL_OUTCOME_WEIGHT = 1.0
+
+#: What multiple of a squad's present worth its contract will let it lose, drawn per side per engagement.
+#:
+#: Drawn rather than fixed because the allowance is one of the features the layer reads and one of the three things that make a mission be reported as losing. Pinned at the whole worth of the squad, being reported as losing means being all but destroyed, so the report never arrives in time to be acted on and the feature never moves; a layer trained that way has never seen the board on which the decision to break off is the right one, and meets it for the first time in a match, where the operational layer hands down allowances far tighter than a squad's whole worth.
+BUDGET_SHARE = (0.3, 1.2)
+
+
+def _lost(started: float, left: float) -> float:
+    """The share of a side's worth that was destroyed, between nought and one.
+
+    Bounded at both ends and defined as nothing when there was nothing to lose, so that a side built from no units, or one that somehow ends worth more than it began, still yields a number a reward can be paid from.
+    """
+    if started <= 0.0:
+        return 0.0
+    return min(1.0, max(0.0, (started - left) / started))
+
 
 @dataclass
 class Engagement:
@@ -74,21 +94,42 @@ class Engagement:
 
     index: int
     site: Tuple[float, float]
+    #: What each side was worth when the two squads were formed, which is the worth of what actually arrived rather than of what was ordered. The two differ: placement is per unit and the engine refuses ground it will not build on, so part of an order can be stillborn while the rest of it fights. Scored against the order, a fight in which four of a dozen tanks never appeared would pay a loss nobody suffered.
     our_value: float = 0.0
     their_value: float = 0.0
+    #: What the spawn order cost, kept beside what arrived so that a run producing thin fights can be told from one producing small ones.
+    our_ordered: float = 0.0
+    their_ordered: float = 0.0
+    #: How many units were ordered for each side, which is what says whether an order has finished arriving. Spawning goes through the command queue a unit at a time, so a side can be half there while the other is whole, and forming on the first arrival puts the late half of an order on the board outside the squad that is being scored.
+    our_count: int = 0
+    their_count: int = 0
     ours_left: int = 0
     theirs_left: int = 0
+    #: What each side was still worth when the fight was called, which is what turns a fight into a score rather than a tally of who was left standing.
+    our_left_value: float = 0.0
+    their_left_value: float = 0.0
     seconds: float = 0.0
     #: True when the fight was called because neither side had hurt the other for a while, rather than because it ended or ran out of time.
     stalled: bool = False
     #: How close the two sides ever came to each other, in world units. A fight in which this never falls below the weapons' reach was not a fight, and telling that case from a fight that was genuinely even is the difference between an arena that produces engagements and one that produces marches.
     closest: float = 1e9
 
+    @property
+    def outcome(self) -> float:
+        """How the fight went for our side, from minus one to plus one: the share of the enemy's worth destroyed, less the share of ours lost.
+
+        Antisymmetric, which is the property the whole measurement rests on. The other side's figure is exactly this one negated, so a run of self-play must average to nought and any departure from nought is a left-right asymmetry in the arena rather than a policy that has learnt something — while against the handwritten layer, an average above nought is the same statement as having beaten it. What is learnt from and what is reported are then one quantity.
+
+        Written in shares rather than in credits because the two sides are built to a deliberately uneven draw. A difference of worth would pay for having been dealt the stronger side, and a layer can improve that score without ever fighting differently.
+        """
+        return _lost(self.their_value, self.their_left_value) - _lost(self.our_value, self.our_left_value)
+
     def as_dict(self) -> dict:
         return {"index": self.index, "our_value": round(self.our_value), "their_value": round(self.their_value),
+                "our_ordered": round(self.our_ordered), "their_ordered": round(self.their_ordered),
                 "ours_left": self.ours_left, "theirs_left": self.theirs_left,
                 "seconds": round(self.seconds, 1), "closest": round(self.closest),
-                "stalled": self.stalled}
+                "stalled": self.stalled, "outcome": round(self.outcome, 4)}
 
 
 @dataclass
@@ -102,19 +143,42 @@ class Statistics:
     won: int = 0
     lost: int = 0
     drawn: int = 0
+    #: The three ways a fight is drawn, kept apart because they say different things about the arena. A stalled fight is two forces that stopped hurting each other and was called early; an expired one ran the whole minute out with both sides still standing; a mutual one is both sides destroyed within the same period, which is a fight fought to the end rather than one that never happened. A run made almost entirely of the first two is an arena producing stand-offs rather than engagements, and the drawn count alone cannot show that.
+    stalled: int = 0
+    expired: int = 0
+    mutual: int = 0
     tactical: int = 0
     decisions: int = 0
+    #: Every fight's outcome, kept whole so that the spread can be taken over the episode. Only the mean, the spread and the count go into the episode record: the list is as long as the run and says nothing per fight that the history does not already carry.
+    outcomes: List[float] = field(default_factory=list)
+    #: How many errands were closed for each reason, summed over both sides. Present so that a run can be asked directly whether its terminals fired, which is otherwise only inferable by reading the code and guessing.
+    terminals: Dict[str, int] = field(default_factory=dict)
     history: List[dict] = field(default_factory=list)
 
     @property
     def fought(self) -> int:
         return self.won + self.lost + self.drawn
 
+    @property
+    def outcome_mean(self) -> float:
+        return sum(self.outcomes) / len(self.outcomes) if self.outcomes else 0.0
+
+    @property
+    def outcome_sd(self) -> float:
+        """How widely the outcomes were spread, which is what says how many fights an assertion about the mean would need. Nought for a single fight, which has no spread rather than an unknown one."""
+        if len(self.outcomes) < 2:
+            return 0.0
+        mean = self.outcome_mean
+        return (sum((value - mean) ** 2 for value in self.outcomes) / len(self.outcomes)) ** 0.5
+
     def as_dict(self) -> dict:
         return {"engagements": self.engagements, "spawned": self.spawned,
                 "stillborn": self.stillborn, "fought": self.fought, "won": self.won,
-                "lost": self.lost, "drawn": self.drawn, "tactical": self.tactical,
-                "decisions": self.decisions, "history": self.history[-32:]}
+                "lost": self.lost, "drawn": self.drawn, "stalled": self.stalled,
+                "expired": self.expired, "mutual": self.mutual, "tactical": self.tactical,
+                "decisions": self.decisions, "outcome_mean": round(self.outcome_mean, 4),
+                "outcome_sd": round(self.outcome_sd, 4), "terminals": dict(self.terminals),
+                "history": self.history[-32:]}
 
 
 class Arena:
@@ -122,8 +186,10 @@ class Arena:
 
     def __init__(self, session, tactics: Optional[Callable] = None,
                  opponent: Optional[Callable] = None, seed: int = 0,
-                 enemy_slot: Optional[int] = None) -> None:
+                 enemy_slot: Optional[int] = None,
+                 outcome_weight: float = TERMINAL_OUTCOME_WEIGHT) -> None:
         self.session = session
+        self.outcome_weight = outcome_weight
         self.catalogue = Catalogue(session.types, session.assets)
         self.random = random.Random(seed)
         # The layers are built here rather than handed in already made, because both sides have to read the same type catalogue as the arena that spawns their units: a layer classifying a unit from a different table would sort the same tank into a different role.
@@ -201,23 +267,31 @@ class Arena:
         self.session.scenario(spawns)
 
         self.known = {unit.id for unit in observation.unit_states}
+        # What the sides are worth is left until they are formed, because what is ordered here and what appears there are not always the same units.
         self.engagement = Engagement(index=self.statistics.engagements, site=site,
-                                     our_value=sum(kind.price for kind in our_force),
-                                     their_value=sum(kind.price for kind in their_force))
+                                     our_ordered=sum(kind.price for kind in our_force),
+                                     their_ordered=sum(kind.price for kind in their_force),
+                                     our_count=len(our_force), their_count=len(their_force))
         self.statistics.engagements += 1
         self.statistics.spawned += len(our_force) + len(their_force)
         self.phase = "spawning"
         self.until_ms = now + SPAWN_WAIT_MS
-        log.debug("engagement %d at %.0f,%.0f: %.0f against %.0f credits",
+        log.debug("engagement %d at %.0f,%.0f: %.0f against %.0f credits ordered",
                   self.engagement.index, site[0], site[1],
-                  self.engagement.our_value, self.engagement.their_value)
+                  self.engagement.our_ordered, self.engagement.their_ordered)
 
     def _form(self, observation: Observation, action: Action, now: int) -> None:
-        """Takes the units that have appeared since the spawn was ordered and makes two squads of them."""
+        """Takes the units that have appeared since the spawn was ordered and makes two squads of them.
+
+        Waits for the whole of both orders rather than for the first unit of each. An order arrives over several periods, and one side's is submitted before the other's, so forming as soon as both have somebody systematically leaves more of the second side outside its squad than of the first. Those units stand on the board, join in the fighting, and are not counted in what the squad was worth or in what is left of it, which shows up as a score that favours one side of the board for no reason to do with either policy. If the wait runs out, whatever arrived is what fights, and that is honest because both figures the score uses are then taken from the same units.
+        """
         fresh = [unit for unit in observation.unit_states if unit.id not in self.known]
         ours = [unit.id for unit in fresh if not unit.hostile]
         theirs = [unit.id for unit in fresh if unit.hostile]
-        if not ours or not theirs:
+        engagement = self.engagement
+        whole = (engagement is None
+                 or (len(ours) >= engagement.our_count and len(theirs) >= engagement.their_count))
+        if not ours or not theirs or (not whole and now < self.until_ms):
             if now >= self.until_ms:
                 log.info("engagement %d at %.0f,%.0f never appeared, trying another",
                          self.engagement.index if self.engagement else -1,
@@ -232,6 +306,10 @@ class Arena:
             OURS: self._record(OURS, ours, observation),
             THEIRS: self._record(THEIRS, theirs, observation),
         }
+        if self.engagement is not None:
+            # The fight is between what is standing here, so this is where the two figures the score divides by are taken. They are on the same footing as the worth left at the end, which the game reports as the price of a squad's surviving members.
+            self.engagement.our_value = self.squads[OURS].value
+            self.engagement.their_value = self.squads[THEIRS].value
         action.squads.append(SquadAssignment(squad=OURS, units=ours))
         action.squads.append(SquadAssignment(squad=THEIRS, units=theirs,
                                              owner=self._their_slot(observation)))
@@ -240,8 +318,10 @@ class Arena:
         for squad_id, other in ((OURS, THEIRS), (THEIRS, OURS)):
             squad = self.squads[squad_id]
             target = self._region_of(self.squads[other])
+            # Drawn inside the loop so that the two sides get separate allowances, as they would from an operational layer pricing two missions against what each is for.
+            budget = max(200.0, squad.value * self.random.uniform(*BUDGET_SHARE))
             contract = TaskContract(squad=squad_id, task=Task.ATTACK, target_region=target,
-                                    stance=Stance.AGGRESSIVE, cost_budget=max(200.0, squad.value),
+                                    stance=Stance.AGGRESSIVE, cost_budget=budget,
                                     deadline_ms=deadline, issued_at_ms=now)
             squad.contract = contract
             action.contracts.append(Contract(
@@ -289,12 +369,17 @@ class Arena:
 
     def _call(self, ours: SquadRecord, theirs: SquadRecord, now: int, stalled: bool = False) -> None:
         engagement = self.engagement
+        outcome = 0.0
         if engagement is not None:
             engagement.stalled = stalled
-        if engagement is not None:
             engagement.ours_left = len(ours.members)
             engagement.theirs_left = len(theirs.members)
+            # A side with nothing left is worth nothing, said here rather than taken from the squad block: the game stops reporting a squad that no longer exists, so the last figure it sent would otherwise stand as the worth of survivors there are none of.
+            engagement.our_left_value = ours.value if ours.members else 0.0
+            engagement.their_left_value = theirs.value if theirs.members else 0.0
             engagement.seconds = (now - (ours.contract.issued_at_ms if ours.contract else now)) / 1000.0
+            outcome = engagement.outcome
+            self.statistics.outcomes.append(outcome)
             self.statistics.history.append(engagement.as_dict())
         if ours.members and not theirs.members:
             self.statistics.won += 1
@@ -302,8 +387,41 @@ class Arena:
             self.statistics.lost += 1
         else:
             self.statistics.drawn += 1
+            if not ours.members and not theirs.members:
+                # The last of both sides went within the same period. Asked first, because having nobody left says more about how a fight ended than the clock does, and counted apart from the fights the clock ended: a run of engagements fought to the last unit would otherwise read as a run of engagements in which nothing happened.
+                self.statistics.mutual += 1
+            elif stalled:
+                self.statistics.stalled += 1
+            else:
+                self.statistics.expired += 1
+
+        # The fight is over for both sides at the same instant, so both layers are told before the board is swept. Each is handed its own side of the outcome, which is the same number with the sign the other way up.
+        self._end(self.tactics, ours, self.outcome_weight * outcome)
+        self._end(self.opponent, theirs, self.outcome_weight * -outcome)
+        self._tally()
         self.phase = "sweeping"
         self.until_ms = now + SWEEP_MS
+
+    @staticmethod
+    def _end(layer, squad: SquadRecord, terminal: float) -> None:
+        """Tells one side's layer that its fight has ended, so that the decision it is still owed payment for is paid now instead of being carried into the next fight built on the same squad number.
+
+        A layer that keeps no trajectories has nothing to end and says so by not offering the method, which is the ordinary case for the handwritten layer on either side of an arena run.
+        """
+        finish = getattr(layer, "finish", None)
+        if finish is not None:
+            finish(squad, terminal, "called")
+
+    def _tally(self) -> None:
+        """Collects how the two layers have been closing their errands.
+
+        Recomputed from the layers' running totals rather than accumulated here, and refreshed as each fight is called rather than only at the end of the episode, because the episode record is taken from these statistics before the layers are closed. A count filled in only on the way out would be written to the journal empty, and a measurement that is absent from the record it exists for might as well not have been taken.
+        """
+        terminals: Dict[str, int] = {}
+        for layer in (self.tactics, self.opponent):
+            for reason, count in getattr(layer, "terminals", {}).items():
+                terminals[reason] = terminals.get(reason, 0) + int(count)
+        self.statistics.terminals = terminals
 
     def _sweep(self, observation: Observation, action: Action, now: int) -> None:
         """Sets whatever is left of both sides on each other, because there is no command that removes a unit and a board that is never cleared fills up.
@@ -460,6 +578,7 @@ class Arena:
         return best
 
     def close(self) -> None:
+        self._tally()
         for layer in (self.tactics, self.opponent):
             if hasattr(layer, "close"):
                 layer.close()

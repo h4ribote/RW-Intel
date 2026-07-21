@@ -112,10 +112,25 @@ python -m rwintel.control --instances 2 --paired --opponents 0 --map Lake --max-
 学習の実行である。戦術層は試合を回さず、交戦アリーナの中で学習させる。作戦層は通常のスキルミッシュで、乱入者を入れて回す。`collect` は決定器を渡さずに走らせて、スクリプトの決定を教師データとして書き出す。
 
 ```powershell
-python -m rwintel.learn tactics --instances 4 --max-seconds 1800 --save local\tactics.pt
+python -m rwintel.learn tactics --instances 4 --save local\tactics.pt
 python -m rwintel.learn operations --instances 4 --episodes 6 --map Lake --max-seconds 300 --intruder --save local\operations.pt
 python -m rwintel.learn collect --layer tactics --instances 4 --record local\teacher.jsonl
 .\tools\Start-RwAgents.ps1 -Count 4 -Speed 10
+```
+
+`clone` は書き出した教師データに網を当てはめて、乱数ではなくスクリプトの真似から強化学習を始められるようにする。**これだけはゲームに触れない**ので、制御プロセスもゲームも起動しない。写した重みから学習を始めるときは `--warmup` を付けて、乱数のままの価値ヘッドを先に合わせる。
+
+```powershell
+python -m rwintel.learn clone --layer tactics --teacher local\teacher.jsonl --save local\tactics-bc.pt
+python -m rwintel.learn tactics --instances 8 --load local\tactics-bc.pt --warmup 5 --save local\tactics.pt
+```
+
+`duel` は学習せずに測る実行で、こちら側に読み込んだ網、相手側にスクリプト戦術層を置いて交戦の成績を取る。`--load` を省くと両側がスクリプトになり、それが基準線である。**成績は反対称なので基準線の平均は 0 でなければならず、0 から離れていればアリーナが盤面の片側に有利ということになる。** 比較のたびに走らせる。
+
+```powershell
+python -m rwintel.learn duel --load local\tactics.pt --instances 8 --max-seconds 600
+python -m rwintel.learn duel --instances 8 --max-seconds 600
+.\tools\Start-RwAgents.ps1 -Count 8 -Speed 10
 ```
 
 torch を要求するのは学習側だけであり、スクリプト方策だけを走らせる実行はその費用を払わない。環境の設計と定数は [docs/project/08-learning.md](docs/project/08-learning.md) にある。**まだ一度も回していないので、方策の強さについて主張できることは何もない。**

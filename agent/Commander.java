@@ -30,6 +30,20 @@ final class Commander {
     /** The stance a squad breaking off contact is put into, so that nothing turns around to fight on the way out. */
     private static final int HOLD_FIRE = 3;
 
+    /**
+     * How far from a squad an opposing unit has to be for the squad to be backing away from something.
+     *
+     * Backing away is defined against an enemy. With nothing in reach there is nothing to back away from, and the manoeuvre has no destination that means anything, so it is not carried out. Without that, a squad ordered to break off with no enemy anywhere near it is sent this far again every period for as long as the order stands, and walks off across the map: measured, that was enough to scatter the survivors of finished fights over the whole board and leave a third of the next fights with nowhere clear to be built.
+     */
+    private static final float CONTACT = 900f;
+
+    /**
+     * How far from the ground it was sent to a squad may be backed off before it stops being backed off further.
+     *
+     * A squad that has broken contact and kept walking is no longer carrying out its contract, whatever it was told to do about the fight in front of it. This is the distance at which backing away has plainly finished, and it bounds the walk even where the enemy follows.
+     */
+    private static final float MAX_WITHDRAWAL = 1400f;
+
     private static final int KIND_UNIT = 0;
     private static final int KIND_BUILDING = 1;
 
@@ -217,9 +231,14 @@ final class Commander {
         }
     }
 
-    /** Pulls the squad back from its target, along the line it came in on. */
+    /**
+     * Pulls the squad back from its target, along the line it came in on.
+     *
+     * Bounded at both ends, and both bounds are about the same thing: a squad ordered to back away is given the order afresh every period, so an order with nothing to back away from and no limit on how far is an order to leave the map. So there has to be an enemy close enough to be backing away from, and there is a distance from the contracted ground past which the squad has plainly finished backing away and is simply walking.
+     */
     private void fallBack(Object game, Object self, World.Squad squad, World.Region target,
                           int stance, float distance) throws Exception {
+        if (!inContact(squad)) return;
         float dx = squad.x - target.x;
         float dy = squad.y - target.y;
         float length = (float) Math.sqrt(dx * dx + dy * dy);
@@ -228,6 +247,8 @@ final class Commander {
             dy = 0f;
             length = 1f;
         }
+        if (length >= MAX_WITHDRAWAL) return;
+        distance = Math.min(distance, MAX_WITHDRAWAL - length);
         Object command = engine.command(game, issuer(game, self, squad));
         if (!addAll(command, squad)) return;
         engine.setStance(command, stance);
@@ -246,6 +267,17 @@ final class Commander {
             return;
         }
         fallBack(game, self, squad, target, squad.stance, advantage);
+    }
+
+    /** Whether anything on the other side is close enough for this squad to be manoeuvring against it. */
+    private boolean inContact(World.Squad squad) {
+        for (World.Seen seen : world.visible) {
+            if (!opposes(squad, seen) || seen.handle == null) continue;
+            float dx = seen.x - squad.x;
+            float dy = seen.y - squad.y;
+            if (dx * dx + dy * dy <= CONTACT * CONTACT) return true;
+        }
+        return false;
     }
 
     /** How far the squad can shoot, taken as the shortest reach among its armed members, since that is the range at which all of it is in the fight. */

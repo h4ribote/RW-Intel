@@ -76,6 +76,21 @@ class Rollout:
             self.done.append(trajectory)
             del self.live[key]
 
+    def close_with(self, key: object, terminal: float) -> bool:
+        """Adds a terminal payment to the last decision of a live trajectory and ends it there, and says whether there was one to end.
+
+        For the case where what ended the work is known only after the last decision about it was already paid and filed. A squad destroyed is the example this exists for: the period that discovers it is a period with no squad left to decide anything, so there is no outstanding decision to hang the ending on, and the last one there was has already gone into the trajectory as an ordinary step. Reaching back to it is the only way to say that the work ended rather than stopped being watched, and the difference between those two is the difference between a nought bootstrap and a value one.
+        """
+        trajectory = self.live.get(key)
+        if trajectory is None or not trajectory.steps:
+            return False
+        trajectory.steps[-1].reward += terminal
+        trajectory.steps[-1].done = True
+        trajectory.finished = True
+        self.done.append(trajectory)
+        del self.live[key]
+        return True
+
     def cut(self, key: object, tail_value: Optional[float] = None) -> None:
         """Ends a trajectory that has not finished on its own — the match was called, or the squad passed out of this layer's hands. Its last step is bootstrapped rather than treated as terminal, because the errand did not fail, it merely stopped being observed.
 
