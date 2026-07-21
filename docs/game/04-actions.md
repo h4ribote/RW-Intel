@@ -115,7 +115,7 @@ command.a(a.c.a("u_" + type.v()));   // 生産
 // command.g = true を足すとキャンセルになる
 ```
 
-ユニット種別は `game.units.ar.a(String)` で内部名から引ける。
+ユニット種別は `game.units.ar.a(String)` で内部名から引ける。**ただし引くときの名前と `as.v()` が返す名前は一致しないことがあり、識別子は `as.v()` の側で組み立てる必要がある。** 詳細は [06-content.md](06-content.md) に記す。
 
 ラリーポイントは `command.a(new PointF(x, y))` で設定する。交戦スタンスは `command.a(stance)` である。
 
@@ -128,6 +128,24 @@ command.a(a.c.a("u_" + type.v()));   // 生産
 | 5 | ユニットの即時生成。`build` 命令と種別を併せて指定する |
 | 100 | 指定プレイヤーの降参 |
 | 200 | 再同期 |
+
+### `u=5` によるユニット生成は動作を確認した
+
+命令本体 `command.j` が build 種別で、種別が非 null であることが条件である。満たさない場合はゲームのログに `system command spawn - failed` が出る。
+
+```
+spawn: resolved 'mammothTank' to com.corrodinggames.rts.game.units.custom.l reporting name 'c_mammothTank'
+spawn: submitted mammothTank at (1308,451) for a@355c5eb7, units before=26
+spawn: c_mammothTank alive=1 nearestToTarget=230 unitsNow=31 (was 26)
+```
+
+生成されたユニットが名乗る名前は、引くときに使った名前とは限らない。ゲーム側のログには `system command spawn` が残る。再現するには次を実行する。
+
+```powershell
+.\tools\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 90 -Map Lake -AgentOptions 'spawn=mammothTank'
+```
+
+**ただしこれが単独プレイでの確認であることに注意する。** 正規のコマンド経路を通っている以上ロックステップの同期は保たれるはずだが、複数プロセスを接続した状態では未検証である。
 
 ## テキストコマンドは使えない
 

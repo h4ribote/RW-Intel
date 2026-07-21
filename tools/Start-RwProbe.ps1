@@ -25,12 +25,19 @@ How long to let the instances run before stopping them.
 Runs real skirmish episodes instead of leaving the game at the menu, on the first built-in map whose file name contains this text.
 Without it the workload is the battle the game runs behind its own menu, which is a real simulation but not a real match.
 
+.PARAMETER AgentOptions
+Extra comma separated options appended to the agent's own, for the features this script has no parameter of its own for: catalog, obs, spawn, dump, act.
+See the header of probe-agent/RwProbeAgent.java for the full list.
+
 .EXAMPLE
 .\New-RwInstance.ps1 -Count 8
 .\Start-RwProbe.ps1 -Count 8 -Speed 10 -Seconds 90
 
 .EXAMPLE
 .\Start-RwProbe.ps1 -Count 8 -Speed 10 -Seconds 180 -Map Lake -Difficulty 1
+
+.EXAMPLE
+.\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 200 -Map Lake -AgentOptions 'obs=true,catalog=true'
 #>
 [CmdletBinding()]
 param(
@@ -54,6 +61,8 @@ param(
     [int]$Episodes = 20,
 
     [int]$MaxSeconds = 0,
+
+    [string]$AgentOptions = '',
 
     [string]$MasterPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'local\rw'),
 
@@ -90,6 +99,7 @@ for ($i = 0; $i -lt $Count; $i++) {
         # Each instance gets its own seed so that concurrent runs are not all the same match.
         $agentOptions += ",match=$Map,ai=$Opponents,difficulty=$Difficulty,episodes=$Episodes,seed=$(1000 + $i),maxSeconds=$MaxSeconds"
     }
+    if ($AgentOptions -ne '') { $agentOptions += ",$AgentOptions" }
 
     # -nomods keeps unit definitions consistent: locally installed mods change them.
     $arguments = @(

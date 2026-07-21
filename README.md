@@ -4,15 +4,18 @@ Rusted Warfare を機械学習でプレイするシステム。生産、アッ�
 
 ## 現状
 
-ゲームへの接続方式を決定し、その前提となるゲーム内部の解析と性能実測を行った段階である。**学習モデルはまだ存在しない。**
+ゲームへの接続方式を決定し、ゲーム内部の解析と性能実測を終え、**モデルの設計を実装に着手できる粒度まで決めた段階**である。**まだコードとして存在するのは計測用の道具だけであり、学習モデルも制御プロセスも実装されていない。**
 
 決定した方式は、ゲーム本体のプロセスに `-javaagent` で入り込み、エンジンの内部状態を直接読んでコマンドを直接発行するというものである。ネットワークプロトコルを解析して独自クライアントを作る案は、マルチプレイが決定論的ロックステップであり状態が一切通信されないため、シミュレーションの完全な再実装を伴うことになり退けた。判断の詳細は [docs/project/01-approach.md](docs/project/01-approach.md) にある。
 
 プロセス内から次を行えることを実行時に確認済みである。
 
 - ユニットの識別子、座標、体力、所属、種別、およびプレイヤーの資金と戦績の読み取り
+- 登録済みの全ユニット種別の一覧と、その価格・技術レベル・移動タイプの読み取り
 - ユニットへの命令の発行。移動を命じて実際に移動することを確認した
+- システム命令によるユニットの生成。戦術層の学習環境がこれに依存する
 - スキルミッシュの自動開始、勝敗の検出、次のエピソードへのリセット
+- 内蔵 AI 同士を戦わせ、多数のエピソードの結果を集めること
 - 実時間の 10 倍速での進行。8 並列で合計 80 倍
 
 ## 文書
@@ -24,7 +27,7 @@ Rusted Warfare を機械学習でプレイするシステム。生産、アッ�
 | [docs/game/](docs/game/) | Rusted Warfare の仕様と内部構造。逆アセンブルと実測の結果であり、このプロジェクトの都合とは無関係に成り立つ |
 | [docs/project/](docs/project/) | RW-Intel の方針、実行基盤、モデル設計 |
 
-はじめに読むなら [docs/project/01-approach.md](docs/project/01-approach.md)、モデルの設計に関わるなら [docs/project/04-model-design.md](docs/project/04-model-design.md) から入る。
+はじめに読むなら [docs/project/01-approach.md](docs/project/01-approach.md)、モデルの設計に関わるなら [docs/project/04-model-design.md](docs/project/04-model-design.md)、実装に手を付けるなら [docs/project/05-interface.md](docs/project/05-interface.md) から入る。
 
 ## 構成
 
@@ -55,5 +58,12 @@ robocopy "<ゲームのインストール先>" local\rw /E /XD jvm cache /XF "hs
 ```
 
 速度が 10 倍前後で報告されれば、ゲームをプロセス内から制御できている。実際のスキルミッシュを自動で回すには `-Map Lake` を加える。
+
+マップとユニット定義を読むだけの道具はゲームを起動せずに動く。Python 3 以外の依存はない。
+
+```powershell
+python .\tools\Show-MapRegions.py
+python .\tools\Show-UnitCatalog.py
+```
 
 詳細は [docs/project/02-runtime.md](docs/project/02-runtime.md) にある。

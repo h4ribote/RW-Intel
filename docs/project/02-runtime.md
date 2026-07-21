@@ -53,12 +53,17 @@ java.lang.UnsatisfiedLinkError: rocketConnector64.dll: Can't find dependent libr
 | `tools/New-RwInstance.ps1` | インスタンス用ディレクトリを作成する |
 | `tools/probe-agent/build.ps1` | 計測エージェントをビルドする |
 | `tools/Start-RwProbe.ps1` | 指定数のインスタンスを起動し、速度を集計する |
+| `tools/Measure-MatchOutcomes.ps1` | 同一の対戦を多数のエピソード回し、勝敗と長さの分布を報告する |
+| `tools/Show-MapRegions.py` | マップを領域に切り出し、数と大きさを報告する |
+| `tools/Show-UnitCatalog.py` | 定義ファイル由来のユニット種別を一覧し、価格が戦闘力を代理するかを検査する |
 
 ```powershell
 .\tools\probe-agent\build.ps1
 .\tools\New-RwInstance.ps1 -Count 8
 .\tools\Start-RwProbe.ps1 -Count 8 -Speed 10 -Seconds 90
 ```
+
+Python の二つはゲームを起動せずに動く。読むのはエンジンが読むのと同じファイルであり、追加の依存はない。共通の読み取りは `tools/rwdata` にある。
 
 ## 計測エージェント
 
@@ -68,8 +73,12 @@ java.lang.UnsatisfiedLinkError: rocketConnector64.dll: Can't find dependent libr
 | --- | --- |
 | 速度制御 | 倍率 `H` を設定し、フレーム数とゲーム内時間から実効速度を報告する |
 | 状態のダンプ | ゲームオブジェクトとプレイヤーの全フィールドを実値付きで出力する |
+| 種別の一覧 | 登録済みの全ユニット種別を価格と技術レベル付きで出力する |
+| 観測の計測 | 観測をゲームスレッド上で組み立て、その費用を報告する |
 | 命令の発行 | ユニットに移動を命じ、追従したかを報告する |
+| ユニットの生成 | システム命令でユニットを作り、実際に現れたかを報告する |
 | 試合の進行 | スキルミッシュを開始し、勝敗を検出し、次のエピソードへ進む |
+| 対戦の顔ぶれ | 対戦者を指定した数だけ残し、残りを観戦者に移す |
 
 これは学習用の本体ではなく、**ゲームへの介入が成立することを実地で確かめるための道具**である。ここで確かめた経路が、そのまま観測と行動の実装の土台になる。
 

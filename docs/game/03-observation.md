@@ -30,7 +30,7 @@ flowchart TD
     y --> uw["game.units.w"] --> cj["game.units.custom.j<br/>実際のユニット実体"]
 ```
 
-1.15 では組み込みユニットも mod のユニットも、すべて定義ファイルから生成される `custom.j` として存在する。
+定義ファイルから生成されるユニットは `custom.j` として存在する。ただし**組み込みの種別がすべて定義ファイル由来というわけではない**。`commandCenter` や `landFactory` のように、コードの中の enum 実装としてしか存在しない種別がある。内訳は [06-content.md](06-content.md) にある。
 
 **注意**: `game.units.as`(ユニット種別のインタフェース)と `game.units.custom.as`(数値ステータスの構造体)は別のクラスである。名前が同じで紛らわしい。
 
@@ -112,27 +112,30 @@ flowchart TD
 
 ## ユニット種別
 
-`game.units.as` はインタフェースで、実装は `custom.l` である。全ての値は定義ファイルのキーから復元した。
+`game.units.as` はインタフェースで、定義ファイル由来の種別では実装が `custom.l`、それ以外では enum `game.units.ar` 自身である。
 
 | 項目 | メソッド | 確認 |
 | --- | --- | --- |
-| 内部名 | `as.v()` | 逆アセンブル確認 |
-| 表示名 | `as.e()` | 逆アセンブル確認 |
-| クレジット価格 | `as.c()` | 逆アセンブル確認 |
-| 建造速度 | `as.D()` | 逆アセンブル確認 |
-| 技術レベル | `as.g()` | 逆アセンブル確認 |
+| 内部名 | `as.v()` | 実行時確認 |
+| 表示名 | `as.e()` | 実行時確認 |
+| クレジット価格 | `as.c()` | 実行時確認 |
+| 建造速度 | `as.D()` | 実行時確認 |
+| 技術レベル | `as.g()` | 実行時確認 |
 | 建物か | `as.j()` | 実行時確認 |
-| 建設可能か | `as.l()` | 逆アセンブル確認 |
-| 移動タイプ | `as.o()` | 逆アセンブル確認 |
-| 建造可能リスト | `as.q()` | 逆アセンブル確認 |
+| 建設を行えるユニットか | `as.l()` | 実行時確認 |
+| 移動タイプ | `as.o()` | 実行時確認 |
 
-移動タイプ `game.units.ao` の定数は順に `NONE`、`LAND`、`BUILDING`、`AIR`、`WATER`、`HOVER`、`OVER_CLIFF`、`OVER_CLIFF_WATER` である。
+`as.l()` は「建設可能か」ではなく「建設を行えるか」である。実行時に真を返したのは `builder` と `builderShip` だけであった。
+
+移動タイプ `game.units.ao` の定数は順に `NONE`、`LAND`、`BUILDING`、`AIR`、`WATER`、`HOVER`、`OVER_CLIFF`、`OVER_CLIFF_WATER` である。建物は `NONE` を返す。
+
+**登録済みの全種別は静的な `ar.ae` から列挙できる。** 種別ごとの実測値と、名前が二通りある問題は [06-content.md](06-content.md) に記す。
 
 数値ステータスは `custom.as` に集約されている。型のベース値は `custom.l.cL`、個体の実効値は `custom.j.y` にあり、個体が変更されるまで同じオブジェクトを共有する。主なものは最大体力 `c`、最大シールド `g`、装甲 `l`、質量 `b`、視界距離 `n`、移動速度 `j`、旋回速度 `k`、最大攻撃距離 `i` である。
 
 武器はタレット定義 `custom.bn`(連射間隔 `m`、射程 `ab`、エネルギー消費 `u`)と投射体定義 `custom.bh`(直接ダメージ `b`、範囲ダメージ `c`、範囲半径 `i`、速度 `w`)に分かれる。
 
-組み込みのユニット種別は enum `game.units.ar` に定数名が平文で残っている。`extractor`、`landFactory`、`commandCenter`、`builder`、`tank` などである。このうち `crystalResource` が資源地点にあたる。
+組み込みのユニット種別は enum `game.units.ar` に定数名が平文で残っている。`extractor`、`landFactory`、`commandCenter`、`builder`、`tank` などである。このうち `crystalResource` が資源地点にあたる。マップ側での表現は [06-content.md](06-content.md) に記す。
 
 ## プレイヤー
 

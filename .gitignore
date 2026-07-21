@@ -6,3 +6,11 @@ tmp/
 # Build output of tools/probe-agent
 tools/probe-agent/classes/
 tools/probe-agent/*.jar
+
+# The game writes these into whatever directory it was started from, so they land here whenever it is launched from the wrong place
+crashes.txt
+preferences.ini
+/saves/
+/replays/
+/cache/
+__pycache__/
