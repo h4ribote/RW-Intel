@@ -378,7 +378,7 @@ def test_the_score_of_a_fight_read_from_the_other_side_is_the_same_number_negate
         ours = _fight(our_value, their_value, our_left, their_left)
         theirs = _fight(their_value, our_value, their_left, our_left)
         assert abs(ours.outcome + theirs.outcome) < 1e-12
-        # Bounded by the shares, which run from minus one to plus one, less a term that cannot exceed half the slope.
+        # Bounded by the shares, which run from minus one to plus one, less a term that cannot exceed half the slope and at present is nought.
         assert -1.0 - STRENGTH_SLOPE / 2 <= ours.outcome <= 1.0 + STRENGTH_SLOPE / 2
 
     # A side that was never built at all is worth nothing and has lost nothing, which has to be a number rather than a division by nought: an engagement whose spawns never arrived on one side still reaches the point where it is scored.
@@ -389,11 +389,11 @@ def test_the_score_of_a_fight_read_from_the_other_side_is_the_same_number_negate
 def test_destroying_the_other_side_without_a_loss_is_the_top_of_the_scale():
     """What fixes the size of the scale, and with it how much a called fight is worth against the errand's own conclusions: a massacre is paid exactly what taking the contracted ground is paid, and no more, so that a layer is never taught to prefer the one to the other.
 
-    Stated on an even draw, because the scale is only exactly one there. What is subtracted for having been dealt the stronger side is nought when neither side was, and the same massacre from behind is worth more than one while the same massacre from in front is worth less: that is the term doing its job, since a massacre against the odds is the better piece of play.
+    Stated on an even draw, so that it holds whatever the term that takes out what the draw was worth is set to. That term is nought at present, having been measured to inject a bias larger than anything it was meant to help see, but the scale is exactly one on an even draw either way.
     """
     assert _fight(3000.0, 3000.0, 3000.0, 0.0).outcome == 1.0
     assert _fight(3000.0, 3000.0, 0.0, 3000.0).outcome == -1.0
-    assert _fight(2000.0, 4000.0, 2000.0, 0.0).outcome > 1.0
+    assert _fight(2000.0, 4000.0, 2000.0, 0.0).outcome >= 1.0
     # And the middle of it is an even trade between sides of equal worth.
     assert _fight(2000.0, 2000.0, 1000.0, 1000.0).outcome == 0.0
 

@@ -36,7 +36,7 @@ Rusted Warfare 1.15 build #28 を逆アセンブルし、実行時に検証し�
 | [05-interface.md](project/05-interface.md) | 観測と行動の外部化。通信、形式、周期、領域の切り出し。**実装済み** |
 | [06-script-policy.md](project/06-script-policy.md) | 契約の項目と値域、部隊管理、スクリプト方策、スクリプト乱入者。**実装済み** |
 | [07-evaluation.md](project/07-evaluation.md) | 方策の比較手順と必要なエピソード数。**実装済み** |
-| [08-learning.md](project/08-learning.md) | 符号化、行動空間、報酬、交戦アリーナ、推論の集約、軌跡の収集、最適化。**実装済み。学習は未実行** |
+| [08-learning.md](project/08-learning.md) | 符号化、行動空間、報酬、交戦アリーナ、推論の集約、軌跡の収集、最適化。**実装済み。学習は実行し測定済みだが、手書き層を上回った方策はまだ無い** |
 
 ## 読む順序
 

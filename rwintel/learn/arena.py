@@ -77,10 +77,14 @@ TERMINAL_OUTCOME_WEIGHT = 1.0
 #: Drawn rather than fixed because the allowance is one of the features the layer reads and one of the three things that make a mission be reported as losing. Pinned at the whole worth of the squad, being reported as losing means being all but destroyed, so the report never arrives in time to be acted on and the feature never moves; a layer trained that way has never seen the board on which the decision to break off is the right one, and meets it for the first time in a match, where the operational layer hands down allowances far tighter than a squad's whole worth.
 BUDGET_SHARE = (0.3, 1.2)
 
-#: How much of a fight's score is explained by which side the draw made stronger, per unit of the strength share.
+#: How much of a fight's score would be explained by which side the draw made stronger, if the draw were the only thing that decided it.
 #:
-#: Fitted once, over a thousand fights of one layer against another, and then left alone. Refitting it as a run goes on would make the reward move under the policy for reasons that have nothing to do with the policy; a fixed multiple is unbiased whatever its value, because the draw happens before either side has decided anything, and only how much variance it removes depends on getting it near right. At this value it takes a third of the variance out.
-STRENGTH_SLOPE = 2.2
+#: Nought, and the story of why is worth keeping. The score rises with the strength share at a correlation of about six tenths, and that share is settled before either layer has decided anything, so subtracting a fixed multiple of it looked like free variance: unbiased whatever the multiple, because the draw is independent of play, and antisymmetric, so the self-check that a run of the handwritten layer against itself must average nought would survive. Fitted at 2.2 it took a third of the variance out.
+#:
+#: It did not survive the self-check. The handwritten layer against itself came back at -0.070 over 901 fights where it has to be nought, and the reason is that the share is not symmetric after all: the two spawn orders are submitted one after the other and this side's goes first, so when an order has not finished arriving it is more often the other side's, and the squads that get formed carry 53.1 per cent of the strength for this side against 50.0 per cent of what was ordered. Three points of asymmetry multiplied by 2.2 is the seven hundredths that appeared. The score without the term is unbiased on the same fights at -0.003, because writing the two sides as shares of their own worth already absorbs most of what the draw does.
+#:
+#: So the term is off, and the way to earn it back is to make the shares symmetric rather than to correct for their not being. Left at nought rather than deleted because the measurement that killed it is the reason anybody would try it again.
+STRENGTH_SLOPE = 0.0
 
 
 def _lost(started: float, left: float) -> float:
@@ -127,7 +131,7 @@ class Engagement:
 
         Written in shares rather than in credits because the two sides are built to a deliberately uneven draw. A difference of worth would pay for having been dealt the stronger side, and a layer can improve that score without ever fighting differently.
 
-        Shares alone do not finish the job, which is what the last term is for. The stronger side loses a smaller fraction of itself as well as fewer credits, so the score still rises with the draw: measured over a thousand fights it correlated with the share of the total strength dealt to this side at nearly six tenths, and the draw is made before either layer has decided anything. Subtracting a fixed multiple of that share removes a third of the variance without moving the average, because the draw is independent of how either side plays. What is left is how well a side did for the hand it was dealt, which is what both the reward and the comparison are trying to be.
+        The last term is what a fixed multiple of the strength share would take out, and it is set to nothing. The idea was that the stronger side loses a smaller fraction of itself as well as fewer credits, so the score still rises with the draw — measured at a correlation near six tenths — and that subtracting the draw would be free variance. It was not free: the shares of the squads that actually form are not symmetric, and the term multiplied that asymmetry into a bias five times the size of anything it was meant to help see. The constant carries the measurement.
         """
         strength = self.our_value + self.their_value
         share = self.our_value / strength if strength > 0 else 0.5
@@ -139,6 +143,7 @@ class Engagement:
         return {"index": self.index, "our_value": round(self.our_value), "their_value": round(self.their_value),
                 "our_ordered": round(self.our_ordered), "their_ordered": round(self.their_ordered),
                 "ours_left": self.ours_left, "theirs_left": self.theirs_left,
+                "our_left_value": round(self.our_left_value), "their_left_value": round(self.their_left_value),
                 "seconds": round(self.seconds, 1), "closest": round(self.closest),
                 "stalled": self.stalled, "outcome": round(self.outcome, 4)}
 
