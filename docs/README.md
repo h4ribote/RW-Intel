@@ -23,6 +23,7 @@ Rusted Warfare 1.15 build #28 を逆アセンブルし、実行時に検証し�
 | [05-match-control.md](game/05-match-control.md) | 試合の開始、設定、終了検出、リセット、決定性 |
 | [06-content.md](game/06-content.md) | ユニット種別の一覧と価格、マップの資源配置と出撃地点 |
 | [07-multiplayer.md](game/07-multiplayer.md) | 対戦セッションの開設と参加、ロックステップ、同期検査、パケット形式。**接続と同期検査は実行時確認、残りは逆アセンブル確認** |
+| [08-builtin-ai.md](game/08-builtin-ai.md) | 内蔵 AI の構造。思考の周期、発行する命令、難易度、打ち回しを学習に使えるか。**全て逆アセンブル確認** |
 
 ## `project/` — このプロジェクトの設計
 
