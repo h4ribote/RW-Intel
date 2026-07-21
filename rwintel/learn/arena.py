@@ -164,6 +164,9 @@ class Statistics:
     outcomes: List[float] = field(default_factory=list)
     #: How many errands were closed for each reason, summed over both sides. Present so that a run can be asked directly whether its terminals fired, which is otherwise only inferable by reading the code and guessing.
     terminals: Dict[str, int] = field(default_factory=dict)
+    #: Every fight of the episode, one row each, and all of them.
+    #:
+    #: It used to be the last thirty two, which is the number of fights a long episode has after the point where the board has stopped being even. Everything anybody wanted to ask of this list — whether a run drifts as its board fills, what the score looks like early against late — is a question about the fights that were dropped, and asking it of what was left gave an answer drawn from the wrong half. A row is about a hundred bytes and an episode is a handful of fights at the length the arena now runs at.
     history: List[dict] = field(default_factory=list)
 
     @property
@@ -189,7 +192,7 @@ class Statistics:
                 "expired": self.expired, "mutual": self.mutual, "tactical": self.tactical,
                 "decisions": self.decisions, "outcome_mean": round(self.outcome_mean, 4),
                 "outcome_sd": round(self.outcome_sd, 4), "terminals": dict(self.terminals),
-                "history": self.history[-32:]}
+                "history": self.history}
 
 
 class Arena:
