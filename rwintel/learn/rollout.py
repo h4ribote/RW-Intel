@@ -18,6 +18,20 @@ DISCOUNT = 0.99
 #: How far the advantage estimator trades bias for variance. Nine tenths is the usual place to start and this project has no measurement that argues for anywhere else yet.
 TRACE = 0.95
 
+#: Discount for an errand that is a whole constructed fight, which is to say none at all.
+#:
+#: This is arithmetic rather than taste. Decisions are taken five times a second and a fight runs to a minute, so an errand in the arena is a hundred and thirteen decisions on average and three hundred at its longest. At a hundredth off per decision the terminal — which is the score of the fight, which is the very quantity the run is judged on — reaches the first decision of a fight weighted by 0.99^300, about a twentieth, and the trace of nine hundredths cuts the advantage estimator's own reach to 1/(1-0.99*0.95), about seventeen decisions, which is three and a half seconds of a fight lasting twenty. Everything decided before the last few seconds was therefore taught by the shaping alone, and shaping is by construction the one part of the reward that cannot change which policy is best. The layer was being trained on the only term that provably does not matter.
+#:
+#: A fight is a finite episode with a real terminal, so it can simply be left undiscounted. Then the return of every decision in a fight is the score of that fight less the potential held at that decision, the shaping cancels out of the advantage against a fitted critic, and what is left is exactly the right question: how much better did this fight go than was expected from here. Nothing about the shaping's guarantee is given up — it telescopes at any discount, this one included.
+FIGHT_DISCOUNT = 1.0
+
+#: The trace for the same case, which is one for the same reason the discount is.
+#:
+#: The trace is what actually decides how far the terminal reaches, and discounting at one does not on its own fix that: the terminal arrives at a decision n steps earlier weighted by (discount times trace) to the n, so a trace of ninety-seven hundredths over the hundred and thirty decisions of an ordinary fight delivers it at about two hundredths whatever the discount is. Undiscounting with a trace short of one moves the truncation from the discount to the trace and leaves it where it was.
+#:
+#: What a trace below one buys is variance reduction through the critic, and here there is almost none to buy. Every intermediate reward in a fight is a shaping difference, and shaping cancels against a critic that has learnt it, so the deltas between the first decision and the last carry nearly nothing and the estimator spends its bias budget on them for no return. At one, the advantage of a decision is exactly the score the fight came to, less the potential held at that decision, less what the critic expected: the whole fight, judged by how much better it went than was expected from there. That is the question the layer is being asked.
+FIGHT_TRACE = 1.0
+
 
 @dataclass
 class Step:
@@ -102,9 +116,16 @@ class Rollout:
         trajectory.tail_value = trajectory.steps[-1].value if tail_value is None else tail_value
         self.done.append(trajectory)
 
-    def cut_all(self, tail_value: Optional[float] = None) -> None:
+    def cut_all(self, tail_value: Optional[float] = None, owner: object = None) -> None:
+        """Ends every trajectory still open, or every one belonging to one owner.
+
+        The owner matters because one buffer serves every instance of a run: a trajectory is keyed by the instance it was collected on and the squad it is about, so cutting the whole buffer when one instance finishes an episode reaches into eleven other instances and cuts the fight each of them is in the middle of. Those fights then end with a bootstrap where they were about to be paid their score, which is the one payment the arena exists to make. With a dozen instances each finishing an episode every half minute and a fight lasting about twenty seconds, that was most of them.
+
+        Nothing is passed when the run itself is shutting down, which is the case the whole buffer is meant to be cut in.
+        """
         for key in list(self.live):
-            self.cut(key, tail_value)
+            if owner is None or (isinstance(key, tuple) and key and key[0] == owner):
+                self.cut(key, tail_value)
 
     def taint(self, squads: Iterable[int]) -> None:
         """Marks every decision taken about these squads, in trajectories still open and in trajectories already finished, as one somebody else interfered with."""

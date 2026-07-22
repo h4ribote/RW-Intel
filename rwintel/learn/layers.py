@@ -20,7 +20,7 @@ from ..control.policy.tactics import Tactics
 from ..control.policy.view import Sighting, WorldView
 from .deciders import Choice
 from .encoding import operational_state, region_mask, tactical_state, task_mask
-from .reward import OperationalReward, TacticalReward
+from .reward import DISCOUNT as REWARD_DISCOUNT, OperationalReward, TacticalReward
 from .rollout import Rollout, Step
 
 log = logging.getLogger(__name__)
@@ -30,13 +30,16 @@ class LearntTactics(Tactics):
     """The tactical layer with the choice of departure taken from a decider instead of from the rule ladder."""
 
     def __init__(self, session, catalogue, decider, rollout: Optional[Rollout] = None,
-                 instance: int = -1, status_terminals: bool = True) -> None:
+                 instance: int = -1, status_terminals: bool = True,
+                 discount: float = REWARD_DISCOUNT) -> None:
         super().__init__(session, catalogue)
         self.decider = decider
         self.rollout = rollout
         self.instance = instance
         # Whether the conditions written into a contract are allowed to end an errand, which they should wherever something reissues contracts and should not where one contract stands for a whole constructed fight that nothing will reissue.
-        self.reward = TacticalReward(status_terminals=status_terminals)
+        #
+        # The discount is handed in with it and for the same reason: the two cases differ in how long an errand is, and the shaping has to telescope at whatever the returns are discounted at. Whoever builds the layer knows which case this is, so whoever builds it owns both.
+        self.reward = TacticalReward(status_terminals=status_terminals, discount=discount)
         #: The decision each squad is owed payment for, held until the next period says what it earned.
         self.pending: Dict[int, Step] = {}
         #: How many errands were closed for each reason, so that a run can be asked whether its terminals are firing at all rather than having it guessed at from the shape of the returns. An errand that never terminates is paid nothing but shaping, and shaping sums to nothing, so a policy learning from trajectories that never close is learning from noise.
@@ -59,8 +62,11 @@ class LearntTactics(Tactics):
         for squad in squads:
             # What this squad has destroyed since its contract was issued, which the inherited layer already counts in order to judge the exchange for itself. It is a period behind, because the count for this period is made further down while the departure is being chosen, and a shaping term is a difference of two potentials so a lag applied to both ends of it cancels.
             track = self.tracks.get(squad.id)
-            outcome = self.reward.step(squad, view, game_time_ms,
-                                       killed=track.killed if track is not None else 0.0)
+            # Nothing destroyed yet where the contract in hand is not the one the tally was kept against. The inherited layer starts a fresh tally whenever a contract is issued, but it does that further down, while this runs first; without the test the opening potential of a new errand is taken with the last errand's kills still on it. In the arena, where the squad numbers are reused fight after fight, that is every fight: measured, an opening potential of 0.575 read as 0.78 with three thousand credits of a previous fight's kills still counted, and the whole of the first decision's payment is the difference.
+            killed = 0.0
+            if track is not None and squad.contract is not None and track.issued_at_ms == squad.contract.issued_at_ms:
+                killed = track.killed
+            outcome = self.reward.step(squad, view, game_time_ms, killed=killed)
             step = self.pending.pop(squad.id, None)
             if step is not None:
                 step.reward = outcome.reward
@@ -132,7 +138,8 @@ class LearntTactics(Tactics):
         for squad_id, step in list(self.pending.items()):
             self.rollout.add((self.instance, squad_id), step)
         self.pending.clear()
-        self.rollout.cut_all()
+        # This instance's errands only. One buffer serves every instance of a run, and an episode ending here says nothing about the fight another instance is in the middle of.
+        self.rollout.cut_all(owner=self.instance)
 
 
 class LearntOperations(Operations):
@@ -218,5 +225,5 @@ class LearntOperations(Operations):
         for squad_id, step in list(self.pending.items()):
             self.rollout.add((self.instance, squad_id), step)
         self.pending.clear()
-        self.rollout.cut_all()
+        self.rollout.cut_all(owner=self.instance)
         self.reward.reset()

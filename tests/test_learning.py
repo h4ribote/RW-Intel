@@ -26,7 +26,7 @@ from rwintel.control.policy.catalogue import Catalogue
 from rwintel.control.policy.contracts import Doctrine, SquadRecord, TaskContract
 from rwintel.control.policy.view import build as build_view
 from rwintel.control.session import UnitType
-from rwintel.learn.arena import STRENGTH_SLOPE, Engagement
+from rwintel.learn.arena import BY_HEALTH, BY_KILLS, SCORES, STRENGTH_SLOPE, Engagement
 from rwintel.learn.deciders import Choice
 from rwintel.learn.encoding import (
     OPERATIONAL_SIZE,
@@ -101,9 +101,10 @@ class _Catalogue(Catalogue):
         return role_of(kind)
 
 
-def _unit(unit_id, x=0.0, y=0.0, type_index=0, squad=0xFFFF, hostile=0, health=100.0, hit=9999):
+def _unit(unit_id, x=0.0, y=0.0, type_index=0, squad=0xFFFF, hostile=0, health=100.0, hit=9999,
+          max_health=100.0):
     return UnitState(id=unit_id, squad=squad, type_index=type_index, x=x, y=y, health=health,
-                     max_health=100.0, built=255, order=255, queued=0, target=0, stance=5,
+                     max_health=max_health, built=255, order=255, queued=0, target=0, stance=5,
                      hostile=hostile, since_hit_ms=hit)
 
 
@@ -239,6 +240,37 @@ def test_the_shaping_telescopes_so_a_board_that_does_not_move_pays_almost_nothin
                  + EXCHANGE_WEIGHT * (EXCHANGE_PRIOR / (2 * EXCHANGE_PRIOR + squad.losses)))
     assert abs(outcome.reward - (DISCOUNT - 1.0) * potential) < 1e-9
     assert not outcome.done
+
+
+def test_the_shaping_telescopes_at_whatever_discount_it_was_handed():
+    """The condition under which shaping stays harmless, now that the discount is an argument rather than a constant: the term has to telescope at exactly the figure the returns are discounted at. Two numbers that were one constant can drift apart, and a pair that differ leave a residue which depends on where the errand went — which is the single dependence potential shaping is chosen to rule out.
+
+    Telescoping means that the payments of an errand, discounted at that same figure and summed, come to the terminal discounted back to the first paid decision less the potential the errand opened on, and to nothing else at all: no board the errand passed through survives the sum. Pinned at both figures actually in use — the hundredth off that an errand which is a fragment of a match takes, and nothing at all, which is what a constructed fight is discounted at because it is one whole finite episode with a real terminal. At a discount of one the property reads as the plain sum of the payments being the terminal less the opening potential.
+    """
+    for discount in (1.0, 0.99):
+        reward = TacticalReward(discount=discount)
+        squad = _squad()
+        boards = [_view([], [_region(1, ours=ours, theirs=900.0 - ours)])
+                  for ours in (100.0, 700.0, 300.0, 500.0, 200.0)]
+        reward.step(squad, boards[0], 21000)
+        held = reward.missions[squad.id].potential
+        assert held > 0.0
+
+        payments = []
+        for index, board in enumerate(boards[1:], start=1):
+            # The board moves under the errand on every count the potential is made of — the ground, the allowance and the exchange — so that a term which failed to telescope would leave a residue rather than a nought.
+            squad.losses = 100.0 * index
+            payments.append(reward.step(squad, board, 21000 + index * 200,
+                                        killed=250.0 * index).reward)
+        squad.status = Status.COMPLETE
+        ending = reward.step(squad, boards[-1], 22000)
+        assert ending.done and ending.reason == "complete"
+        payments.append(ending.reward)
+
+        summed = sum(payment * discount ** index for index, payment in enumerate(payments))
+        assert abs(summed - (discount ** (len(payments) - 1) * COMPLETE_REWARD - held)) < 1e-9
+        if discount == 1.0:
+            assert abs(sum(payments) - (COMPLETE_REWARD - held)) < 1e-9
 
 
 def test_taking_the_ground_pays_the_terminal_less_the_potential_it_was_holding():
@@ -388,9 +420,15 @@ def test_the_two_sides_spawn_orders_are_interleaved_so_neither_leads():
 
 # ---- what a fight was worth ----------------------------------------------------------------
 
-def _fight(our_value, their_value, our_left, their_left):
+def _fight(our_value, their_value, our_left, their_left, our_health=None, their_health=None):
+    """One called fight, as far as the arithmetic that scores it reads one.
+
+    The two health figures default to the worth left standing, which is what a side whose survivors are all untouched is worth on either reading and is therefore the fixture for a fight the two readings have to agree on.
+    """
     return Engagement(index=0, site=(0.0, 0.0), our_value=our_value, their_value=their_value,
-                      our_left_value=our_left, their_left_value=their_left)
+                      our_left_value=our_left, their_left_value=their_left,
+                      our_left_health=our_left if our_health is None else our_health,
+                      their_left_health=their_left if their_health is None else their_health)
 
 
 def test_the_score_of_a_fight_read_from_the_other_side_is_the_same_number_negated():
@@ -427,6 +465,131 @@ def test_destroying_the_other_side_without_a_loss_is_the_top_of_the_scale():
     assert _fight(2000.0, 4000.0, 2000.0, 0.0).outcome >= 1.0
     # And the middle of it is an even trade between sides of equal worth.
     assert _fight(2000.0, 2000.0, 1000.0, 1000.0).outcome == 0.0
+
+
+def test_the_health_reading_of_a_fight_is_the_same_number_negated_as_well():
+    """The second reading of a fight has to hold the property the first one does or it cannot be used for anything. A run of the handwritten layer against itself is the only statement there is about whether the arena leans, and it is only a statement about the arena if the two sides' figures are one number and its negation whatever happened in the fight.
+
+    It holds for the same reason the sparse reading's does, and the reason is worth being able to see: both are the same subtraction of two shares with the terms exchanged, and counting a survivor at the health it has left changes what goes into the subtraction rather than the shape of it.
+    """
+    draw = random.Random(17)
+    for _ in range(64):
+        our_value = draw.uniform(1.0, 5000.0)
+        their_value = draw.uniform(1.0, 5000.0)
+        our_left = draw.uniform(0.0, our_value)
+        their_left = draw.uniform(0.0, their_value)
+        # Never above what is standing: a survivor at full health is worth its price and no more, so the health worth of a side lies between nothing and the worth of its survivors.
+        ours = _fight(our_value, their_value, our_left, their_left,
+                      draw.uniform(0.0, our_left), draw.uniform(0.0, their_left))
+        theirs = _fight(their_value, our_value, their_left, our_left,
+                        ours.their_left_health, ours.our_left_health)
+        assert abs(ours.outcome + theirs.outcome) < 1e-12
+        assert abs(ours.outcome_health + theirs.outcome_health) < 1e-12
+        assert -1.0 - STRENGTH_SLOPE / 2 <= ours.outcome_health <= 1.0 + STRENGTH_SLOPE / 2
+
+    # A side whose spawns never arrived reaches the point where it is scored like any other, and on this reading too that has to be a number rather than a division by nought.
+    empty = _fight(0.0, 1200.0, 0.0, 0.0)
+    assert empty.outcome_health + _fight(1200.0, 0.0, 0.0, 0.0).outcome_health == 0.0
+
+
+def test_the_two_readings_agree_on_a_body_count_and_part_company_on_damage():
+    """What the health reading is for, stated as the difference between the two.
+
+    A fight that ended with somebody destroyed is worth the same under both, because a dead unit is worth nothing whichever way it is counted. That is what keeps every ceiling this project has quoted readable: the second reading existing renumbers none of them.
+
+    Where the two part company is the common ending — both sides still standing and one of them shot to pieces. A fight is called twelve seconds after the last casualty, so three fights in four end that way, and under the sparse reading every one of those is worth precisely nothing to either side however one-sided the damage was. A side left at half health on every survivor loses half of that survivor's worth on the health reading and none of it on the other.
+    """
+    massacre = _fight(3000.0, 3000.0, 3000.0, 0.0)
+    assert massacre.outcome == massacre.outcome_health == 1.0
+    even = _fight(2000.0, 2000.0, 1000.0, 1000.0)
+    assert even.outcome == even.outcome_health == 0.0
+
+    # Nobody died and their survivors are at half health apiece. On the sparse reading that fight did not happen; on the other it cost them half of what they brought and is worth half the scale.
+    halved = _fight(3000.0, 3000.0, 3000.0, 3000.0, our_health=3000.0, their_health=1500.0)
+    assert halved.outcome == 0.0
+    assert halved.outcome_health == 0.5
+    # Which of the two is paid is what the arena was asked for; both are always computed and both go into the history row a run is read back from.
+    assert halved.scored(BY_KILLS) == 0.0 and halved.scored(BY_HEALTH) == 0.5
+    assert halved.as_dict()["outcome"] == 0.0 and halved.as_dict()["outcome_health"] == 0.5
+
+
+def test_what_a_side_is_worth_on_health_is_its_own_survivors_weighted_by_what_is_left_of_them():
+    """Taken from the unit rows, because the squad block carries the price of what is standing and nothing about how much of it is standing.
+
+    Three things have to hold together or the figure is not a worth at all: only the squad's own units count, only units the board still reports count, and each counts for the share of its health it has left. A type the game reported no maximum health for counts whole, which is what the sparse reading says about it too and is therefore the only answer that cannot make the two readings differ for a reason that is not about the fight.
+    """
+    from rwintel.learn.arena import Arena
+
+    # Assembled field by field rather than constructed, as everywhere else the arena is exercised without a game: what a side is worth needs the type catalogue and nothing else the constructor builds.
+    arena = Arena.__new__(Arena)
+    arena.catalogue = _CATALOGUE
+    board = _observation(units=[_unit(1, health=100.0), _unit(2, health=50.0),
+                                _unit(3, type_index=1, health=25.0), _unit(4, health=100.0)])
+    # A tank whole, a tank at half and an artillery piece at a quarter. The fourth tank is on the board and in nobody's membership, so it is the other side's problem and not part of this figure.
+    assert arena._health_worth(_squad(members=[1, 2, 3]), board) == 350.0 + 175.0 + 175.0
+    # A member the board no longer reports is a member that is dead, and a dead unit is worth nothing on this reading exactly as on the other.
+    assert arena._health_worth(_squad(members=[1, 2, 3, 99]), board) == 350.0 + 175.0 + 175.0
+    assert arena._health_worth(_squad(members=[]), board) == 0.0
+
+    # No maximum health recorded, so nothing about this unit is known to be missing and it counts for its price.
+    unmeasured = _observation(units=[_unit(5, health=0.0, max_health=0.0)])
+    assert arena._health_worth(_squad(members=[5]), unmeasured) == 350.0
+
+
+def test_a_squad_is_filled_against_the_order_that_was_placed_and_not_with_whatever_appeared():
+    """Two kinds of stranger reach the board while a fight is being formed, and neither was commissioned for it.
+
+    One is this side's own base. A spawn-point player is given a headquarters and a builder and they land a step apart, so the wait for the opening board to settle can pass in the gap between the two; the headquarters is then inside the snapshot of what was already standing and the builder is not, and a squad filled with everything freshly arrived takes the builder in. Measured over eleven hundred episodes it happened in seven of every ten, always on this side and never on the baseless one, always worth exactly the builder. The other is an engagement abandoned as stillborn, whose spawn commands are never withdrawn and whose units surface later.
+
+    Taking the arrivals against the order closes both, and the count matters as much as the type: a leftover of a type that was ordered is still a unit nobody ordered.
+    """
+    from rwintel.learn.arena import Arena
+
+    ours = _CATALOGUE.types[0]
+    arrivals = [_unit(1, type_index=ours.index), _unit(2, type_index=ours.index),
+                # The builder: it is this side's, it has just appeared, and it is of no type the fight asked for.
+                _unit(3, type_index=1), _unit(4, type_index=ours.index),
+                _unit(5, type_index=ours.index, hostile=True)]
+    assert Arena._commissioned(arrivals, False, {ours.index: 2}) == [1, 2]
+    assert Arena._commissioned(arrivals, True, {ours.index: 1}) == [5]
+    # With nothing to take the arrivals against there is nothing that says what does not belong, so everything of the right side is taken.
+    assert Arena._commissioned(arrivals, False, None) == [1, 2, 3, 4]
+
+
+def test_the_worth_a_squad_was_formed_with_is_not_overwritten_by_the_game_side():
+    """The game keeps that figure as a running maximum over the life of a squad number and never lowers it, which is right for a squad reinforced over a match and wrong here.
+
+    The arena hands the same two numbers to every fight of an episode, so after one big fight the game's figure is the largest force either slot ever held rather than the force standing in this one. It is the denominator of the squad's health, which is one of the layer's fifty-eight inputs, so leaving it alone is the difference between an input that says a fresh force is whole and one that says it is already half destroyed.
+    """
+    from rwintel.learn.arena import Arena
+
+    import dataclasses
+
+    from rwintel.wire.observation import SquadState
+
+    arena = Arena.__new__(Arena)
+    arena.squads = {0: _squad(members=[1], value=1000.0, formed_value=1000.0)}
+    # The figure the game reports is deliberately the worth of a far bigger fight this squad number held earlier in the episode.
+    reported = SquadState(id=0, commander=0, units=1, value=600.0, formed_value=9000.0, x=0.0, y=0.0,
+                          spread=0.0, task_type=0, stance=0, target_region=0, status=0,
+                          cost_budget=1000.0, budget_share=0.5, deadline_ms=60000, issued_at_ms=0,
+                          losses=400.0)
+    board = dataclasses.replace(_observation(units=[_unit(1)]), squads=[reported])
+    arena._fold(board)
+    assert arena.squads[0].value == 600.0
+    # Whatever the game reports, the worth this fight was formed with is the arena's own figure.
+    assert arena.squads[0].formed_value == 1000.0
+    assert arena.squads[0].health == 0.6
+
+
+def test_an_arena_refuses_a_score_it_was_not_taught():
+    """A misspelt score would otherwise fall through to whichever reading the code tests for by name, and the run would be paid on one reading while whoever started it believed it was paying the other. Both readings are reported either way, so nothing in the log would say which had been paid. Refused where it is still one line rather than a measurement nobody can interpret afterwards."""
+    from rwintel.learn.arena import Arena
+
+    refused = _refusal(ValueError, lambda: Arena(None, score="bodies"))
+    assert "bodies" in refused
+    # Named with what it would have taken, because the first thing anyone does with a refusal is go looking for the spelling.
+    assert all(name in refused for name in SCORES)
 
 
 # ---- where one errand stops and the next begins ---------------------------------------------
@@ -511,6 +674,16 @@ def test_a_squad_handed_a_new_contract_begins_a_new_trajectory():
     assert not ended.finished and [step.at_ms for step in ended.steps] == [21000, 22000]
     assert ended.steps[-1].reward == 0.0 and ended.tail_value == ended.steps[-1].value
     assert [step.at_ms for step in rollout.live[(0, squad.id)].steps] == [23000]
+
+
+def test_a_layer_built_with_a_discount_pays_its_shaping_at_that_discount():
+    """One figure discounts the returns and telescopes the shaping, and a run states it once. It reaches the shaping only by being handed to the layer and passed on from there, so this is the join where the two could silently come apart — and a shaping term telescoping at one figure while the returns are discounted at another is a term that moves which policy is best.
+
+    A layer nobody told is a layer inside a match, whose errand is a fragment of one, and the constant is that case.
+    """
+    assert LearntTactics(None, _CATALOGUE, _Fixed(), discount=1.0).reward.discount == 1.0
+    assert LearntTactics(None, _CATALOGUE, _Fixed(), discount=0.5).reward.discount == 0.5
+    assert LearntTactics(None, _CATALOGUE, _Fixed()).reward.discount == DISCOUNT
 
 
 # ---- starting from something rather than from noise -----------------------------------------

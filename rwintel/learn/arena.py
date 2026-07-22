@@ -110,6 +110,20 @@ BUDGET_SHARE = (0.3, 1.2)
 #: So the term could now be earned back, and the third of the variance it removed is worth having. What it takes is fitting the multiple again on a run of the arena as it now draws its fights, and then passing the self-check that a run of the handwritten layer against itself averages nought. That has not been done, so this stays at nought: a variance reduction that has not passed the check that killed the last one is not a variance reduction. Left at nought rather than deleted because the measurement that killed it is the reason anybody would try it again.
 STRENGTH_SLOPE = 0.0
 
+#: Scoring a fight on what is left standing, which is what every figure this project has quoted was taken on.
+#:
+#: A unit counts for the whole of its price until the moment it dies and for nothing after, so damage short of a kill is invisible. That is the sparse reading of a fight and it is the one the ceiling was measured against.
+BY_KILLS = "kills"
+
+#: Scoring a fight on what is left standing weighted by how much of it is left, so that a unit at a tenth of its health counts for a tenth of its price.
+#:
+#: Most fights end with neither side destroyed — three quarters of them are called because the two forces stopped killing each other — and under the sparse reading every one of those is worth precisely nothing to either side, however one-sided the damage was. That is the largest single fact about this arena's signal: the score, which is both what the layer is paid and what the run is judged on, is nought on three quarters of what it measures. Weighting by health does not change what a fight is worth when it ends in a body count, because a dead unit is worth nothing under either reading; it changes what a fight is worth when it ends with two damaged forces, which is the common case.
+#:
+#: Antisymmetry is untouched: the two sides' figures are the same subtraction with the terms exchanged, so a run of the handwritten layer against itself still has to average nought and the self-check that governs everything here still governs it.
+BY_HEALTH = "health"
+
+SCORES = (BY_KILLS, BY_HEALTH)
+
 
 def _lost(started: float, left: float) -> float:
     """The share of a side's worth that was destroyed, between nought and one.
@@ -119,6 +133,25 @@ def _lost(started: float, left: float) -> float:
     if started <= 0.0:
         return 0.0
     return min(1.0, max(0.0, (started - left) / started))
+
+
+def _tally(force: Sequence) -> Dict[int, int]:
+    """How many of each type an order asks for, which is what a squad is later filled against."""
+    counts: Dict[int, int] = {}
+    for kind in force:
+        counts[kind.index] = counts.get(kind.index, 0) + 1
+    return counts
+
+
+def _mean(values: Sequence[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _spread(values: Sequence[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = _mean(values)
+    return (sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5
 
 
 @dataclass
@@ -136,11 +169,19 @@ class Engagement:
     #: How many units were ordered for each side, which is what says whether an order has finished arriving. Spawning goes through the command queue a unit at a time, so a squad is only formed once the count it was ordered at is standing; the two orders are interleaved so that neither runs ahead of the other, and forming before both are whole would leave the units still queued on the board outside the squad that is being scored.
     our_count: int = 0
     their_count: int = 0
+    #: What was ordered, type by type, so that a squad can be made of what was commissioned for this fight and of nothing else.
+    #:
+    #: A count is not enough on its own. Two things arrive on the board that nobody commissioned: the headquarters and the builder a spawn-point player begins an episode with, which appear a step or two apart so that the wait for the opening board to settle can pass between them, and the units of an engagement that was abandoned as stillborn, whose spawn commands are never withdrawn and which turn up while the next fight is being formed. Both were measured: the builder joined this side's squad in about seven of every ten first fights, worth five hundred credits it never had to lose, and those fights scored a tenth of a point above every other fight in the run. Neither can join a squad that is filled against the order that was actually placed.
+    our_wanted: Dict[int, int] = field(default_factory=dict)
+    their_wanted: Dict[int, int] = field(default_factory=dict)
     ours_left: int = 0
     theirs_left: int = 0
     #: What each side was still worth when the fight was called, which is what turns a fight into a score rather than a tally of who was left standing.
     our_left_value: float = 0.0
     their_left_value: float = 0.0
+    #: The same two figures with every survivor counted at the share of its health it still has, which is what makes a fight that nobody died in worth something. Taken beside the other pair rather than instead of it, so that one run reports the score both ways and the sparse reading every earlier figure was quoted on stays readable.
+    our_left_health: float = 0.0
+    their_left_health: float = 0.0
     seconds: float = 0.0
     #: True when the fight was called because neither side had hurt the other for a while, rather than because it ended or ran out of time.
     stalled: bool = False
@@ -157,10 +198,26 @@ class Engagement:
 
         The last term is what a fixed multiple of the strength share would take out, and it is set to nothing. The idea was that the stronger side loses a smaller fraction of itself as well as fewer credits, so the score still rises with the draw — measured at a correlation near six tenths — and that subtracting the draw would be free variance. It was not free: the shares of the squads that actually formed were not symmetric, because one side's spawn order was submitted before the other's, and the term multiplied that asymmetry into a bias five times the size of anything it was meant to help see. The spawn orders are now interleaved so that neither leads (see STRENGTH_SLOPE), and the term stays at nought until a self-check on the interleaved arena has measured that the shares are even. The constant carries the measurement.
         """
+        return self._scored(self.our_left_value, self.their_left_value)
+
+    @property
+    def outcome_health(self) -> float:
+        """The same score with every survivor counted at the share of its health it still holds.
+
+        The sparse reading above cannot tell a fight in which both sides walked away untouched from one in which both were shot to a tenth of themselves and neither quite died, and the arena calls a fight as soon as twelve seconds pass without a casualty, so the second is not a corner case: three fights in four end that way. Read on health those two fights are as far apart as they look, and a layer's choices during them are paid for.
+
+        Identical to the sparse reading whenever a fight ends by a body count, since a destroyed unit is worth nothing under either. Antisymmetric for the same reason the other is, being the same subtraction with the sides exchanged.
+        """
+        return self._scored(self.our_left_health, self.their_left_health)
+
+    def scored(self, how: str) -> float:
+        return self.outcome_health if how == BY_HEALTH else self.outcome
+
+    def _scored(self, ours_left: float, theirs_left: float) -> float:
         strength = self.our_value + self.their_value
         share = self.our_value / strength if strength > 0 else 0.5
-        return (_lost(self.their_value, self.their_left_value)
-                - _lost(self.our_value, self.our_left_value)
+        return (_lost(self.their_value, theirs_left)
+                - _lost(self.our_value, ours_left)
                 - STRENGTH_SLOPE * (share - 0.5))
 
     def as_dict(self) -> dict:
@@ -168,8 +225,10 @@ class Engagement:
                 "our_ordered": round(self.our_ordered), "their_ordered": round(self.their_ordered),
                 "ours_left": self.ours_left, "theirs_left": self.theirs_left,
                 "our_left_value": round(self.our_left_value), "their_left_value": round(self.their_left_value),
+                "our_left_health": round(self.our_left_health), "their_left_health": round(self.their_left_health),
                 "seconds": round(self.seconds, 1), "closest": round(self.closest),
-                "stalled": self.stalled, "outcome": round(self.outcome, 4)}
+                "stalled": self.stalled, "outcome": round(self.outcome, 4),
+                "outcome_health": round(self.outcome_health, 4)}
 
 
 @dataclass
@@ -191,6 +250,8 @@ class Statistics:
     decisions: int = 0
     #: Every fight's outcome, kept whole so that the spread can be taken over the episode. Only the mean, the spread and the count go into the episode record: the list is as long as the run and says nothing per fight that the history does not already carry.
     outcomes: List[float] = field(default_factory=list)
+    #: The same fights scored on health rather than on bodies. Kept beside rather than instead, because every ceiling this project has quoted was measured on the sparse reading and a run that reported only the other could not be read against any of them.
+    health_outcomes: List[float] = field(default_factory=list)
     #: How many errands were closed for each reason, summed over both sides. Present so that a run can be asked directly whether its terminals fired, which is otherwise only inferable by reading the code and guessing.
     terminals: Dict[str, int] = field(default_factory=dict)
     #: Every fight of the episode, one row each, and all of them.
@@ -204,15 +265,20 @@ class Statistics:
 
     @property
     def outcome_mean(self) -> float:
-        return sum(self.outcomes) / len(self.outcomes) if self.outcomes else 0.0
+        return _mean(self.outcomes)
 
     @property
     def outcome_sd(self) -> float:
         """How widely the outcomes were spread, which is what says how many fights an assertion about the mean would need. Nought for a single fight, which has no spread rather than an unknown one."""
-        if len(self.outcomes) < 2:
-            return 0.0
-        mean = self.outcome_mean
-        return (sum((value - mean) ** 2 for value in self.outcomes) / len(self.outcomes)) ** 0.5
+        return _spread(self.outcomes)
+
+    @property
+    def health_outcome_mean(self) -> float:
+        return _mean(self.health_outcomes)
+
+    @property
+    def health_outcome_sd(self) -> float:
+        return _spread(self.health_outcomes)
 
     def as_dict(self) -> dict:
         return {"engagements": self.engagements, "spawned": self.spawned,
@@ -220,8 +286,10 @@ class Statistics:
                 "lost": self.lost, "drawn": self.drawn, "stalled": self.stalled,
                 "expired": self.expired, "mutual": self.mutual, "tactical": self.tactical,
                 "decisions": self.decisions, "outcome_mean": round(self.outcome_mean, 4),
-                "outcome_sd": round(self.outcome_sd, 4), "terminals": dict(self.terminals),
-                "history": self.history}
+                "outcome_sd": round(self.outcome_sd, 4),
+                "health_outcome_mean": round(self.health_outcome_mean, 4),
+                "health_outcome_sd": round(self.health_outcome_sd, 4),
+                "terminals": dict(self.terminals), "history": self.history}
 
 
 class Arena:
@@ -236,9 +304,14 @@ class Arena:
                  outcome_weight: float = TERMINAL_OUTCOME_WEIGHT,
                  stall_ms: int = STALL_MS,
                  imbalance_floor: float = IMBALANCE[0],
-                 decision_order: str = OURS_FIRST) -> None:
+                 decision_order: str = OURS_FIRST,
+                 score: str = BY_HEALTH) -> None:
         self.session = session
         self.outcome_weight = outcome_weight
+        if score not in SCORES:
+            raise ValueError(f"no score named {score!r}: expected one of {', '.join(SCORES)}")
+        # Which reading of a fight is handed to the layers as their terminal. Both are computed and both are journalled whatever this says; what it settles is only which one is paid, because a layer can be paid on one reading and reported on the other but it cannot be paid on two. Health by default, and stated in one place only: a second default sitting here would be a figure a run could be paid on without anything having asked for it.
+        self.score = score
         # How long a fight may go without a casualty before it is called. An argument rather than the constant because how decisive the arena's fights are is one of the things a run may want to ask about: a layer's choices can only be worth as much as the fights they are made in, and a fight that is called at the first quiet spell is one where declining to fight costs nothing.
         self.stall_ms = stall_ms
         # The weaker side's smallest share of the stronger. An argument rather than the constant because how lopsided the draw is decides how many fights end with a side destroyed and how widely the score scatters, and whether that trade is worth taking is a question only a run of both settings answers.
@@ -342,7 +415,8 @@ class Arena:
         self.engagement = Engagement(index=self.statistics.engagements, site=site,
                                      our_ordered=sum(kind.price for kind in our_force),
                                      their_ordered=sum(kind.price for kind in their_force),
-                                     our_count=len(our_force), their_count=len(their_force))
+                                     our_count=len(our_force), their_count=len(their_force),
+                                     our_wanted=_tally(our_force), their_wanted=_tally(their_force))
         self.statistics.engagements += 1
         self.statistics.spawned += len(our_force) + len(their_force)
         self.phase = "spawning"
@@ -357,9 +431,9 @@ class Arena:
         Waits for the whole of both orders rather than for the first unit of each. The two orders are interleaved a unit at a time (_interleave), so they arrive at the same rate rather than one side's whole order before the other's; but at any single moment the two can still be a unit apart, and forming on the first arrival would leave whatever had not yet come outside its squad. Those units stand on the board, join in the fighting, and are counted neither in what the squad was worth nor in what is left of it, which would show up as a score that favours one side for no reason to do with either policy. If the wait runs out, whatever arrived is what fights, and that is honest because the interleave has cut both sides to the same depth and both figures the score uses are then taken from the same units.
         """
         fresh = [unit for unit in observation.unit_states if unit.id not in self.known]
-        ours = [unit.id for unit in fresh if not unit.hostile]
-        theirs = [unit.id for unit in fresh if unit.hostile]
         engagement = self.engagement
+        ours = self._commissioned(fresh, False, engagement.our_wanted if engagement else None)
+        theirs = self._commissioned(fresh, True, engagement.their_wanted if engagement else None)
         whole = (engagement is None
                  or (len(ours) >= engagement.our_count and len(theirs) >= engagement.their_count))
         if not ours or not theirs or (not whole and now < self.until_ms):
@@ -434,13 +508,13 @@ class Arena:
         self.statistics.tactical += 1
 
         if not ours.members or not theirs.members or now >= self.until_ms:
-            self._call(ours, theirs, now)
+            self._call(ours, theirs, now, observation)
             return
         alive = len(ours.members) + len(theirs.members)
         if alive != self._alive:
             self._alive, self._changed_ms = alive, now
         elif now - self._changed_ms >= self.stall_ms:
-            self._call(ours, theirs, now, stalled=True)
+            self._call(ours, theirs, now, observation, stalled=True)
 
     def _ours_leads(self) -> bool:
         """Whether this side's departure is decided and submitted ahead of the other side's this period.
@@ -455,7 +529,8 @@ class Arena:
             return self.statistics.tactical % 2 == 0
         return True
 
-    def _call(self, ours: SquadRecord, theirs: SquadRecord, now: int, stalled: bool = False) -> None:
+    def _call(self, ours: SquadRecord, theirs: SquadRecord, now: int,
+              observation: Observation, stalled: bool = False) -> None:
         engagement = self.engagement
         outcome = 0.0
         if engagement is not None:
@@ -465,9 +540,12 @@ class Arena:
             # A side with nothing left is worth nothing, said here rather than taken from the squad block: the game stops reporting a squad that no longer exists, so the last figure it sent would otherwise stand as the worth of survivors there are none of.
             engagement.our_left_value = ours.value if ours.members else 0.0
             engagement.their_left_value = theirs.value if theirs.members else 0.0
+            engagement.our_left_health = self._health_worth(ours, observation)
+            engagement.their_left_health = self._health_worth(theirs, observation)
             engagement.seconds = (now - (ours.contract.issued_at_ms if ours.contract else now)) / 1000.0
-            outcome = engagement.outcome
-            self.statistics.outcomes.append(outcome)
+            outcome = engagement.scored(self.score)
+            self.statistics.outcomes.append(engagement.outcome)
+            self.statistics.health_outcomes.append(engagement.outcome_health)
             self.statistics.history.append(engagement.as_dict())
         if ours.members and not theirs.members:
             self.statistics.won += 1
@@ -547,11 +625,52 @@ class Arena:
             if state is None:
                 continue
             squad.value = state.value
-            squad.formed_value = state.formed_value
+            # The worth this squad was formed with is left as the arena set it. The game side keeps that figure as a running maximum over the life of a squad number and never lowers it, which is right where a squad is reinforced over a match and wrong here: the arena hands the same two numbers to every fight of an episode, so after the first big fight the figure is the largest force either slot ever held rather than the force standing in this one. It is divided into the present worth to make the health of the squad, which is one of the layer's inputs, so a stale denominator is an input that says a fresh force is already half destroyed. Measured over the runs in flight, most fights after the first of an episode opened with that input already below full at full strength.
             squad.x, squad.y = state.x, state.y
             squad.spread = state.spread
             squad.losses = state.losses
             squad.status = Status(state.status)
+
+    @staticmethod
+    def _commissioned(fresh: Sequence, hostile: bool, wanted: Optional[Dict[int, int]]) -> List[int]:
+        """The units of one side of a fight: what has newly appeared, taken against the order that was placed for it, type by type and no more of a type than were asked for.
+
+        Filling a squad with everything that newly appeared is what let two kinds of stranger into a fight. One is this side's own base: a spawn-point player is given a headquarters and a builder, they arrive a step apart, and the wait for the opening board to settle can pass between the two, after which the builder is a unit that has just appeared and joins the squad. The other is an engagement abandoned as stillborn, whose spawn commands stay in the queue and whose units surface later, inside the window in which the next fight is being formed. Neither was commissioned, and a fight is between what was commissioned.
+
+        With no order to take against — which is only the case if a fight is being formed without one — everything of the right side is taken, since there is nothing to say what does not belong.
+        """
+        taken: List[int] = []
+        left = dict(wanted) if wanted else None
+        for unit in fresh:
+            if bool(unit.hostile) != hostile:
+                continue
+            if left is None:
+                taken.append(unit.id)
+                continue
+            remaining = left.get(unit.type_index, 0)
+            if remaining <= 0:
+                continue
+            left[unit.type_index] = remaining - 1
+            taken.append(unit.id)
+        return taken
+
+    def _health_worth(self, squad: SquadRecord, observation: Observation) -> float:
+        """What a side is worth counting every survivor at the share of its health it still holds.
+
+        Taken from the unit rows rather than from the squad block, because the squad block carries the price of what is standing and nothing about how much of it is standing. The units of the squad are whatever is both in its membership and still on the board; the membership is pruned every period against what the board reports, so a unit that is in it is one the board still has.
+
+        A type with no maximum health recorded counts whole, which is the same thing the sparse reading says about it and is therefore the reading that cannot make the two disagree for a reason that is not about the fight.
+        """
+        members = set(squad.members)
+        if not members:
+            return 0.0
+        worth = 0.0
+        for unit in observation.unit_states:
+            if unit.id not in members:
+                continue
+            share = 1.0 if unit.max_health <= 0 else unit.health / unit.max_health
+            worth += self.catalogue.value(unit.type_index) * min(1.0, max(0.0, share))
+        return worth
 
     def _record(self, squad_id: int, members: Sequence[int], observation: Observation) -> SquadRecord:
         by_id = {unit.id: unit for unit in observation.unit_states}

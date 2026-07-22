@@ -42,6 +42,8 @@ WIPED_REWARD = -1.0
 OVERSPEND_PENALTY = 0.5
 
 #: Discount used in the shaping term. Not the discount a learner uses for its returns, though it should be given the same one: this is only the factor that makes the shaping telescope, and a mismatch would leave a residue that does change the optimal policy.
+#:
+#: This is the figure for an errand that is a fragment of a longer match. A constructed fight is not that — it is one errand from beginning to end, over inside a minute — and what it is discounted at is handed in rather than read from here. See the fight-scoped figures in the rollout.
 DISCOUNT = 0.99
 
 #: What the operational potential is made of: how much of what the strategic layer said it wanted is actually being stood on, how far ahead our army is, and how much of the allowance has gone.
@@ -88,9 +90,11 @@ class TacticalReward:
     Where an errand ends is not the same question everywhere it is used. In a match the operational layer reissues contracts, so the conditions of the contract are what bound the errand and it is right that they end it. On a board where engagements are constructed there is one contract for the whole fight and nothing reissues it, so ending the errand early would leave the rest of the fight unpaid while the squad went on fighting it. `status_terminals` is which of the two this is.
     """
 
-    def __init__(self, status_terminals: bool = True) -> None:
+    def __init__(self, status_terminals: bool = True, discount: float = DISCOUNT) -> None:
         self.missions: Dict[int, _Mission] = {}
         self.status_terminals = status_terminals
+        # The factor the shaping telescopes with, which has to be the one the returns are discounted at or the shaping leaves a residue and stops being harmless. An argument rather than the constant because the two places this layer is trained have errands of different lengths: a match reissues contracts and an errand is a fragment of it, while a constructed fight is one errand from end to end and is short enough to be discounted at nothing at all.
+        self.discount = discount
 
     def forget(self, squad_id: int) -> None:
         self.missions.pop(squad_id, None)
@@ -135,7 +139,7 @@ class TacticalReward:
             return Outcome(reward=(0.0 - mission.potential) + terminal, done=True, reason=reason)
 
         potential = self._potential(squad, view, killed)
-        reward = DISCOUNT * potential - mission.potential
+        reward = self.discount * potential - mission.potential
         mission.potential = potential
         return Outcome(reward=reward)
 

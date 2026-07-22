@@ -31,7 +31,7 @@ from ..data import AssetPaths
 from ..eval.journal import Journal, default_path
 from ..eval.sampling import UNBOUNDED_EPISODES, Summary, episodes_for
 from ..wire import Deviation
-from .arena import DECISION_ORDERS, Arena
+from .arena import BY_HEALTH, BY_KILLS, DECISION_ORDERS, SCORES, Arena
 from .deciders import (
     NetworkOperations,
     NetworkTactics,
@@ -42,7 +42,7 @@ from .deciders import (
 from .encoding import OPERATIONAL_SIZE, TACTICAL_SIZE
 from .layers import LearntOperations, LearntTactics
 from .policy import OPERATIONAL, TACTICAL, LearningPolicy, learning_arm
-from .rollout import Rollout
+from .rollout import FIGHT_DISCOUNT, FIGHT_TRACE, Rollout
 from .train import Optimiser, Trainer
 
 log = logging.getLogger(__name__)
@@ -101,7 +101,8 @@ def _arena_seed(arguments, session) -> int:
 def _arena_options(arguments, order: Optional[str] = None, floor: Optional[float] = None,
                    stall: Optional[int] = None) -> dict:
     """The arena settings a run actually asked for, as keywords, so that everything unasked for stands at the figure the arena states rather than at a copy of it kept here."""
-    options = _given(stall_ms=stall * 1000 if stall else None, imbalance_floor=floor)
+    options = _given(stall_ms=stall * 1000 if stall else None, imbalance_floor=floor,
+                     score=getattr(arguments, "score", None))
     if order is not None:
         options["decision_order"] = order
     return options
@@ -239,7 +240,13 @@ def train_tactics(arguments) -> int:
     log.info("tactical policy on %s: %d features, %d parameters",
              device, TACTICAL_SIZE, sum(p.numel() for p in net.parameters()))
 
-    rollout = Rollout()
+    # One figure discounts the returns and telescopes the shaping, and it is stated once here so that the two cannot drift apart. An arena errand is a whole fight, which is short and ends properly, so the default is to discount it at nothing and let the score of the fight reach every decision taken in it.
+    discount = arguments.discount if arguments.discount is not None else FIGHT_DISCOUNT
+    trace = arguments.trace if arguments.trace is not None else FIGHT_TRACE
+    log.info("paying fights scored by %s, discounting an errand at %.4f with a trace of %.4f",
+             arguments.score, discount, trace)
+
+    rollout = Rollout(discount=discount, trace=trace)
     optimiser = Optimiser(net, device=device, warmup=arguments.warmup,
                           **_given(entropy_weight=arguments.entropy, learning_rate=arguments.learning_rate))
     batcher = tactical_batcher(net, device=device)
@@ -249,7 +256,7 @@ def train_tactics(arguments) -> int:
     def learnt(session, catalogue):
         # An arena fight carries one contract from the moment it is joined to the moment it is called, and nothing reissues it. What ends the errand is therefore what ends the fight, and the conditions written into the contract are left as something for the layer to read and act on rather than as something that stops it being paid.
         return LearntTactics(session, catalogue, NetworkTactics(net, device, batcher), rollout,
-                             session.instance, status_terminals=False)
+                             session.instance, status_terminals=False, discount=discount)
 
     # One arena setting to a training run: a run whose arms differed would be training one policy on two arenas and reporting one number for it.
     order, floor, stall = _orders(arguments)[0], _floors(arguments)[0], _stalls(arguments)[0]
@@ -331,6 +338,11 @@ def duel(arguments) -> int:
 
         device = _device(arguments.device)
         paths = [path.strip() for path in str(arguments.load).split(",") if path.strip()]
+        if len(set(paths)) != len(paths):
+            # Two arms of the same name would be journalled as one and reported as one, so the run would silently measure half of what it was asked for.
+            raise SystemExit("the same parameters were named twice, and two arms cannot share a name")
+        # How a policy plays, as an axis of the comparison rather than a setting of the run. Drawing from the distribution is what the policy does when it is operated and is therefore the figure that counts; taking the likeliest action is the same weights without the exploration, and the difference between them is the tax the run's own randomness charges. Measured as two arms of one run they meet the same fights, which is the only way that difference is separable from how the fights were drawn.
+        draws = (False, True) if arguments.greedy else (False,)
         for path in paths:
             if not os.path.exists(path):
                 # Refused rather than started from nothing, which is what a training run does with a missing file. A measurement that quietly scored a freshly initialised policy would produce a perfectly plausible number about a policy nobody asked about.
@@ -338,18 +350,20 @@ def duel(arguments) -> int:
                 return 1
             net = TacticalNet(**_given(width=arguments.width)).to(device)
             _load(net, path, device)
-            batcher = tactical_batcher(net, device=device, greedy=arguments.greedy)
-            batchers.append(batcher)
+            for greedy in draws:
+                batcher = tactical_batcher(net, device=device, greedy=greedy)
+                batchers.append(batcher)
 
-            def learnt(session, catalogue, net=net, batcher=batcher):
-                # No rollout: this layer is being read from and not learnt from, and with nowhere to record a decision it records none.
-                return LearntTactics(session, catalogue,
-                                     NetworkTactics(net, device, batcher, arguments.greedy),
-                                     None, session.instance, status_terminals=False)
+                def learnt(session, catalogue, net=net, batcher=batcher, greedy=greedy):
+                    # No rollout: this layer is being read from and not learnt from, and with nowhere to record a decision it records none.
+                    return LearntTactics(session, catalogue,
+                                         NetworkTactics(net, device, batcher, greedy),
+                                         None, session.instance, status_terminals=False)
 
-            # Named after the file when there are several to tell apart, and simply the duel when there is one, which is the name the journal has always carried.
-            policies.append(("duel" if len(paths) == 1 else
-                             "duel-" + os.path.splitext(os.path.basename(path))[0], learnt))
+                # Named after the file when there are several to tell apart, and simply the duel when there is one, which is the name the journal has always carried.
+                policies.append(("duel" + ("" if len(paths) == 1 else
+                                           "-" + os.path.splitext(os.path.basename(path))[0])
+                                 + ("-greedy" if greedy else ""), learnt))
 
     for pinned in _pinned(arguments):
         def fixed(session, catalogue, pinned=pinned):
@@ -396,14 +410,21 @@ def duel(arguments) -> int:
     return 0
 
 
-def _summarise(records) -> Summary:
+#: The two readings of a fight a run reports, as (what the journal calls the mean, what it calls the spread, what the history row calls it, what to call it in a log).
+#:
+#: Both, always, whichever one was paid. The sparse reading is what every ceiling this project has quoted was measured on and dropping it would make a new run unreadable against any of them; the health reading is the one that is not nought on the three quarters of fights that end with two damaged forces still standing. A run costs the same either way — both are computed as a fight is called — so there is no reason to report one.
+READINGS = (("outcome_mean", "outcome_sd", "outcome", "scored on bodies"),
+            ("health_outcome_mean", "health_outcome_sd", "outcome_health", "scored on health"))
+
+
+def _summarise(records, mean_key: str = "outcome_mean", sd_key: str = "outcome_sd") -> Summary:
     """The fights of a set of episodes as one count, one mean and one spread.
 
     Recombined from the episode records rather than kept as one long list of fights. A record carries its episode's mean, its spread and how many fights it was taken over, and those three are enough to reconstitute both figures over the whole set exactly, however many episodes and instances it ran across.
     """
     counted = [(int(record.statistics.get("fought", 0)),
-                float(record.statistics.get("outcome_mean", 0.0)),
-                float(record.statistics.get("outcome_sd", 0.0)))
+                float(record.statistics.get(mean_key, 0.0)),
+                float(record.statistics.get(sd_key, 0.0)))
                for record in records]
     counted = [entry for entry in counted if entry[0] > 0]
     total = sum(count for count, _, _ in counted)
@@ -456,7 +477,7 @@ def _report_difference(first_name: str, first: Summary, second_name: str, second
              "excludes" if interval > 0.0 and abs(difference) > interval else "holds")
 
 
-def _fights_by_draw(sessions) -> dict:
+def _fights_by_draw(sessions, key: str = "outcome") -> dict:
     """Every fight of every arm, keyed by the draw it was fought on: which instance, which round of the arms, and which fight of the episode.
 
     The arms of a run are handed the same arena seed in the same round, so the fight under one key is the same fight in every arm — the same site, the same two budgets, the same imbalance, the same two forces. Keyed that way the arms can be differenced fight by fight, and the difference is then free of the only thing that makes the score scatter, which is how the fight was drawn rather than how it was fought.
@@ -470,9 +491,9 @@ def _fights_by_draw(sessions) -> dict:
             index = rounds.get(record.arm, 0)
             rounds[record.arm] = index + 1
             for fight in record.statistics.get("history", ()):
-                if "outcome" in fight and "index" in fight:
-                    key = (record.instance, index, int(fight["index"]))
-                    fights.setdefault(record.arm, {})[key] = float(fight["outcome"])
+                if key in fight and "index" in fight:
+                    drawn = (record.instance, index, int(fight["index"]))
+                    fights.setdefault(record.arm, {})[drawn] = float(fight[key])
     return fights
 
 
@@ -505,29 +526,34 @@ def _report_duel(sessions, baselines) -> None:
     records = [record for session in sessions for record in session.records]
     if not records:
         return
-    drawn = _fights_by_draw(sessions)
     # In the order the arms were run rather than sorted, so that a policy's arm is reported before the baseline it is read against.
     names = list(dict.fromkeys(record.arm for record in records))
-    summaries = {}
-    for name in names:
-        theirs = [record for record in records if record.arm == name]
-        summary = _summarise(theirs)
-        summaries[name] = summary
-        if not summary.n:
-            log.info("%s: no fight was called, so there is nothing to score", name)
+    for mean_key, sd_key, fight_key, reading in READINGS:
+        if not any(mean_key in record.statistics for record in records):
+            # A record written before a reading existed carries nothing to report it from, and reporting nought would be reporting a measurement nobody took.
             continue
-        enough = _report_score(summary, name, len(theirs))
-        if name in baselines:
-            if enough:
-                log.warning("%s had the handwritten layer on both sides, so this average has to be nought and it is %+.4f over enough fights to say so: the arena favours one side of the board under this seed, and a policy measured on it is only readable as the difference from this figure",
-                            name, summary.mean)
-            else:
-                log.info("%s had the handwritten layer on both sides and %d fight(s) have not separated its average of %+.4f from nought, which is as much as this run says about whether the arena is even",
-                         name, summary.n, summary.mean)
-    for index, first in enumerate(names):
-        for second in names[index + 1:]:
-            _report_difference(first, summaries[first], second, summaries[second])
-            _report_paired(first, second, drawn)
+        log.info("---- %s ----", reading)
+        drawn = _fights_by_draw(sessions, fight_key)
+        summaries = {}
+        for name in names:
+            theirs = [record for record in records if record.arm == name]
+            summary = _summarise(theirs, mean_key, sd_key)
+            summaries[name] = summary
+            if not summary.n:
+                log.info("%s: no fight was called, so there is nothing to score", name)
+                continue
+            enough = _report_score(summary, name, len(theirs))
+            if name in baselines:
+                if enough:
+                    log.warning("%s had the handwritten layer on both sides, so this average has to be nought and it is %+.4f over enough fights to say so: the arena favours one side of the board under this seed, and a policy measured on it is only readable as the difference from this figure",
+                                name, summary.mean)
+                else:
+                    log.info("%s had the handwritten layer on both sides and %d fight(s) have not separated its average of %+.4f from nought, which is as much as this run says about whether the arena is even",
+                             name, summary.n, summary.mean)
+        for index, first in enumerate(names):
+            for second in names[index + 1:]:
+                _report_difference(first, summaries[first], second, summaries[second])
+                _report_paired(first, second, drawn)
 
 
 def _report_training(sessions, opponent: str) -> None:
@@ -540,15 +566,17 @@ def _report_training(sessions, opponent: str) -> None:
     records = [record for session in sessions for record in session.records]
     if not records:
         return
-    whole = _summarise(records)
-    if not whole.n:
+    if not _summarise(records).n:
         return
     log.info("the fights this run scored while training, which are a measurement it has already paid for:")
-    _report_score(whole, "training, whole run", len(records))
     # Halved within each instance rather than across the run, because the instances run concurrently and finish different numbers of episodes; the second half of every instance is the second half of the run, and the episode numbers an instance reports are its own and need not start at one.
     later = [record for session in sessions for record in session.records[len(session.records) // 2:]]
-    if later and len(later) < len(records):
-        _report_score(_summarise(later), "training, later half", len(later))
+    for mean_key, sd_key, _, reading in READINGS:
+        if not any(mean_key in record.statistics for record in records):
+            continue
+        _report_score(_summarise(records, mean_key, sd_key), f"training, whole run, {reading}", len(records))
+        if later and len(later) < len(records):
+            _report_score(_summarise(later, mean_key, sd_key), f"training, later half, {reading}", len(later))
     if opponent == "script":
         log.info("the opposing side was the handwritten layer throughout, so this is the same quantity a duel reports, taken over a moving policy: read it against a baseline run under this same seed, since how far the arena leans is a property of the seed")
     else:
@@ -739,6 +767,16 @@ def main(argv=None) -> int:
     parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--outcome-weight", type=float, default=None,
                         help="how much of a terminal the score of a fight is worth in the arena")
+    parser.add_argument("--score", default=BY_HEALTH, choices=list(SCORES),
+                        help="how a fight is scored for the terminal it pays: on what is left standing, or on "
+                             "what is left standing weighted by the health it has left. Both are computed and "
+                             "both are reported whichever is chosen; this settles only which one is paid")
+    parser.add_argument("--discount", type=float, default=None,
+                        help="how much a decision's future is discounted per period. One discounts nothing, "
+                             "which is what an errand that is a whole fight wants: the score of the fight then "
+                             "reaches every decision taken in it. The shaping telescopes at whatever this is")
+    parser.add_argument("--trace", type=float, default=None,
+                        help="how far the advantage estimator trades bias against variance")
     parser.add_argument("--warmup", type=int, default=0,
                         help="updates at the start that fit the value head alone, holding the trunk and the "
                              "policy still. Meant for a run started from imitated parameters, whose critic "
@@ -758,8 +796,10 @@ def main(argv=None) -> int:
     parser.add_argument("--keep-tainted", action="store_true",
                         help="clone from decisions about squads somebody outside the chain interfered with too")
     parser.add_argument("--greedy", action="store_true",
-                        help="take the likeliest action rather than drawing one, when duelling. The default "
-                             "is to draw, which is what the policy does when it is operated")
+                        help="measure each policy a second time taking the likeliest action rather than "
+                             "drawing one, as an arm beside the drawing one. Drawing is what the policy does "
+                             "when it is operated, so it stays; what this adds is the same weights without "
+                             "the exploration, on the same fights")
     parser.add_argument("--intruder", action="store_true",
                         help="inject the script intruder, which the design requires for the operational layer")
     parser.add_argument("--script", action="store_true",

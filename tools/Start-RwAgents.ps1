@@ -27,6 +27,12 @@ param(
     [ValidateRange(1, 64)]
     [int]$Count = 1,
 
+    # Which instance directory the run starts numbering at. Nought for an ordinary run; anything else is for
+    # putting a second, smaller run on instances a run already under way is not using, which is how a change
+    # is smoke tested without stopping a measurement.
+    [ValidateRange(0, 63)]
+    [int]$Offset = 0,
+
     [double]$Speed = 10,
 
     [int]$Seconds = 0,
@@ -62,10 +68,12 @@ New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
 
 $processes = @()
 for ($i = 0; $i -lt $Count; $i++) {
-    $name = '{0:d2}' -f $i
+    $name = '{0:d2}' -f ($i + $Offset)
     $dir = Join-Path $InstanceRoot $name
     if (-not (Test-Path $dir)) { throw "Instance directory missing: $dir" }
 
+    # The control process numbers its instances from nought whatever directory they run in, so the offset moves
+    # the directory and the log and not the identity the run knows an instance by.
     $options = "host=$ControlHost,port=$Port,instance=$i,speed=$Speed,tactical=$TacticalMs,operational=$OperationalMs"
     if ($AgentOptions -ne '') { $options += ",$AgentOptions" }
 
