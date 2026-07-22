@@ -67,6 +67,11 @@ MAX_UNITS = 14
 #: The fewest units a side is built from, which is what bounds how expensive a type may be for the budget it is drawn against. A fight is between formations, and one machine against a formation is a different problem from the one the five departures are about.
 MINIMUM_FORCE = 3
 
+#: How long to let the opening board settle before the first engagement is built, in game milliseconds.
+#:
+#: A spawn-point player is given a headquarters and a builder at the start of an episode, and they are not all on the board in the first frame the arena reads: they arrive a step or two in. The snapshot of what was already standing, against which every later arrival is judged to be a freshly spawned unit of a fight, is taken before an engagement is built — so building the first one immediately takes that snapshot too early, misses the base, and then the squad former counts this side's own headquarters as a unit that has just arrived for the fight and sweeps it into the squad. The fight is then one this side scores an extra headquarters in and the baseless opposing side never can, which is a bias in the self-play baseline that has to be nought. Waiting until the set of standing units stops changing folds the base into the snapshot, after which no engagement mistakes it for part of a fight; this is the longest that wait may run before the first engagement is built regardless, for the case of a board that never settles or never fills. It is paid once an episode, because after the first engagement the base is standing and every later snapshot already holds it.
+SETTLE_MS = 5000
+
 #: How much of a terminal reward the outcome of a fight is worth, for a fight that ended without the contract itself reaching one of its own conclusions. One means that destroying the other side without a scratch is paid exactly what taking the contracted ground is paid, which is the largest this can be set to without teaching a layer to prefer a massacre to the errand it was given.
 #:
 #: Something has to be paid here, and measurement is the reason. Most fights end neither by one side being destroyed nor on the clock: they end with two forces that have stopped hurting each other, and under a scheme that paid only the discrete conclusions those fights were worth precisely nothing to either side. Nothing is the best score available in a fight that can only go badly, so a layer paid that way is being taught to stand off and wait, which is the opposite of what the arena exists to teach.
@@ -81,9 +86,9 @@ BUDGET_SHARE = (0.3, 1.2)
 #:
 #: Nought, and the story of why is worth keeping. The score rises with the strength share at a correlation of about six tenths, and that share is settled before either layer has decided anything, so subtracting a fixed multiple of it looked like free variance: unbiased whatever the multiple, because the draw is independent of play, and antisymmetric, so the self-check that a run of the handwritten layer against itself must average nought would survive. Fitted at 2.2 it took a third of the variance out.
 #:
-#: It did not survive the self-check. The handwritten layer against itself came back at -0.070 over 901 fights where it has to be nought, and the reason is that the share is not symmetric after all: the two spawn orders are submitted one after the other and this side's goes first, so when an order has not finished arriving it is more often the other side's, and the squads that get formed carry 53.1 per cent of the strength for this side against 50.0 per cent of what was ordered. Three points of asymmetry multiplied by 2.2 is the seven hundredths that appeared. The score without the term is unbiased on the same fights at -0.003, because writing the two sides as shares of their own worth already absorbs most of what the draw does.
+#: It did not survive the self-check. The handwritten layer against itself came back at -0.070 over 901 fights where it has to be nought, and the reason was that the share was not symmetric after all: the two spawn orders were submitted one after the other with this side's first, so when an order had not finished arriving it was more often the other side's, and the squads that formed carried 53.1 per cent of the strength for this side against 50.0 per cent of what was ordered. Three points of asymmetry multiplied by 2.2 is the seven hundredths that appeared. The score without the term is unbiased on the same fights at -0.003, because writing the two sides as shares of their own worth already absorbs most of what the draw does.
 #:
-#: So the term is off, and the way to earn it back is to make the shares symmetric rather than to correct for their not being. Left at nought rather than deleted because the measurement that killed it is the reason anybody would try it again.
+#: The structural cause is now gone: the two orders are interleaved a unit at a time so that neither is submitted ahead of the other (Arena._interleave). Whether that has made the formed shares even enough to earn the term back is a fresh measurement and has not been taken, so the term stays at nought until a self-check on the interleaved arena says it can go back. The way to earn it back was always to make the shares symmetric rather than to correct for their not being; that is now done in the spawn order, and what is left is to measure it. Left at nought rather than deleted because the measurement that killed it is the reason anybody would try it again.
 STRENGTH_SLOPE = 0.0
 
 
@@ -109,7 +114,7 @@ class Engagement:
     #: What the spawn order cost, kept beside what arrived so that a run producing thin fights can be told from one producing small ones.
     our_ordered: float = 0.0
     their_ordered: float = 0.0
-    #: How many units were ordered for each side, which is what says whether an order has finished arriving. Spawning goes through the command queue a unit at a time, so a side can be half there while the other is whole, and forming on the first arrival puts the late half of an order on the board outside the squad that is being scored.
+    #: How many units were ordered for each side, which is what says whether an order has finished arriving. Spawning goes through the command queue a unit at a time, so a squad is only formed once the count it was ordered at is standing; the two orders are interleaved so that neither runs ahead of the other, and forming before both are whole would leave the units still queued on the board outside the squad that is being scored.
     our_count: int = 0
     their_count: int = 0
     ours_left: int = 0
@@ -131,7 +136,7 @@ class Engagement:
 
         Written in shares rather than in credits because the two sides are built to a deliberately uneven draw. A difference of worth would pay for having been dealt the stronger side, and a layer can improve that score without ever fighting differently.
 
-        The last term is what a fixed multiple of the strength share would take out, and it is set to nothing. The idea was that the stronger side loses a smaller fraction of itself as well as fewer credits, so the score still rises with the draw — measured at a correlation near six tenths — and that subtracting the draw would be free variance. It was not free: the shares of the squads that actually form are not symmetric, and the term multiplied that asymmetry into a bias five times the size of anything it was meant to help see. The constant carries the measurement.
+        The last term is what a fixed multiple of the strength share would take out, and it is set to nothing. The idea was that the stronger side loses a smaller fraction of itself as well as fewer credits, so the score still rises with the draw — measured at a correlation near six tenths — and that subtracting the draw would be free variance. It was not free: the shares of the squads that actually formed were not symmetric, because one side's spawn order was submitted before the other's, and the term multiplied that asymmetry into a bias five times the size of anything it was meant to help see. The spawn orders are now interleaved so that neither leads (see STRENGTH_SLOPE), and the term stays at nought until a self-check on the interleaved arena has measured that the shares are even. The constant carries the measurement.
         """
         strength = self.our_value + self.their_value
         share = self.our_value / strength if strength > 0 else 0.5
@@ -240,7 +245,10 @@ class Arena:
             self.session.scenario([], sandbox=True)
             self._sandbox_sent = True
             self.sites = self._sites()
-            self.known = {unit.id for unit in observation.unit_states}
+            # Left empty, not seeded with this frame's units, so that the settle below has a change to detect: seeded with the current set, the first period would already read as unchanged and the settle would pass before the base had finished appearing, which is the very thing it is there to wait out.
+            self.known = set()
+            # The longest the opening settle may run before the first engagement is built regardless. See SETTLE_MS.
+            self.until_ms = observation.game_time_ms + SETTLE_MS
 
         view = build_view(observation, self.catalogue, None, self.last_regions)
         self.last_regions = view.regions
@@ -248,7 +256,9 @@ class Arena:
         now = observation.game_time_ms
 
         self._fold(observation)
-        if self.phase == "opening" or self.phase == "clear":
+        if self.phase == "opening":
+            self._settle(observation, action, now)
+        elif self.phase == "clear":
             self._begin(observation, action, now)
         elif self.phase == "spawning":
             self._form(observation, action, now)
@@ -262,6 +272,17 @@ class Arena:
         return encode_action(action)
 
     # ---- building a fight --------------------------------------------------------------
+
+    def _settle(self, observation: Observation, action: Action, now: int) -> None:
+        """Holds off the first engagement until the opening board has stopped changing, then builds it.
+
+        The units a spawn-point player starts with arrive over the first steps rather than all at once, so the record of what was already standing has to be taken after they have, or this side's own base is counted as freshly spawned for the first fight and swept into its squad. Each period the record is refreshed to whatever is standing; the first engagement is built once that set has held from one period to the next, or once the settle has run its length, whichever comes first. See SETTLE_MS.
+        """
+        current = {unit.id for unit in observation.unit_states}
+        settled = bool(current) and current == self.known
+        self.known = current
+        if settled or now >= self.until_ms:
+            self._begin(observation, action, now)
 
     def _begin(self, observation: Observation, action: Action, now: int) -> None:
         site = self._site(observation)
@@ -283,10 +304,9 @@ class Arena:
         if not our_force or not their_force:
             return
 
-        spawns: List[float] = []
-        spawns.extend(self._rows(our_force, self._our_slot(observation), our_place))
-        spawns.extend(self._rows(their_force, self._their_slot(observation), their_place))
-        self.session.scenario(spawns)
+        our_rows = self._rows(our_force, self._our_slot(observation), our_place)
+        their_rows = self._rows(their_force, self._their_slot(observation), their_place)
+        self.session.scenario(self._interleave(our_rows, their_rows))
 
         self.known = {unit.id for unit in observation.unit_states}
         # What the sides are worth is left until they are formed, because what is ordered here and what appears there are not always the same units.
@@ -305,7 +325,7 @@ class Arena:
     def _form(self, observation: Observation, action: Action, now: int) -> None:
         """Takes the units that have appeared since the spawn was ordered and makes two squads of them.
 
-        Waits for the whole of both orders rather than for the first unit of each. An order arrives over several periods, and one side's is submitted before the other's, so forming as soon as both have somebody systematically leaves more of the second side outside its squad than of the first. Those units stand on the board, join in the fighting, and are not counted in what the squad was worth or in what is left of it, which shows up as a score that favours one side of the board for no reason to do with either policy. If the wait runs out, whatever arrived is what fights, and that is honest because both figures the score uses are then taken from the same units.
+        Waits for the whole of both orders rather than for the first unit of each. The two orders are interleaved a unit at a time (_interleave), so they arrive at the same rate rather than one side's whole order before the other's; but at any single moment the two can still be a unit apart, and forming on the first arrival would leave whatever had not yet come outside its squad. Those units stand on the board, join in the fighting, and are counted neither in what the squad was worth nor in what is left of it, which would show up as a score that favours one side for no reason to do with either policy. If the wait runs out, whatever arrived is what fights, and that is honest because the interleave has cut both sides to the same depth and both figures the score uses are then taken from the same units.
         """
         fresh = [unit for unit in observation.unit_states if unit.id not in self.known]
         ours = [unit.id for unit in fresh if not unit.hostile]
@@ -563,15 +583,35 @@ class Arena:
             spent += kind.price
         return force
 
-    def _rows(self, force: Sequence, slot: int, place: Tuple[float, float]) -> List[float]:
-        """Spawn rows for one side: type, player slot, position, count. Units are scattered a little so that they do not all arrive on the same point and spend the first seconds pushing each other apart."""
-        rows: List[float] = []
+    def _rows(self, force: Sequence, slot: int, place: Tuple[float, float]) -> List[List[float]]:
+        """One spawn row per unit for one side: type, player slot, position, count. Units are scattered a little so that they do not all arrive on the same point and spend the first seconds pushing each other apart. Returned a row at a time rather than run together, because the two sides' rows are interleaved before either order is sent."""
+        rows: List[List[float]] = []
         for index, kind in enumerate(force):
             angle = 2 * math.pi * index / max(1, len(force))
             radius = 40.0 + 12.0 * index
-            rows.extend([float(kind.index), float(slot),
+            rows.append([float(kind.index), float(slot),
                          place[0] + math.cos(angle) * radius,
                          place[1] + math.sin(angle) * radius, 1.0])
+        return rows
+
+    @staticmethod
+    def _interleave(ours: Sequence[Sequence[float]],
+                    theirs: Sequence[Sequence[float]]) -> List[float]:
+        """Merges the two sides' spawn rows into the one order that is sent, so that neither side is submitted ahead of the other.
+
+        Spawning goes through the command queue a unit at a time and the queue is drained in the order it was filled, so a side whose whole order is submitted before the other's is the more completely on the board when the spawn wait is called: its late units sit nearer the front. Running the two orders one after the other, this side first, handed this side a few points of the strength that forms into its squad for no reason to do with either policy — drawn out as a left-right lean it was three points, which is enough to bias the self-play score the arena is measured against.
+
+        Taken one unit from each side in turn, the two orders stay at the same depth in the queue throughout, so a wait that runs out cuts both sides to the same degree rather than only the second. Which side leads a pair alternates, so the one unit a side is unavoidably ahead by inside a pair falls on each side equally over the force. When one order is longer its tail runs on alone, which leans on the side that was dealt the larger force rather than on a fixed side, and which side that is was already drawn even.
+        """
+        rows: List[float] = []
+        for index in range(max(len(ours), len(theirs))):
+            pair = [ours[index] if index < len(ours) else None,
+                    theirs[index] if index < len(theirs) else None]
+            if index % 2:
+                pair.reverse()
+            for row in pair:
+                if row is not None:
+                    rows.extend(row)
         return rows
 
     def _our_slot(self, observation: Observation) -> int:

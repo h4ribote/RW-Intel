@@ -355,6 +355,32 @@ def test_the_board_read_from_the_other_side_exchanges_the_sides_and_nothing_else
     assert [unit.hostile for unit in observation.unit_states] == [0, 1]
 
 
+def test_the_two_sides_spawn_orders_are_interleaved_so_neither_leads():
+    """A fight is two spawn orders sent down one command queue, and the queue is drained in the order it was filled. Sending one side's whole order before the other's leaves that side more completely on the board when the spawn wait is called, which was measured as three points of a left-right lean in the strength that forms into a squad — enough to bias the self-play score the arena is scored against. Interleaving keeps both orders at the same depth in the queue throughout, so a wait that runs out cuts both to the same degree."""
+    from rwintel.learn.arena import Arena
+
+    def rows(slot, count):
+        # One five-float spawn row per unit, the second field the player slot that names which side it is.
+        return [[float(slot * 100 + index), float(slot), 0.0, 0.0, 1.0] for index in range(count)]
+
+    for our_count, their_count in ((6, 6), (12, 4), (3, 9), (1, 5), (7, 1)):
+        flat = Arena._interleave(rows(0, our_count), rows(1, their_count))
+        assert len(flat) == (our_count + their_count) * 5
+        # The slot field of each row, in the order the queue would drain them.
+        order = [flat[base + 1] for base in range(0, len(flat), 5)]
+
+        # Every row of both orders is present exactly once.
+        assert order.count(0.0) == our_count and order.count(1.0) == their_count
+
+        # While both orders still have units to place, the queue never runs more than one unit ahead on either side: this is the property that removes the systematic lead. Past that depth the shorter order is spent and its tail runs on alone, which leans on the larger force rather than on a fixed side.
+        for depth in range(1, 2 * min(our_count, their_count) + 1):
+            assert abs(order[:depth].count(0.0) - order[:depth].count(1.0)) <= 1
+
+        # Neither side is the one that always leads: which side is submitted first alternates pair by pair.
+        if our_count >= 2 and their_count >= 2:
+            assert order[0] != order[2]
+
+
 # ---- what a fight was worth ----------------------------------------------------------------
 
 def _fight(our_value, their_value, our_left, their_left):
