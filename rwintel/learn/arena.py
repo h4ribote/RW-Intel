@@ -45,6 +45,8 @@ SWEEP_MS = 20000
 #: How long a fight may go without a casualty on either side before it is called.
 #:
 #: Two forces that have stopped hurting each other are not about to start. Measured: an engagement that ends with somebody destroyed takes twenty to thirty seconds, and one that ends on the clock spends its whole minute with both sides nearly intact, so waiting the full minute for those buys nothing and costs the arena a third of its time. Long enough that a squad manoeuvring for position is not mistaken for one that has given up.
+#:
+#: What removing it costs and buys has since been measured on both settings at once, as two arms of one run drawing the same fights. It buys decisiveness: fights that end with a side destroyed go from 31 per cent to 49. It costs throughput, because the fights that would have been called run their whole minute — the same wall clock produced 1380 fights against 894 — and it widens the scatter of the score from 0.569 to 0.643, which is what a sample size is paid in. It does not move the baseline: the two arms differ by -0.022 with two standard errors of 0.031, where a run of the handwritten layer against itself has to average nought. That last was once believed otherwise and was the stated reason for keeping the cut-off; the belief came from a run whose episodes all drew the same fights over again, and it did not survive drawing them afresh.
 STALL_MS = 12000
 
 #: How long to wait for spawned units to appear before giving up on an engagement and trying again. Spawning goes through the command queue, so it takes a step or two rather than being instantaneous.
@@ -58,10 +60,23 @@ SEPARATION = 250.0
 #: Credits each side is built out of, drawn uniformly. Small fights and large ones teach different things and the layer has to answer both.
 FORCE_VALUE = (1200.0, 5000.0)
 
-#: How lopsided a fight may be, as the weaker side's share of the stronger. A layer that only ever saw even fights would never learn that some fights are to be broken off, which is one of the five departures.
+#: How lopsided a fight may be, as the weaker side's share of the stronger. A layer that only ever saw even fights would never learn that some fights are to be broken off, which is one of the departures.
 #:
-#: Half rather than lower, and the reason is measured. Lowering the floor to three tenths does make the fights more decisive - a run of the handwritten layer against itself went from a third of its fights ending with a side destroyed to two fifths, and the spread of the score widened - which is what the arena wants, because the departure that matters on a lopsided board is breaking off and an even board never asks for it. But the same run's self-play average, which has to be nought, went from -0.017 to -0.073 and out of the noise: a lopsided draw multiplies whatever small left-right asymmetry the fighting still carries, and the score written in shares does not absorb it, because the asymmetry is not in the share the two sides are dealt - that stays even - but in how the fight goes at a given share. Widening the draw is worth having once that asymmetry is found and closed; until then it trades a fair board for a decisive one.
+#: Half rather than lower, and the reason has been measured twice, differently each time. The first reading was that lowering the floor to three tenths broke the board: the self-play average, which has to be nought, went from -0.017 to -0.073. That reading did not survive drawing fresh fights every episode, which is what those runs had not been doing; at fifty-odd distinct draws the interval on either figure was about a seventh, and the sign of the lopsided one flipped from one seed to the next.
+#:
+#: The second reading is what the setting now rests on, and it is about sharpness rather than fairness. Both floors are fair - the handwritten layer against itself comes back at +0.013 and +0.002 with two standard errors of about 0.03 - and the lower floor does make fights more decisive, from 31 per cent ending with a side destroyed to 37. What it does not do is make the measurement any sharper. Pinning a layer to one departure and taking the difference from the baseline on the very same fights, the loss it costs comes out at -0.0555 under the even floor and -0.0600 under the lopsided one, at two standard errors of 0.025 and 0.024, so the same claim costs the same number of fights either way. What the lopsided draw does move is the unpaired spread, from 0.57 to 0.63, which is paid for in sample size. There would be a reason to lower it - a layer that never meets a fight it ought to break off never learns to - but the arena's own arithmetic says the measurement gains nothing, so the floor stays where the design put it.
 IMBALANCE = (0.5, 1.0)
+
+#: This side's departure is decided and submitted before the other side's, every period, which is the arrangement the arena ran under while a left-right lean was being measured in the fighting itself.
+OURS_FIRST = "ours"
+
+#: The other side's first instead, which is the same arrangement with the sides exchanged. It is not a setting to run under; it is the measurement that decides whether the order is what the lean is made of, because a lean made of the order has to change sign when the order does and one made of anything else cannot.
+THEIRS_FIRST = "theirs"
+
+#: Which side leads changes from period to period, so that whatever a period's leader gains falls on both sides equally over a fight. The same argument the spawn orders are interleaved under, applied to the decisions.
+ALTERNATING = "alternate"
+
+DECISION_ORDERS = (OURS_FIRST, THEIRS_FIRST, ALTERNATING)
 
 #: The most units either side is built from, so that one engagement cannot fill the board.
 MAX_UNITS = 14
@@ -90,7 +105,9 @@ BUDGET_SHARE = (0.3, 1.2)
 #:
 #: It did not survive the self-check. The handwritten layer against itself came back at -0.070 over 901 fights where it has to be nought, and the reason was that the share was not symmetric after all: the two spawn orders were submitted one after the other with this side's first, so when an order had not finished arriving it was more often the other side's, and the squads that formed carried 53.1 per cent of the strength for this side against 50.0 per cent of what was ordered. Three points of asymmetry multiplied by 2.2 is the seven hundredths that appeared. The score without the term is unbiased on the same fights at -0.003, because writing the two sides as shares of their own worth already absorbs most of what the draw does.
 #:
-#: The structural cause is now gone: the two orders are interleaved a unit at a time so that neither is submitted ahead of the other (Arena._interleave). Whether that has made the formed shares even enough to earn the term back is a fresh measurement and has not been taken, so the term stays at nought until a self-check on the interleaved arena says it can go back. The way to earn it back was always to make the shares symmetric rather than to correct for their not being; that is now done in the spawn order, and what is left is to measure it. Left at nought rather than deleted because the measurement that killed it is the reason anybody would try it again.
+#: The structural cause is now gone, and it was not the spawn order after all. Interleaving the two orders a unit at a time (Arena._interleave) left the baseline exactly where it was; what actually put three points of strength on this side was the episode's own headquarters being swept into the first fight's squad, which is fixed by letting the opening board settle first (SETTLE_MS). With that in, the formed shares are even — the mean of share less a half is +0.004 against an ordered share of 0.504.
+#:
+#: So the term could now be earned back, and the third of the variance it removed is worth having. What it takes is fitting the multiple again on a run of the arena as it now draws its fights, and then passing the self-check that a run of the handwritten layer against itself averages nought. That has not been done, so this stays at nought: a variance reduction that has not passed the check that killed the last one is not a variance reduction. Left at nought rather than deleted because the measurement that killed it is the reason anybody would try it again.
 STRENGTH_SLOPE = 0.0
 
 
@@ -208,17 +225,27 @@ class Statistics:
 
 
 class Arena:
-    """The policy an arena episode runs under. Builds engagements, fights both sides of them, and pays the layer being trained."""
+    """The policy an arena episode runs under. Builds engagements, fights both sides of them, and pays the layer being trained.
+
+    One of these is built per episode, and everything about the fights it builds — where, how big, how uneven, made of what — comes out of the seed it is handed. That seed therefore has to advance from episode to episode, or every episode of an instance replays the same fights and a run reports its fight count as a sample size it does not have. It did, for a while, and the arithmetic that came out of it was wrong by a factor of thirty to fifty. The caller owns the derivation, because only the caller knows which episode this is and which arm of a comparison it belongs to.
+    """
 
     def __init__(self, session, tactics: Optional[Callable] = None,
                  opponent: Optional[Callable] = None, seed: int = 0,
                  enemy_slot: Optional[int] = None,
                  outcome_weight: float = TERMINAL_OUTCOME_WEIGHT,
-                 stall_ms: int = STALL_MS) -> None:
+                 stall_ms: int = STALL_MS,
+                 imbalance_floor: float = IMBALANCE[0],
+                 decision_order: str = OURS_FIRST) -> None:
         self.session = session
         self.outcome_weight = outcome_weight
         # How long a fight may go without a casualty before it is called. An argument rather than the constant because how decisive the arena's fights are is one of the things a run may want to ask about: a layer's choices can only be worth as much as the fights they are made in, and a fight that is called at the first quiet spell is one where declining to fight costs nothing.
         self.stall_ms = stall_ms
+        # The weaker side's smallest share of the stronger. An argument rather than the constant because how lopsided the draw is decides how many fights end with a side destroyed and how widely the score scatters, and whether that trade is worth taking is a question only a run of both settings answers.
+        self.imbalance_floor = imbalance_floor
+        if decision_order not in DECISION_ORDERS:
+            raise ValueError(f"no decision order named {decision_order!r}: expected one of {', '.join(DECISION_ORDERS)}")
+        self.decision_order = decision_order
         self.catalogue = Catalogue(session.types, session.assets)
         self.random = random.Random(seed)
         # The layers are built here rather than handed in already made, because both sides have to read the same type catalogue as the arena that spawns their units: a layer classifying a unit from a different table would sort the same tank into a different role.
@@ -291,7 +318,7 @@ class Arena:
         if site is None:
             return
         budget = self.random.uniform(*FORCE_VALUE)
-        weaker = self.random.uniform(*IMBALANCE)
+        weaker = self.random.uniform(self.imbalance_floor, IMBALANCE[1])
         ours_first = self.random.random() < 0.5
         our_budget = budget if ours_first else budget * weaker
         their_budget = budget * weaker if ours_first else budget
@@ -394,13 +421,17 @@ class Arena:
             self.engagement.closest = min(self.engagement.closest,
                                           math.hypot(ours.x - theirs.x, ours.y - theirs.y))
 
-        deviations, _ = self.tactics.decide(view, [ours], now)
-        action.deviations.extend(deviations)
         their_view = build_view(observation, self.catalogue, None, self.last_regions, invert=True)
-        their_deviations, _ = self.opponent.decide(their_view, [theirs], now)
-        action.deviations.extend(their_deviations)
+        sides = [(self.tactics, ours, view), (self.opponent, theirs, their_view)]
+        if not self._ours_leads():
+            sides.reverse()
+        for layer, squad, board in sides:
+            deviations, _ = layer.decide(board, [squad], now)
+            action.deviations.extend(deviations)
+            # Only this side's decisions are counted, because the count is what the run reports as its own output and the opposing layer's decisions are the environment rather than the product.
+            if layer is self.tactics:
+                self.statistics.decisions += len(deviations)
         self.statistics.tactical += 1
-        self.statistics.decisions += len(deviations)
 
         if not ours.members or not theirs.members or now >= self.until_ms:
             self._call(ours, theirs, now)
@@ -410,6 +441,19 @@ class Arena:
             self._alive, self._changed_ms = alive, now
         elif now - self._changed_ms >= self.stall_ms:
             self._call(ours, theirs, now, stalled=True)
+
+    def _ours_leads(self) -> bool:
+        """Whether this side's departure is decided and submitted ahead of the other side's this period.
+
+        It ought not to matter. Both layers read the same frame, neither can see what the other chose, and the two sets of orders are carried on one action to one period of the simulation. But a left-right lean that the score cannot absorb has been measured in the fighting itself — buried in the noise on an even draw and out of it on a lopsided one — and the order the two sides are decided in is the only thing about a period that is not symmetric between them, so it is the first candidate and the one that can be settled by measurement rather than by reading: a lean made of the order reverses when the order does, and a lean made of anything else does not.
+
+        The alternating setting is what a lean made of the order would be answered with rather than corrected for, on the same argument the two spawn orders are interleaved under: whatever a period's leader gains is then dealt to each side in half the periods of every fight instead of to one side in all of them. The parity is read off the count of periods the layers have decided in, which is already kept and is incremented once per period after the decisions are taken.
+        """
+        if self.decision_order == THEIRS_FIRST:
+            return False
+        if self.decision_order == ALTERNATING:
+            return self.statistics.tactical % 2 == 0
+        return True
 
     def _call(self, ours: SquadRecord, theirs: SquadRecord, now: int, stalled: bool = False) -> None:
         engagement = self.engagement

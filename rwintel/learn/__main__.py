@@ -29,9 +29,16 @@ from ..control.server import Server, ServerSettings
 from ..control.session import EpisodeSettings
 from ..data import AssetPaths
 from ..eval.journal import Journal, default_path
-from ..eval.sampling import UNBOUNDED_EPISODES, episodes_for
-from .arena import Arena
-from .deciders import NetworkOperations, NetworkTactics, operational_batcher, tactical_batcher
+from ..eval.sampling import UNBOUNDED_EPISODES, Summary, episodes_for
+from ..wire import Deviation
+from .arena import DECISION_ORDERS, Arena
+from .deciders import (
+    NetworkOperations,
+    NetworkTactics,
+    PinnedDeparture,
+    operational_batcher,
+    tactical_batcher,
+)
 from .encoding import OPERATIONAL_SIZE, TACTICAL_SIZE
 from .layers import LearntOperations, LearntTactics
 from .policy import OPERATIONAL, TACTICAL, LearningPolicy, learning_arm
@@ -72,6 +79,100 @@ def _given(**asked) -> dict:
     What is left out then stands at the figure stated by the module that owns it rather than at a copy of that figure kept here. The two batch sizes are the case that makes this worth a helper: the steps in a reinforcement update and the teacher's decisions in one gradient step are different numbers living in different files, and one option carries both.
     """
     return {name: value for name, value in asked.items() if value is not None}
+
+
+#: How far apart two instances' arena draws are set. It only has to exceed the episodes one instance will ever run, and it is prime so that two runs started at neighbouring seeds do not lay one instance's stream on top of another's.
+INSTANCE_STRIDE = 100003
+
+
+def _arena_seed(arguments, session) -> int:
+    """The seed an arena episode draws its fights from, which advances with the episode as well as with the instance.
+
+    An arena is built afresh for every episode, and it used to be built from the instance alone. Every episode of an instance therefore drew the same site, the same two budgets, the same imbalance, the same angle and the same two forces as the one before it, in the same order: a run of fifty episodes on seven instances was not two thousand fights but about fifty distinct fights fought forty times over. Measured on the recorded runs, the first fight of every episode of an instance had one single spawn order across all fifty of them, and the second and third nearly always did too.
+
+    What that costs is the sample size, and it costs it by a factor of thirty to fifty. The scatter of the fight-level mean was quoted as two standard errors over the number of fights, which for two thousand fights is about a fortieth; taken over the distinct draws instead it is about a seventh. Every left-right lean the arena has been charged with — the tenth of a point that came and went with the seed, the seven hundredths a lopsided draw was blamed for — sits comfortably inside that. There was no asymmetry to find. There were fifty fights being reported as two thousand.
+
+    The episode is folded in per arm rather than per record, so that the arms of a comparison run the very same fights as each other while each of them runs different fights from one episode to the next. That is what makes a policy and its baseline a paired measurement: the two meet the same sites, the same budgets and the same forces, and what is left between them is the play.
+    """
+    arms = max(1, len(getattr(session, "arms", ()) or ()))
+    return arguments.seed + INSTANCE_STRIDE * session.instance + len(session.records) // arms
+
+
+def _arena_options(arguments, order: Optional[str] = None, floor: Optional[float] = None,
+                   stall: Optional[int] = None) -> dict:
+    """The arena settings a run actually asked for, as keywords, so that everything unasked for stands at the figure the arena states rather than at a copy of it kept here."""
+    options = _given(stall_ms=stall * 1000 if stall else None, imbalance_floor=floor)
+    if order is not None:
+        options["decision_order"] = order
+    return options
+
+
+def _orders(arguments) -> list:
+    """Which decision orders a run builds its arenas under, in the order they were named.
+
+    More than one turns the run into a comparison between them, which is what the question they exist for takes: whether the left-right lean the fighting carries is made of the order the two sides are decided in can only be answered by running both orders and seeing whether the lean changes sign, and running them as two arms of one run is what holds everything else — the machine, the seed, the draws, the hour — still between the two.
+    """
+    named = [name.strip() for name in str(arguments.decision_order).split(",") if name.strip()]
+    orders = []
+    for name in named:
+        if name not in DECISION_ORDERS:
+            raise SystemExit(f"no decision order named {name!r}: expected one of {', '.join(DECISION_ORDERS)}")
+        if name not in orders:
+            orders.append(name)
+    return orders or [DECISION_ORDERS[0]]
+
+
+def _numbers(given, name: str, whole: bool, check=None) -> list:
+    """A setting written as one number or as several, comma separated.
+
+    Several make the arms of one run. The two settings written this way — how lopsided a draw may be and how long a quiet spell is tolerated before a fight is called — are the two that trade the same pair of things against each other, how fair the arena is against how decisive its fights are, and neither trade can be settled by argument. Run as arms they are measured against each other on the very same draws, in one run, on one machine, in one hour.
+    """
+    if given is None:
+        return [None]
+    values = []
+    for written in str(given).split(","):
+        if not written.strip():
+            continue
+        try:
+            value = int(written) if whole else float(written)
+        except ValueError:
+            raise SystemExit(f"{name} has to be a number, not {written.strip()!r}")
+        if check is not None and not check(value):
+            raise SystemExit(f"{name} cannot be {value:g}")
+        if value not in values:
+            values.append(value)
+    return values or [None]
+
+
+def _pinned(arguments) -> list:
+    """Which departures a run measures a layer pinned to, as arms beside the ordinary ones.
+
+    This is how the band a policy is playing inside gets measured: pin the layer to one departure and the arena reports what giving up the choice costs. Named from the wire's own list so that adding a departure adds an ablation rather than leaving one behind.
+    """
+    if not arguments.pin:
+        return []
+    departures = []
+    for written in str(arguments.pin).split(","):
+        name = written.strip().upper()
+        if not name:
+            continue
+        if name not in Deviation.__members__:
+            raise SystemExit(f"no departure named {written.strip()!r}: expected one of "
+                             f"{', '.join(member.name.lower() for member in Deviation)}")
+        if Deviation[name] not in departures:
+            departures.append(Deviation[name])
+    return departures
+
+
+def _floors(arguments) -> list:
+    """How lopsided a draw may be, as the weaker side's share of the stronger."""
+    return _numbers(arguments.imbalance_floor, "an imbalance floor", whole=False,
+                    check=lambda value: 0.0 < value <= 1.0)
+
+
+def _stalls(arguments) -> list:
+    """How long a fight may go without a casualty before it is called, in game seconds."""
+    return _numbers(arguments.stall_seconds, "a stall time", whole=True, check=lambda value: value > 0)
 
 
 def _load(net, path: Optional[str], device) -> None:
@@ -150,12 +251,15 @@ def train_tactics(arguments) -> int:
         return LearntTactics(session, catalogue, NetworkTactics(net, device, batcher), rollout,
                              session.instance, status_terminals=False)
 
+    # One arena setting to a training run: a run whose arms differed would be training one policy on two arenas and reporting one number for it.
+    order, floor, stall = _orders(arguments)[0], _floors(arguments)[0], _stalls(arguments)[0]
+
     def arm(session):
         # Both sides script is how the arena itself is measured rather than a policy: it is the baseline a learnt layer has to beat, and it is the only setting in which what the arena produces says something about the arena rather than about whatever the policy currently happens to do.
         ours = None if arguments.script else learnt
-        return Arena(session, tactics=ours, seed=arguments.seed + session.instance,
-                     **_given(outcome_weight=arguments.outcome_weight,
-                              stall_ms=arguments.stall_seconds * 1000 if arguments.stall_seconds else None),
+        return Arena(session, tactics=ours, seed=_arena_seed(arguments, session),
+                     **_given(outcome_weight=arguments.outcome_weight),
+                     **_arena_options(arguments, order, floor, stall),
                      opponent=None if (arguments.script or arguments.script_opponent) else learnt)
 
     journal = Journal(arguments.record or default_path("tactics"))
@@ -169,6 +273,7 @@ def train_tactics(arguments) -> int:
 
     # Counted from the episode records rather than from the policies, which are put down as each episode ends: what the arena did is a fact about the episodes it did it in, and the record is where that is kept.
     _report_arena(sessions, batcher)
+    _report_training(sessions, "script" if (arguments.script or arguments.script_opponent) else "policy")
     if report is not None:
         log.info("last update: %s", report.as_dict())
     return 0
@@ -212,55 +317,90 @@ def duel(arguments) -> int:
 
     Neither a buffer nor a trainer is built here, and the layer is handed no rollout at all, so no decision is written down anywhere. That is not thrift. A buffer nobody drains grows for the length of the run, and a trainer would move the parameters being measured while they were being measured, which would make the number that came out a number about no policy in particular.
 
-    Leaving the policy out entirely is the baseline, and it is worth running before every comparison. Both sides are then the same handwritten layer, so the average result has to be nought by the antisymmetry of the score itself; anything else is the arena favouring one side of the board, and on an arena that favours one side no comparison between two policies means anything.
+    Leaving the policy out is the baseline: both sides are then the same handwritten layer, so the average result has to be nought by the antisymmetry of the score itself, and anything else is the arena favouring one side of the board.
+
+    The baseline is taken alongside the policy rather than left to a separate run, and that is the default because the alternative has already produced a wrong reading twice. How far the arena leans is not a property of the arena but of the seed it was run under - the same handwritten layer against itself came out at -0.02 under one seed and +0.06 under another - so a policy's score is only readable beside the lean of the very seed it was measured on. Run as two arms of one run they alternate within each instance, which holds the seed, the machine and the hour still between them; the difference of the two is then what the policy is worth, and the interval on that difference is what says whether it is worth anything at all.
+
+    Several policies may be named at once, comma separated, and then each is an arm beside the same baseline. That is not thrift either: two policies measured in separate runs are compared through their baselines, and two measured here are compared on the very fights both of them fought.
     """
-    learnt = batcher = None
+    policies, batchers = [], []
     if arguments.load:
         import os
 
         from .net import TacticalNet
 
-        if not os.path.exists(arguments.load):
-            # Refused rather than started from nothing, which is what a training run does with a missing file. A measurement that quietly scored a freshly initialised policy would produce a perfectly plausible number about a policy nobody asked about.
-            log.error("there are no parameters at %s to measure", arguments.load)
-            return 1
         device = _device(arguments.device)
-        net = TacticalNet(**_given(width=arguments.width)).to(device)
-        _load(net, arguments.load, device)
-        batcher = tactical_batcher(net, device=device, greedy=arguments.greedy)
+        paths = [path.strip() for path in str(arguments.load).split(",") if path.strip()]
+        for path in paths:
+            if not os.path.exists(path):
+                # Refused rather than started from nothing, which is what a training run does with a missing file. A measurement that quietly scored a freshly initialised policy would produce a perfectly plausible number about a policy nobody asked about.
+                log.error("there are no parameters at %s to measure", path)
+                return 1
+            net = TacticalNet(**_given(width=arguments.width)).to(device)
+            _load(net, path, device)
+            batcher = tactical_batcher(net, device=device, greedy=arguments.greedy)
+            batchers.append(batcher)
 
-        def learnt(session, catalogue):
-            # No rollout: this layer is being read from and not learnt from, and with nowhere to record a decision it records none.
-            return LearntTactics(session, catalogue,
-                                 NetworkTactics(net, device, batcher, arguments.greedy),
-                                 None, session.instance, status_terminals=False)
+            def learnt(session, catalogue, net=net, batcher=batcher):
+                # No rollout: this layer is being read from and not learnt from, and with nowhere to record a decision it records none.
+                return LearntTactics(session, catalogue,
+                                     NetworkTactics(net, device, batcher, arguments.greedy),
+                                     None, session.instance, status_terminals=False)
 
-    def arm(session):
-        # The opponent is left unnamed, which is what puts the handwritten layer on the other side of every fight. That is the thing being measured against, so it is not something this run offers a choice about.
-        return Arena(session, tactics=learnt, seed=arguments.seed + session.instance,
-                     **_given(stall_ms=arguments.stall_seconds * 1000 if arguments.stall_seconds else None))
+            # Named after the file when there are several to tell apart, and simply the duel when there is one, which is the name the journal has always carried.
+            policies.append(("duel" if len(paths) == 1 else
+                             "duel-" + os.path.splitext(os.path.basename(path))[0], learnt))
 
-    # The baseline is written down as the baseline. It is a different quantity from a policy's score rather than a run of it that happens to have scored nought, and the likeliest way to confuse the two is to have journalled them under one name.
-    name = "duel" if arguments.load else "duel-baseline"
-    journal = Journal(arguments.record or default_path(name))
+    for pinned in _pinned(arguments):
+        def fixed(session, catalogue, pinned=pinned):
+            return LearntTactics(session, catalogue, PinnedDeparture(pinned.value), None,
+                                 session.instance, status_terminals=False)
+
+        policies.append((f"duel-always-{pinned.name.lower()}", fixed))
+
+    def build(policy, order: str, floor: Optional[float], stall: Optional[int]):
+        def arm(session):
+            # The opponent is left unnamed, which is what puts the handwritten layer on the other side of every fight. That is the thing being measured against, so it is not something this run offers a choice about.
+            return Arena(session, tactics=policy, seed=_arena_seed(arguments, session),
+                         **_arena_options(arguments, order, floor, stall))
+
+        return arm
+
+    orders, floors, stalls = _orders(arguments), _floors(arguments), _stalls(arguments)
+
+    def named(side: str, order: str, floor: Optional[float], stall: Optional[int]) -> str:
+        # Named after whatever is actually varying across the arms, so that a plain measurement keeps the two names the journal has always used and a comparison of arena settings says which setting each arm was.
+        return (side + (f"-{order}" if len(orders) > 1 else "")
+                + (f"-floor{floor:g}" if len(floors) > 1 and floor is not None else "")
+                + (f"-stall{stall:d}" if len(stalls) > 1 and stall is not None else ""))
+
+    # The policies' sides and the baseline's side of the comparison. A run with nothing loaded is the baseline alone, which is how the arena itself is measured; a run with a policy takes both unless the baseline was explicitly declined.
+    sides = list(policies) + ([("duel-baseline", None)] if not policies or arguments.baseline else [])
+    arms = [(named(side, order, floor, stall), build(policy, order, floor, stall))
+            for order in orders for floor in floors for stall in stalls for side, policy in sides]
+    # The baseline is written down as the baseline. It is a different quantity from a policy's score rather than a run of it that happens to have scored nought, and the likeliest way to confuse the two is to have journalled them under one name. Under one journal that is the arm each episode carries; the file is named for what the run was for.
+    baselines = {name for name, _ in arms if name.startswith("duel-baseline")}
+    journal = Journal(arguments.record or default_path("duel" if arguments.load else "duel-baseline"))
+    log.info("measuring %s over %d episode(s) each on %d instance(s)",
+             ", ".join(name for name, _ in arms), arguments.episodes, arguments.instances)
     try:
-        sessions = _serve(arguments, [(name, arm)], _episode(arguments, arena=True), journal)
+        sessions = _serve(arguments, arms, _episode(arguments, arena=True), journal)
     finally:
         journal.close()
-    if batcher is not None:
+    for batcher in batchers:
         batcher.stop()
 
-    _report_arena(sessions, batcher)
-    _report_duel(sessions, loaded=bool(arguments.load))
+    # The batching is reported off the first policy's server, which is the one whose window and queue the run was configured with; a second policy's is the same arrangement over a share of the same calls.
+    _report_arena(sessions, batchers[0] if batchers else None)
+    _report_duel(sessions, baselines)
     return 0
 
 
-def _report_duel(sessions, loaded: bool) -> None:
-    """The score of a measurement run: how the fights went on average, how widely that scattered, and how many fights an assertion of that average would take.
+def _summarise(records) -> Summary:
+    """The fights of a set of episodes as one count, one mean and one spread.
 
-    Recombined from the episode records rather than kept as one long list of fights. A record carries its episode's mean, its spread and how many fights it was taken over, and those three are enough to reconstitute both figures over the whole run exactly, however many episodes and instances it ran across.
+    Recombined from the episode records rather than kept as one long list of fights. A record carries its episode's mean, its spread and how many fights it was taken over, and those three are enough to reconstitute both figures over the whole set exactly, however many episodes and instances it ran across.
     """
-    records = [record for session in sessions for record in session.records]
     counted = [(int(record.statistics.get("fought", 0)),
                 float(record.statistics.get("outcome_mean", 0.0)),
                 float(record.statistics.get("outcome_sd", 0.0)))
@@ -268,34 +408,151 @@ def _report_duel(sessions, loaded: bool) -> None:
     counted = [entry for entry in counted if entry[0] > 0]
     total = sum(count for count, _, _ in counted)
     if not total:
-        log.info("no fight was called, so there is nothing to score")
-        return
-
+        return Summary(0, 0.0, 0.0)
     mean = sum(count * value for count, value, _ in counted) / total
-    # The spread each record carries is over its own fights and around its own mean, so the two are put back together by pooling the second moments and taking this run's mean off afterwards.
+    # The spread each record carries is over its own fights and around its own mean, so the two are put back together by pooling the second moments and taking the whole set's mean off afterwards.
     spread = sum(count * (deviation ** 2 + value ** 2) for count, value, deviation in counted) / total - mean ** 2
     # Quoted on the sample rather than on the population, matching how every other scatter in this project is reported and how the sample sizes were computed.
-    deviation = math.sqrt(max(0.0, spread) * total / (total - 1)) if total > 1 else 0.0
+    return Summary(total, mean, math.sqrt(max(0.0, spread) * total / (total - 1)) if total > 1 else 0.0)
 
-    log.info("%d fight(s) over %d episode(s): outcome %+.4f, spread %.4f",
-             total, len(counted), mean, deviation)
-    needed = episodes_for(deviation, abs(mean))
+
+def _report_score(summary: Summary, name: str, episodes: int) -> bool:
+    """One set of fights: how they went on average, how widely that scattered, and how many fights an assertion of that average would take. True when the run has already fought as many as its own average would need."""
+    log.info("%s: %d fight(s) over %d episode(s), outcome %+.4f, spread %.4f",
+             name, summary.n, episodes, summary.mean, summary.sd)
+    needed = episodes_for(summary.sd, abs(summary.mean))
     # A spread of nought is one that was never measured rather than one measured to be small, and it is what a single fight or a run of identical fights produces. The sizing arithmetic answers nought fights for it, quite correctly given a scatter of nought, so the claim has to be gated on there having been a scatter at all: without that a run of one engagement sizes its own claim at no engagements and declares itself sufficient.
-    enough = total > 1 and deviation > 0.0 and needed <= total
+    enough = summary.n > 1 and summary.sd > 0.0 and needed <= summary.n
     if needed >= UNBOUNDED_EPISODES:
         log.info("the average result is exactly nought, which is not a difference and which no number of fights would establish")
-    elif deviation <= 0.0:
+    elif summary.sd <= 0.0:
         log.info("all %d fight(s) came out at %+.4f, so this run measured no spread at all and there is nothing to size a claim against",
-                 total, mean)
+                 summary.n, summary.mean)
     else:
         log.info("claiming an average of %+.4f at that spread takes %d fight(s), and %d were fought: %s",
-                 mean, needed, total, "enough" if enough else "not enough yet")
+                 summary.mean, needed, summary.n, "enough" if enough else "not enough yet")
+    return enough
 
-    if not loaded:
-        if enough:
-            log.warning("both sides were the handwritten layer, so this average has to be nought and it is %+.4f over enough fights to say so: the arena favours one side of the board, and until that is found and fixed a comparison of two policies run on it does not mean anything", mean)
-        else:
-            log.info("both sides were the handwritten layer and %d fight(s) have not separated their average of %+.4f from nought, which is as much as this run says about whether the arena is even", total, mean)
+
+def _interval(first: Summary, second: Summary) -> float:
+    """Two standard errors on the difference of two means, which is the width the difference has to clear before the interval around it stops holding nought."""
+    if first.n < 2 or second.n < 2:
+        return 0.0
+    return 2.0 * math.sqrt(first.sd ** 2 / first.n + second.sd ** 2 / second.n)
+
+
+def _report_difference(first_name: str, first: Summary, second_name: str, second: Summary) -> None:
+    """What one arm was worth over another, which for a policy against its own seed's baseline is the whole of what a measurement run is for.
+
+    Reported as the difference and the interval around it rather than as two numbers to be read against each other, because the two numbers have been read wrongly twice: a policy that scored above nought was taken for a policy that had beaten the handwritten layer, when the arena it was measured on was itself scoring above nought under that seed.
+    """
+    if not first.n or not second.n:
+        return
+    difference = first.mean - second.mean
+    interval = _interval(first, second)
+    log.info("%s less %s: %+.4f, 2 standard errors %.4f, so the interval is %+.4f to %+.4f and %s nought",
+             first_name, second_name, difference, interval,
+             difference - interval, difference + interval,
+             "excludes" if interval > 0.0 and abs(difference) > interval else "holds")
+
+
+def _fights_by_draw(sessions) -> dict:
+    """Every fight of every arm, keyed by the draw it was fought on: which instance, which round of the arms, and which fight of the episode.
+
+    The arms of a run are handed the same arena seed in the same round, so the fight under one key is the same fight in every arm — the same site, the same two budgets, the same imbalance, the same two forces. Keyed that way the arms can be differenced fight by fight, and the difference is then free of the only thing that makes the score scatter, which is how the fight was drawn rather than how it was fought.
+
+    The round is counted per arm rather than read off the episode number, because the arms alternate within an instance and the episode number counts both.
+    """
+    fights: dict = {}
+    for session in sessions:
+        rounds: dict = {}
+        for record in session.records:
+            index = rounds.get(record.arm, 0)
+            rounds[record.arm] = index + 1
+            for fight in record.statistics.get("history", ()):
+                if "outcome" in fight and "index" in fight:
+                    key = (record.instance, index, int(fight["index"]))
+                    fights.setdefault(record.arm, {})[key] = float(fight["outcome"])
+    return fights
+
+
+def _report_paired(first_name: str, second_name: str, fights: dict) -> None:
+    """What one arm was worth over another on the fights both of them fought.
+
+    This is the measurement the baseline is taken alongside the policy for. Unpaired, the difference of two arms carries the whole scatter of how fights are drawn — a two-to-one draw scores half a point whoever is playing — and that scatter is several times anything a policy has ever moved. Paired on the draw it cancels, and what is left is the play.
+    """
+    ours, theirs = fights.get(first_name, {}), fights.get(second_name, {})
+    shared = sorted(set(ours) & set(theirs))
+    if len(shared) < 2:
+        return
+    differences = Summary.of([ours[key] - theirs[key] for key in shared])
+    interval = 2.0 * differences.sd / math.sqrt(differences.n)
+    log.info("%s less %s on the %d fight(s) both drew: %+.4f, 2 standard errors %.4f, interval %+.4f to %+.4f, %s nought",
+             first_name, second_name, differences.n, differences.mean, interval,
+             differences.mean - interval, differences.mean + interval,
+             "excludes" if interval > 0.0 and abs(differences.mean) > interval else "holds")
+    needed = episodes_for(differences.sd, abs(differences.mean))
+    if needed < UNBOUNDED_EPISODES:
+        log.info("claiming that difference at that spread takes %d paired fight(s), and %d were fought: %s",
+                 needed, differences.n, "enough" if needed <= differences.n else "not enough yet")
+
+
+def _report_duel(sessions, baselines) -> None:
+    """The score of a measurement run, arm by arm, and then arm against arm.
+
+    Every pair is compared rather than only the pair a run was built to compare, because the arms of a run are few and which pair carries the question differs by run: a policy against its seed's baseline for a measurement, one arena setting against another for a question about the arena.
+    """
+    records = [record for session in sessions for record in session.records]
+    if not records:
+        return
+    drawn = _fights_by_draw(sessions)
+    # In the order the arms were run rather than sorted, so that a policy's arm is reported before the baseline it is read against.
+    names = list(dict.fromkeys(record.arm for record in records))
+    summaries = {}
+    for name in names:
+        theirs = [record for record in records if record.arm == name]
+        summary = _summarise(theirs)
+        summaries[name] = summary
+        if not summary.n:
+            log.info("%s: no fight was called, so there is nothing to score", name)
+            continue
+        enough = _report_score(summary, name, len(theirs))
+        if name in baselines:
+            if enough:
+                log.warning("%s had the handwritten layer on both sides, so this average has to be nought and it is %+.4f over enough fights to say so: the arena favours one side of the board under this seed, and a policy measured on it is only readable as the difference from this figure",
+                            name, summary.mean)
+            else:
+                log.info("%s had the handwritten layer on both sides and %d fight(s) have not separated its average of %+.4f from nought, which is as much as this run says about whether the arena is even",
+                         name, summary.n, summary.mean)
+    for index, first in enumerate(names):
+        for second in names[index + 1:]:
+            _report_difference(first, summaries[first], second, summaries[second])
+            _report_paired(first, second, drawn)
+
+
+def _report_training(sessions, opponent: str) -> None:
+    """What the fights of a training run scored, which is a measurement the run has already paid for and used to throw away.
+
+    A training run scores every fight it builds, exactly as a measurement run does and in the same quantity - the run that produced the policy measured last was three times the size of the duel that measured it. What it is not is a measurement of the parameters that were saved: they moved throughout, so the figure is an average over every policy the run passed through rather than over the one it ended at. The later half is reported beside the whole for that reason; on a run that improved, the whole is a lower bound on the end of it.
+
+    It is also only a score at all when the opponent was fixed. With the run's own policy on both sides the score is antisymmetric by construction and its average is a self-check on the arena rather than anything about the policy, so it is reported as that instead.
+    """
+    records = [record for session in sessions for record in session.records]
+    if not records:
+        return
+    whole = _summarise(records)
+    if not whole.n:
+        return
+    log.info("the fights this run scored while training, which are a measurement it has already paid for:")
+    _report_score(whole, "training, whole run", len(records))
+    # Halved within each instance rather than across the run, because the instances run concurrently and finish different numbers of episodes; the second half of every instance is the second half of the run, and the episode numbers an instance reports are its own and need not start at one.
+    later = [record for session in sessions for record in session.records[len(session.records) // 2:]]
+    if later and len(later) < len(records):
+        _report_score(_summarise(later), "training, later half", len(later))
+    if opponent == "script":
+        log.info("the opposing side was the handwritten layer throughout, so this is the same quantity a duel reports, taken over a moving policy: read it against a baseline run under this same seed, since how far the arena leans is a property of the seed")
+    else:
+        log.info("the opposing side was this run's own policy, so the score is antisymmetric by construction and its average says nothing about the policy: it is a self-check on the arena, which has to be nought")
 
 
 # ---- the operational run ------------------------------------------------------------------
@@ -352,7 +609,9 @@ def collect(arguments) -> int:
             return Arena(session,
                          tactics=lambda s, catalogue: LearntTactics(s, catalogue, None, rollout, s.instance,
                                                                     status_terminals=False),
-                         seed=arguments.seed + session.instance)
+                         seed=_arena_seed(arguments, session),
+                         **_arena_options(arguments, _orders(arguments)[0], _floors(arguments)[0],
+                                          _stalls(arguments)[0]))
 
         episode = _episode(arguments, arena=True)
     else:
@@ -451,13 +710,28 @@ def main(argv=None) -> int:
     parser.add_argument("--device", default=None,
                         help="torch device. The default is the processor, which at these network sizes "
                              "measures three to seven times faster than the card")
-    parser.add_argument("--load", default=None, help="parameters to start from")
+    parser.add_argument("--load", default=None,
+                        help="parameters to start from. A duel takes several, comma separated, and measures "
+                             "each as an arm against the one baseline")
+    parser.add_argument("--pin", default=None,
+                        help="departures to measure a layer pinned to, comma separated, as arms of a duel. "
+                             "This is the ablation the band a policy plays inside is read from")
     parser.add_argument("--save", default=None, help="where to write the parameters afterwards")
     parser.add_argument("--batch", type=int, default=None,
                         help="rows in one gradient step: the steps that make a reinforcement update when "
                              "training, the teacher's decisions in one minibatch when cloning")
-    parser.add_argument("--stall-seconds", type=int, default=None,
-                        help="game seconds a fight may go without a casualty before the arena calls it, which is how decisive its fights are")
+    parser.add_argument("--stall-seconds", default=None,
+                        help="game seconds a fight may go without a casualty before the arena calls it, "
+                             "which is how decisive its fights are. Comma separated, they run as arms")
+    parser.add_argument("--imbalance-floor", default=None,
+                        help="the weaker side's smallest share of the stronger when a fight is drawn. Lower "
+                             "draws more lopsided fights, which are more decisive. Comma separated, they run "
+                             "as arms")
+    parser.add_argument("--decision-order", default=DECISION_ORDERS[0],
+                        help="which side's departure is decided first in a period: " +
+                             ", ".join(DECISION_ORDERS) + ". Naming more than one, comma separated, runs "
+                             "them as arms of one comparison, which is how the question of whether the order "
+                             "is what a left-right lean is made of gets answered")
     parser.add_argument("--width", type=int, default=None,
                         help="hidden units per layer in the tactical network, which the measured cost of inference leaves room to raise")
     parser.add_argument("--entropy", type=float, default=None,
@@ -492,6 +766,11 @@ def main(argv=None) -> int:
                         help="run the handwritten layer on both sides, which is the baseline and the way to measure the arena itself")
     parser.add_argument("--script-opponent", action="store_true",
                         help="fight the script tactical layer rather than the policy being trained")
+    parser.add_argument("--no-baseline", dest="baseline", action="store_false",
+                        help="duel without taking the handwritten layer against itself alongside. The "
+                             "baseline is taken by default because how far the arena leans is a property of "
+                             "the seed, so a policy's score is only readable beside the lean of the very "
+                             "seed it was measured under")
     parser.add_argument("--record", default=None, help="where decisions or episodes are written")
     parser.add_argument("--record-episodes", default=None)
     parser.add_argument("--verbose", action="store_true")

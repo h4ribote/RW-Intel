@@ -44,6 +44,20 @@ class NetworkTactics:
         return evaluate_tactical(self.net, [(list(state), list(mask))], self.device, self.greedy)[0]
 
 
+class PinnedDeparture:
+    """Answers with one departure, whatever it is shown.
+
+    An ablation rather than a policy, and the reason it exists as a decider rather than as a file of parameters is that it is a measurement the arena is read against. What the score of a fight can be moved by at all is bounded below by what the departures are worth, and the way to find that bound is to take them away one at a time: a layer that never departs from its contract leaves the engine's own attack-move to fight the whole fight, and a layer that always breaks off gives up every fight it could have won. Both were once kept as hand-made parameter files, and both stopped loading the day the action space went from five departures to seven — a measurement the document quotes should not be able to rot like that. Written here it is a line of code that cannot go stale, and it needs no tensor library at all.
+    """
+
+    def __init__(self, action: int) -> None:
+        self.action = int(action)
+
+    def choose(self, state: Sequence[float], mask: Sequence[float]) -> Choice:
+        # No log probability and no value: this is not a distribution, and nothing is ever learnt from what it chose.
+        return Choice(action=self.action)
+
+
 class NetworkOperations:
     def __init__(self, net, device=None, batcher: Optional[Batcher] = None, greedy: bool = False) -> None:
         self.net = net

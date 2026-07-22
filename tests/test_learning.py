@@ -59,13 +59,16 @@ from rwintel.learn.reward import (
 from rwintel.learn.rollout import Rollout, Step
 from rwintel.learn.train import Optimiser
 from rwintel.control.policy.tactics import Tactics, _Track
+from rwintel.eval.sampling import Summary
 from rwintel.wire import (
     BLOCK_REGIONS,
     BLOCK_SQUADS,
     BLOCK_UNITS,
+    Action,
     Deviation,
     Observation,
     RegionState,
+    SquadDeviation,
     Stance,
     Status,
     Task,
@@ -608,6 +611,164 @@ def test_the_handwritten_layer_reaches_the_two_added_departures():
                        [_region(1, 400.0, 100.0, ours=200.0, theirs=300.0)])
     assert departure(artillery, _squad(status=Status.ACTIVE, losses=0.0)) == Deviation.FOCUS_THREAT
     assert departure(tanks_only, _squad(status=Status.ACTIVE, losses=0.0)) == Deviation.FOCUS
+
+
+# ---- which side of a fight is decided first --------------------------------------------------
+
+class _Recorder:
+    """A tactical layer that answers the same way whatever it is shown and writes down that it was asked, so that what is under test is the order the two sides of a fight are decided and submitted in."""
+
+    def __init__(self, name: str, calls: list) -> None:
+        self.name, self.calls = name, calls
+
+    def decide(self, view, squads, game_time_ms):
+        self.calls.append(self.name)
+        return [SquadDeviation(squad=squad.id, deviation=Deviation.HOLD) for squad in squads], []
+
+
+def _arena_at(order: str, calls: list):
+    """An arena far enough built to fight one period of one engagement, without a session, a map or a game.
+
+    Assembled field by field rather than constructed, because everything the constructor does — the type catalogue, the two layers, the sandbox — needs a live session, and none of it bears on which of two already-built layers is asked first.
+    """
+    from rwintel.learn.arena import Arena, OURS, THEIRS, Statistics
+
+    arena = Arena.__new__(Arena)
+    arena.catalogue, arena.statistics = _CATALOGUE, Statistics()
+    arena.decision_order, arena.stall_ms, arena.outcome_weight = order, 12000, 1.0
+    arena.tactics, arena.opponent = _Recorder("ours", calls), _Recorder("theirs", calls)
+    arena.squads = {OURS: _squad(members=(1, 2, 3)), THEIRS: _squad(members=(9,))}
+    arena.squads[THEIRS].id = THEIRS
+    arena.engagement, arena.last_regions = None, []
+    arena.until_ms, arena._alive, arena._changed_ms = 10 ** 9, 4, 0
+    return arena
+
+
+def test_the_two_sides_of_a_fight_are_decided_in_the_order_the_arena_was_asked_for():
+    """Both sides read the same frame and neither can see what the other chose, so the order they are decided in ought not to matter. A left-right lean the score cannot absorb has been measured in the fighting all the same, and the order is the one thing about a period that is not symmetric between the sides, so it has to be something a run can set: fixed either way to measure whether the lean follows it, and alternating to answer a lean that does.
+
+    Alternating is per period rather than per fight. A fight is a few hundred periods, so the side that leads has to change inside a fight for the advantage of leading to be dealt evenly within the fight that is being scored.
+    """
+    from rwintel.learn.arena import ALTERNATING, OURS_FIRST, THEIRS_FIRST
+
+    observation = _observation(units=[_unit(1, 100.0, 100.0), _unit(2, 120.0, 100.0),
+                                      _unit(3, 140.0, 100.0), _unit(9, 300.0, 120.0, hostile=1)],
+                               regions=[_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)])
+    view = build_view(observation, _CATALOGUE, None)
+
+    for order, expected in ((OURS_FIRST, ["ours", "theirs"]), (THEIRS_FIRST, ["theirs", "ours"])):
+        calls: list = []
+        arena = _arena_at(order, calls)
+        action = Action()
+        arena._fight(observation, view, action, 21000)
+        assert calls == expected
+        # The departures reach the action in the order they were decided, which is the order the game side applies them in.
+        assert [deviation.squad for deviation in action.deviations] == ([0, 1] if order == OURS_FIRST else [1, 0])
+
+    calls = []
+    arena = _arena_at(ALTERNATING, calls)
+    for period in range(6):
+        arena._fight(observation, view, Action(), 21000 + period * 200)
+    assert calls == ["ours", "theirs", "theirs", "ours"] * 3
+    # Only this side's decisions are the run's own output; the opposing layer's are the environment.
+    assert arena.statistics.tactical == 6 and arena.statistics.decisions == 6
+
+
+def test_a_layer_pinned_to_one_departure_answers_with_it_and_writes_nothing_down():
+    """The ablation the band a policy plays inside is measured with: give up the choice, keep everything else, and see what the score loses. It was kept as hand-made parameter files until the action space went from five departures to seven and they stopped loading, so it lives here now, where it cannot go stale and where naming a departure that does not exist is refused rather than measured."""
+    from rwintel.learn.__main__ import _pinned
+    from rwintel.learn.deciders import PinnedDeparture
+
+    rollout = Rollout()
+    layer = LearntTactics(None, _CATALOGUE, PinnedDeparture(Deviation.WITHDRAW_FAR.value),
+                          rollout=None, instance=0)
+    view, squad = _skirmish(), _squad()
+    deviations, _ = layer.decide(view, [squad], 21000)
+    assert [deviation.deviation for deviation in deviations] == [Deviation.WITHDRAW_FAR]
+    # Nothing to learn from and nowhere to put it: an ablation is read, not trained.
+    assert not rollout.live and not rollout.done
+
+    class _Asked:
+        pin = "hold, withdraw_far"
+
+    assert _pinned(_Asked()) == [Deviation.HOLD, Deviation.WITHDRAW_FAR]
+    _Asked.pin = "sidestep"
+    assert "sidestep" in _refusal(SystemExit, _pinned, _Asked())
+
+
+def test_every_episode_draws_a_different_fight_and_the_arms_of_a_run_draw_the_same_ones():
+    """An arena is built afresh for every episode and draws its sites, budgets, imbalances and forces from the seed it is built with. Built from the instance alone, every episode of an instance drew the identical sequence: a run of fifty episodes on seven instances was about fifty distinct fights fought forty times over, and its two thousand fight rows were reported as two thousand samples. That is a sample size overstated by a factor of thirty to fifty, and it is what every left-right lean the arena was charged with turned out to be made of.
+
+    The arms of a comparison are the exception, and deliberately: they are given the same draw as each other in the same round, so that a policy and its baseline meet the same sites, the same budgets and the same forces and what is left between them is the play.
+    """
+    from rwintel.learn.__main__ import _arena_seed
+
+    arguments = _Arguments(seed=4242)
+    for instances in (1, 7):
+        for arms in (1, 2):
+            seeds = [[_arena_seed(arguments, _Session(instance, arms, record))
+                      for record in range(arms * 6)] for instance in range(instances)]
+            for stream in seeds:
+                rounds = [stream[index * arms:(index + 1) * arms] for index in range(6)]
+                # Every arm of one round draws the same fights, and every round draws different ones.
+                assert all(len(set(round_)) == 1 for round_ in rounds)
+                assert len({round_[0] for round_ in rounds}) == 6
+            # No two instances share a draw, whatever episode either of them is on.
+            assert len({seed for stream in seeds for seed in stream}) == instances * 6
+
+
+class _Arguments:
+    def __init__(self, seed: int) -> None:
+        self.seed = seed
+
+
+class _Session:
+    """A session as far as the arena's seed reads one: which instance it is, how many arms the run has, and how many episodes have finished."""
+
+    def __init__(self, instance: int, arms: int, records: int) -> None:
+        self.instance, self.arms, self.records = instance, [("arm", None)] * arms, [None] * records
+
+
+# ---- reading the fights a run has already scored ----------------------------------------------
+
+def test_a_runs_fights_are_summarised_from_its_episodes_without_keeping_every_fight():
+    """A run reports the mean and the spread of its fights, and it holds neither: an episode record carries its own count, mean and spread, and the run is put back together from those. That is what lets a training run be read for the fights it has already scored — three times as many as the duel that measured the same policy — and it has to give exactly what the flat list of fights would.
+
+    The spread is on the sample, matching every other scatter quoted in this project and the sample sizes computed from them.
+    """
+    from rwintel.learn.__main__ import _summarise
+
+    draw = random.Random(11)
+    episodes = [[draw.uniform(-1.0, 1.0) for _ in range(draw.randint(1, 9))] for _ in range(20)]
+    records = []
+    for index, fights in enumerate(episodes):
+        summary = Summary.of(fights)
+        # Written the way an arena episode writes itself, spread included, and rounded the way the journal rounds it.
+        records.append(_Record(index + 1, {"fought": summary.n, "outcome_mean": round(summary.mean, 4),
+                                           "outcome_sd": round(_population_sd(fights), 4)}))
+
+    flat = [outcome for fights in episodes for outcome in fights]
+    whole = _summarise(records)
+    assert whole.n == len(flat)
+    assert abs(whole.mean - Summary.of(flat).mean) < 1e-4
+    assert abs(whole.sd - Summary.of(flat).sd) < 1e-4
+    # The later half is the run's own second half by episode, which is what a training run reports beside the whole because its policy moved while it was scoring.
+    later = _summarise([record for record in records if record.episode * 2 > len(episodes)])
+    assert later.n == sum(len(fights) for fights in episodes[len(episodes) // 2:])
+
+
+def _population_sd(values):
+    """The spread an arena episode reports, which divides by n rather than by n-1: it is the spread of the fights that episode had, not an estimate drawn from them."""
+    mean = sum(values) / len(values)
+    return (sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5
+
+
+class _Record:
+    """An episode record as far as a summary reads one."""
+
+    def __init__(self, episode: int, statistics: dict) -> None:
+        self.episode, self.statistics = episode, statistics
+        self.arm, self.instance = "duel", 0
 
 
 if __name__ == "__main__":
