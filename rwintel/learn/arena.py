@@ -59,6 +59,8 @@ SEPARATION = 250.0
 FORCE_VALUE = (1200.0, 5000.0)
 
 #: How lopsided a fight may be, as the weaker side's share of the stronger. A layer that only ever saw even fights would never learn that some fights are to be broken off, which is one of the five departures.
+#:
+#: Half rather than lower, and the reason is measured. Lowering the floor to three tenths does make the fights more decisive - a run of the handwritten layer against itself went from a third of its fights ending with a side destroyed to two fifths, and the spread of the score widened - which is what the arena wants, because the departure that matters on a lopsided board is breaking off and an even board never asks for it. But the same run's self-play average, which has to be nought, went from -0.017 to -0.073 and out of the noise: a lopsided draw multiplies whatever small left-right asymmetry the fighting still carries, and the score written in shares does not absorb it, because the asymmetry is not in the share the two sides are dealt - that stays even - but in how the fight goes at a given share. Widening the draw is worth having once that asymmetry is found and closed; until then it trades a fair board for a decisive one.
 IMBALANCE = (0.5, 1.0)
 
 #: The most units either side is built from, so that one engagement cannot fill the board.
