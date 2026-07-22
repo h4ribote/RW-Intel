@@ -58,10 +58,12 @@ from rwintel.learn.reward import (
 )
 from rwintel.learn.rollout import Rollout, Step
 from rwintel.learn.train import Optimiser
+from rwintel.control.policy.tactics import Tactics, _Track
 from rwintel.wire import (
     BLOCK_REGIONS,
     BLOCK_SQUADS,
     BLOCK_UNITS,
+    Deviation,
     Observation,
     RegionState,
     Stance,
@@ -578,6 +580,34 @@ def test_a_warming_update_moves_the_critic_and_leaves_the_policy_exactly_where_i
     moved = {name for name, parameter in net.named_parameters()
              if not torch.equal(parameter, before[name])}
     assert moved == {name for name, _ in net.named_parameters()}, sorted(moved)
+
+
+# ---- the widened tactical action space ------------------------------------------------------
+
+def test_the_handwritten_layer_reaches_the_two_added_departures():
+    """The action space grew from five departures to seven, and the two added ones carry a choice a rule on the game side used to make: how far a withdrawal commits and which enemy a concentration goes onto. The imitation clones the handwritten layer and the reinforcement is measured against it, so the wider space is only worth training on if the handwritten layer actually reaches the two: a withdrawal is the whole way out when the squad is reported losing and a short step otherwise, and a concentration goes onto a longer-ranged enemy in reach and onto the weakest when none is."""
+    tactics = Tactics(None, _CATALOGUE)
+
+    def departure(view, squad):
+        return tactics._departure(squad, [s for s in view.ours], [s for s in view.enemies],
+                                  squad.losses, _Track())
+
+    # Freshly hit members, so the squad reads as under fire and the choice is a withdrawal.
+    beaten = [_unit(1, 100, 100, hit=100), _unit(2, 120, 100, hit=100), _unit(3, 140, 100, hit=100)]
+    enemy = _unit(9, 210, 110, type_index=0, hostile=1)
+    fight = _view(beaten + [enemy], [_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)])
+    assert departure(fight, _squad(status=Status.LOSING, losses=900.0)) == Deviation.WITHDRAW_FAR
+    assert departure(fight, _squad(status=Status.ACTIVE, losses=900.0)) == Deviation.WITHDRAW
+
+    # Members not freshly hit, so a bunched squad is not read as covered by area fire and the choice reaches a concentration. Two enemies so that concentrating has a target to choose.
+    ours = [_unit(1, 100, 100), _unit(2, 120, 100), _unit(3, 140, 100)]
+    second = _unit(10, 180, 120, type_index=0, hostile=1)
+    artillery = _view(ours + [_unit(9, 200, 100, type_index=1, hostile=1), second],
+                      [_region(1, 400.0, 100.0, ours=200.0, theirs=300.0)])
+    tanks_only = _view(ours + [_unit(9, 210, 110, type_index=0, hostile=1), second],
+                       [_region(1, 400.0, 100.0, ours=200.0, theirs=300.0)])
+    assert departure(artillery, _squad(status=Status.ACTIVE, losses=0.0)) == Deviation.FOCUS_THREAT
+    assert departure(tanks_only, _squad(status=Status.ACTIVE, losses=0.0)) == Deviation.FOCUS
 
 
 if __name__ == "__main__":

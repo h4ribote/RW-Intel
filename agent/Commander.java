@@ -26,6 +26,8 @@ final class Commander {
     private static final int FOCUS = 2;
     private static final int SPREAD_OUT = 3;
     private static final int KITE = 4;
+    private static final int WITHDRAW_FAR = 5;
+    private static final int FOCUS_THREAT = 6;
 
     /** The stance a squad breaking off contact is put into, so that nothing turns around to fight on the way out. */
     private static final int HOLD_FIRE = 3;
@@ -155,8 +157,11 @@ final class Commander {
         if (target == null) return;
 
         if (deviation == FOCUS) focus(game, self, squad);
+        else if (deviation == FOCUS_THREAT) focusThreat(game, self, squad);
         else if (deviation == SPREAD_OUT) spread(game, self, squad);
         else if (deviation == WITHDRAW) fallBack(game, self, squad, target, HOLD_FIRE, FALL_BACK);
+        // The whole way out rather than the short step WITHDRAW takes: the distance is bounded to the same limit fallBack backs any withdrawal off to, so this asks for that limit and gets as much of it as the squad has not already used.
+        else if (deviation == WITHDRAW_FAR) fallBack(game, self, squad, target, HOLD_FIRE, MAX_WITHDRAWAL);
         else if (deviation == KITE) kite(game, self, squad, target);
         else if (deviation == HOLD && squad.lastDeviation != HOLD) advance(game, self, squad, target, squad.stance);
         // Holding is the one departure that is issued once and then left to the engine, so it is only recorded when the order actually went out. Recording it after an order that could not be issued would leave the squad believing it was advancing with nothing to advance it.
@@ -210,6 +215,29 @@ final class Commander {
             }
         }
         if (best == null || best.handle == null) return;
+        Object command = engine.command(game, issuer(game, self, squad));
+        if (!addAll(command, squad)) return;
+        engine.setStance(command, squad.stance);
+        engine.attack(command, best.handle);
+    }
+
+    /** Every unit onto the longest-ranged enemy within reach, rather than the weakest focus picks. The gun that out-reaches the squad does the most damage while it lives and dies to a focused volley like anything else once the squad is close enough to it, so taking it out first buys more than shortening the count by one. Reach is the squad's own weapon range, as in focus, because an order to attack something the squad has to walk to is an order to break formation. */
+    private void focusThreat(Object game, Object self, World.Squad squad) throws Exception {
+        float reach = reachOf(squad);
+        World.Seen best = null;
+        float bestRange = -1f;
+        for (World.Seen seen : world.visible) {
+            if (!opposes(squad, seen) || seen.handle == null) continue;
+            float dx = seen.x - squad.x;
+            float dy = seen.y - squad.y;
+            if (dx * dx + dy * dy > reach * reach) continue;
+            float range = world.rangeOf(seen.handle);
+            if (range > bestRange) {
+                bestRange = range;
+                best = seen;
+            }
+        }
+        if (best == null) return;
         Object command = engine.command(game, issuer(game, self, squad));
         if (!addAll(command, squad)) return;
         engine.setStance(command, squad.stance);

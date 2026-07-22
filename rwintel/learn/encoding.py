@@ -2,7 +2,7 @@
 
 Each layer gets its own cut, at its own abstraction, because that is how the design divides them: the tactical layer sees around one squad, the operational layer sees the regions and the squads and nothing below them. Two rules govern everything here. Every feature is a ratio or a length divided by a stated scale, so that nothing depends on how rich the match has become or how large the map is — a policy trained on one map has to be readable on another, and a raw credit total or a raw world coordinate would make that false. And every block is a fixed width with a validity flag, never a packed list, so that a slot means the same thing from one decision to the next; a packed list renumbers everything the moment a squad dies.
 
-The action spaces are exactly the ones the script layers already emit, which is what makes a learnt layer a replacement rather than a parallel system: five departures for the tactical layer, and one region and one task for the operational layer. Neither is a free choice — a squad may only be sent where a region exists and only given a task its doctrine allows — so both come with a mask, and the mask is computed here from the same tables the script reads rather than being learnt as a soft preference.
+The action spaces are exactly the ones the script layers already emit, which is what makes a learnt layer a replacement rather than a parallel system: the departures for the tactical layer, and one region and one task for the operational layer. The tactical departures were five and are now seven, the two added ones being a withdrawal that commits the whole way out and a concentration that goes onto the longest-ranged enemy rather than the weakest — kinds of move the script already made, with a parameter a rule used to fix handed to the layer. Neither space is a free choice — a squad may only be sent where a region exists and only given a task its doctrine allows — so both come with a mask, and the mask is computed here from the same tables the script reads rather than being learnt as a soft preference. The tactical action count follows the departure enum, so widening the enum widens the head and the mask with it.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ TACTICAL_FEATURES: Tuple[str, ...] = (
 
 TACTICAL_SIZE = len(TACTICAL_FEATURES)
 
-#: The five departures, which is the whole tactical action space whether a script or a network is choosing.
+#: The departures, which are the whole tactical action space whether a script or a network is choosing. Seven since the space was widened from five; the count follows the enum so that the network head and the mask grow with it.
 TACTICAL_ACTIONS = len(DEVIATIONS)
 
 

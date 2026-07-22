@@ -118,20 +118,22 @@ class Tactics:
 
     def _departure(self, squad: SquadRecord, members: List[Sighting], threats: List[Sighting],
                    losses: float, track: _Track) -> Deviation:
-        """Which of the five, tried in the order of what would be worst to get wrong.
+        """Which departure, tried in the order of what would be worst to get wrong.
 
         Breaking off comes first because everything below it is a way of fighting better and none of them helps a fight that should not go on. Scattering comes next because an area weapon on a bunched squad is the fastest way to lose one. Kiting before concentrating because a range advantage is worth more than a focused volley and the two want opposite positions. Concentrating last, as the thing to do when the fight is worth having on the ground it is on.
+
+        Two of the departures also carry the choice a rule on the game side used to make on their behalf. A withdrawal is the short step back that repositions a squad, unless the squad is being destroyed, when it is the whole way out of the fight. A concentration goes onto the weakest enemy, unless a longer-ranged one is close enough to shoot at, when it goes onto that: the gun that out-reaches the squad does the most damage and dies to a focused volley like anything else.
         """
         if not threats and not self._under_fire(members):
             return Deviation.HOLD
         if self._spent(squad, losses) or self._losing_the_exchange(losses, track):
-            return Deviation.WITHDRAW
+            return Deviation.WITHDRAW_FAR if squad.status == Status.LOSING else Deviation.WITHDRAW
         if self._covered_by_area_fire(squad, members, threats):
             return Deviation.SPREAD
         if self._out_ranges(members, threats) >= KITE_RANGE_MARGIN:
             return Deviation.KITE
         if self._worth_concentrating(members, threats):
-            return Deviation.FOCUS
+            return Deviation.FOCUS_THREAT if self._long_range_in_reach(members, threats) else Deviation.FOCUS
         return Deviation.HOLD
 
     def _spent(self, squad: SquadRecord, losses: float) -> bool:
@@ -182,6 +184,22 @@ class Tactics:
         centre_x = sum(m.unit.x for m in shooters) / len(shooters)
         centre_y = sum(m.unit.y for m in shooters) / len(shooters)
         return any(math.hypot(e.unit.x - centre_x, e.unit.y - centre_y) <= reach for e in threats)
+
+    @staticmethod
+    def _long_range_in_reach(members: List[Sighting], threats: List[Sighting]) -> bool:
+        """Whether a longer-ranged enemy is close enough to shoot at, which is the enemy a concentration is better spent on than the weakest one.
+
+        A gun that out-reaches the squad does the most damage while it lives and is no harder to kill than anything else once the squad is in range of it, so taking it out first buys more than shortening the count by one. Judged the same way _worth_concentrating judges reach - the squad's shortest weapon range from the shooters' centre - because a target the squad would have to walk to is not one a focused volley reaches. Artillery is the role the type table gives the long-ranged land types, so it stands in for the reach comparison here.
+        """
+        shooters = [m for m in members if m.kind is not None and m.kind.armed]
+        if not shooters:
+            return False
+        reach = min(m.kind.range for m in shooters)
+        centre_x = sum(m.unit.x for m in shooters) / len(shooters)
+        centre_y = sum(m.unit.y for m in shooters) / len(shooters)
+        return any(e.role == Role.ARTILLERY
+                   and math.hypot(e.unit.x - centre_x, e.unit.y - centre_y) <= reach
+                   for e in threats)
 
     @staticmethod
     def _under_fire(members: List[Sighting]) -> bool:

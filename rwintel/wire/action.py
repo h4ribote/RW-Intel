@@ -48,13 +48,20 @@ class Stance(enum.IntEnum):
 
 
 class Deviation(enum.IntEnum):
-    """What the tactical layer does instead of the contract's default advance."""
+    """What the tactical layer does instead of the contract's default advance.
+
+    The first five are the plain departures; a departure names the kind of move and rules on the game side settle where it points. The two after them are the same kinds with the choice a rule used to make handed to the layer instead: how far a withdrawal commits, and which enemy a concentration goes onto. They are appended rather than inserted so that a network trained on the five keeps the meaning of every value it already learnt, and so that the byte the wire carries needs no wider field.
+    """
 
     HOLD = 0
     WITHDRAW = 1
     FOCUS = 2
     SPREAD = 3
     KITE = 4
+    #: Withdraw the whole way out of the fight rather than the short step back WITHDRAW takes. The choice of how far, which a rule used to fix, is the layer's here: a squad that is merely repositioning wants the short step and one that is beaten wants the ground between it and the enemy.
+    WITHDRAW_FAR = 5
+    #: Concentrate on the longest-ranged enemy in reach rather than the weakest FOCUS picks. Which enemy to take out first, which a rule used to fix as the weakest, is the layer's here: the gun that reaches furthest is often worth more dead than the one nearest to dying.
+    FOCUS_THREAT = 6
 
 
 class Status(enum.IntEnum):
