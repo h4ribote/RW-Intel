@@ -81,7 +81,7 @@ DECISION_ORDERS = (OURS_FIRST, THEIRS_FIRST, ALTERNATING)
 #: The most units either side is built from, so that one engagement cannot fill the board.
 MAX_UNITS = 14
 
-#: The fewest units a side is built from, which is what bounds how expensive a type may be for the budget it is drawn against. A fight is between formations, and one machine against a formation is a different problem from the one the five departures are about.
+#: The fewest units a side is built from, which is what bounds how expensive a type may be for the budget it is drawn against. A fight is between formations, and one machine against a formation is a different problem from the one the departures are about.
 MINIMUM_FORCE = 3
 
 #: How long to let the opening board settle before the first engagement is built, in game milliseconds.

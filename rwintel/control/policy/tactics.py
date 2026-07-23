@@ -1,12 +1,12 @@
 """The tactical layer: whether to depart from the contract, and how.
 
-This layer does not drive units. The engine already advances every squad on its contract with path finding, target acquisition and an engagement stance, and that is a competent baseline obtained for nothing; writing tactics as fresh unit control would throw it away and would put the inference count on the number of units rather than on the number of squads. So the only decision here is a departure, one of five, one per squad, and a squad that is doing well gets no order at all.
+This layer does not drive units. The engine already advances every squad on its contract with path finding, target acquisition and an engagement stance, and that is a competent baseline obtained for nothing; writing tactics as fresh unit control would throw it away and would put the inference count on the number of units rather than on the number of squads. So the only decision here is a departure, one of seven, one per squad, and a squad that is doing well gets no order at all.
 
-Each of the five answers one local factor, and there are five because the factors that decide a small fight in this game are being shot at, being covered by an area weapon, and out-reaching what is shooting back — plus concentrating, and doing nothing. Anything that cannot be read off those factors belongs to the operational layer, which is the layer that knows why the squad is where it is.
+Each departure answers one local factor, and the set began at five because the factors that decide a small fight in this game are being shot at, being covered by an area weapon, and out-reaching what is shooting back — plus concentrating, and doing nothing. Two more were added later, not as new kinds of move but as the one parameter a rule used to settle on their behalf: how far a withdrawal commits, and which enemy a concentration goes onto. Anything that cannot be read off those factors belongs to the operational layer, which is the layer that knows why the squad is where it is.
 
 The upward half matters as much. Once the fog is on, nothing above the fighting can see the enemy at all: the per player aggregates the higher layers read are our own side only, and learning what the enemy is fielding means having stood next to it. The squad in contact is therefore the only sensor the command chain has, and the mission report is the only wire it reports on. It is built properly here while the observation is still omniscient precisely so that turning the fog on changes what the report contains and not whether anything is listening.
 
-Rules rather than choices settle where a departure points: the engine picks the focus target and the fall-back position. What this layer picks is only which of the five, which keeps the action space at five whether a script or a network is deciding.
+Rules rather than choices settle where a departure points: the engine picks the focus target and the fall-back position. What this layer picks is only which of the seven, which keeps the action space at the number of kinds whether a script or a network is deciding, and keeps it from ever asking for a continuous value.
 """
 
 from __future__ import annotations
@@ -114,7 +114,7 @@ class Tactics:
             ))
         return deviations, reports
 
-    # ---- the five ----------------------------------------------------------------------
+    # ---- the departures ----------------------------------------------------------------
 
     def _departure(self, squad: SquadRecord, members: List[Sighting], threats: List[Sighting],
                    losses: float, track: _Track) -> Deviation:

@@ -47,7 +47,7 @@ def _initialise(module: nn.Module, gain: float = 1.0) -> nn.Module:
 
 
 class TacticalNet(nn.Module):
-    """One squad's fight to one of the five departures, with a value for it."""
+    """One squad's fight to one of the departures, with a value for it."""
 
     def __init__(self, width: int = 64) -> None:
         super().__init__()
