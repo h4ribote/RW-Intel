@@ -85,8 +85,8 @@ robocopy "<ゲームのインストール先>" local\rw /E /XD jvm cache /XF "hs
 
 ```powershell
 .\tools\probe-agent\build.ps1
-.\tools\New-RwInstance.ps1 -Count 8
-.\tools\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 60
+.\tools\windows\New-RwInstance.ps1 -Count 8
+.\tools\windows\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 60
 ```
 
 速度が 10 倍前後で報告されれば、ゲームをプロセス内から制御できている。実際のスキルミッシュを自動で回すには `-Map Lake` を加える。
@@ -105,7 +105,7 @@ python .\tools\Show-UnitCatalog.py
 ```powershell
 .\agent\build.ps1
 python -m rwintel.control --instances 2 --episodes 2 --map Lake --max-seconds 300
-.\tools\Start-RwAgents.ps1 -Count 2 -Speed 10
+.\tools\windows\Start-RwAgents.ps1 -Count 2 -Speed 10
 ```
 
 エピソードごとに勝敗と、決着しなかった場合の軍事価値差が報告される。詳細は [docs/project/05-interface.md](docs/project/05-interface.md) と [docs/project/02-runtime.md](docs/project/02-runtime.md) にある。
@@ -114,7 +114,7 @@ python -m rwintel.control --instances 2 --episodes 2 --map Lake --max-seconds 30
 
 ```powershell
 python -m rwintel.eval --instances 4 --episodes 3 --arm script --arm arm --map Lake --max-seconds 300
-.\tools\Start-RwAgents.ps1 -Count 4 -Speed 10
+.\tools\windows\Start-RwAgents.ps1 -Count 4 -Speed 10
 ```
 
 手順の根拠は [docs/project/07-evaluation.md](docs/project/07-evaluation.md) にある。
@@ -130,7 +130,7 @@ python -m rwintel.control --instances 4 --episodes 4 --map Lake --max-seconds 30
 
 ```powershell
 python -m rwintel.control --instances 2 --paired --opponents 0 --map Lake --max-seconds 180 --spawn-probe 6
-.\tools\Start-RwPairedMatch.ps1 -Speed 10
+.\tools\windows\Start-RwPairedMatch.ps1 -Speed 10
 ```
 
 学習の実行である。`python -m rwintel.learn` は最初の語で実行の種類を選び、`tactics` `operations` `collect` `clone` `duel` の五つがある。戦術層は試合を回さず交戦アリーナの中で学習させ、作戦層は通常のスキルミッシュで乱入者を入れて回す。`collect` は決定器を渡さずに走らせて、スクリプトの決定を教師データとして書き出す。
@@ -139,7 +139,7 @@ python -m rwintel.control --instances 2 --paired --opponents 0 --map Lake --max-
 python -m rwintel.learn tactics --instances 4 --save local\tactics.pt
 python -m rwintel.learn operations --instances 4 --episodes 6 --map Lake --max-seconds 300 --intruder --save local\operations.pt
 python -m rwintel.learn collect --layer tactics --instances 4 --record local\teacher.jsonl
-.\tools\Start-RwAgents.ps1 -Count 4 -Speed 10
+.\tools\windows\Start-RwAgents.ps1 -Count 4 -Speed 10
 ```
 
 **アリーナの実行に `--max-seconds` を渡す必要はない。** 省略時の既定はアリーナの 240 秒(`operations` だけ 300 秒)であり、**これを伸ばすのは throughput のつまみではなく測定を壊す操作である**。交戦は片付けられないので、1 本のエピソードの中の交戦は生き残りが溜まっていく同じ盤面を共有し、**件数のわりに標本が痩せる**。交戦を増やしたいなら `--episodes` を増やす。
@@ -156,7 +156,7 @@ python -m rwintel.learn tactics --instances 8 --load local\tactics-bc.pt --warmu
 ```powershell
 python -m rwintel.learn duel --load local\tactics.pt --instances 8 --episodes 4
 python -m rwintel.learn duel --instances 8 --episodes 4
-.\tools\Start-RwAgents.ps1 -Count 8 -Speed 10
+.\tools\windows\Start-RwAgents.ps1 -Count 8 -Speed 10
 ```
 
 主な引数である。数値を省略した場合は [docs/project/08-learning.md](docs/project/08-learning.md) の定数表の値がそのまま使われ、模倣の実行についてはそれが最初の行に出る。

@@ -144,7 +144,7 @@ spawn: c_mammothTank alive=1 nearestToTarget=230 unitsNow=31 (was 26)
 生成されたユニットが名乗る名前は、引くときに使った名前とは限らない。ゲーム側のログには `system command spawn` が残る。再現するには次を実行する。
 
 ```powershell
-.\tools\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 90 -Map Lake -AgentOptions 'spawn=mammothTank'
+.\tools\windows\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 90 -Map Lake -AgentOptions 'spawn=mammothTank'
 ```
 
 **ただしこれが単独プレイでの確認であることに注意する。** 正規のコマンド経路を通っている以上ロックステップの同期は保たれるはずだが、複数プロセスを接続した状態では未検証である。
@@ -173,7 +173,7 @@ act: unit at (1487,2351) distanceToTarget=462 waypoints=1
 再現するには計測エージェントに `act=move` を渡す。
 
 ```powershell
-.\tools\Start-RwProbe.ps1 -Count 1 -Speed 2 -Seconds 60
+.\tools\windows\Start-RwProbe.ps1 -Count 1 -Speed 2 -Seconds 60
 ```
 
 実装は `tools/probe-agent/RwProbeAgent.java` の `issueMoveTest` にある。

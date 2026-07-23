@@ -29,7 +29,7 @@
 
 同じ難易度の内蔵 AI 同士は、25 分では互いを崩せない。序盤に取った資源地点を守り合い、前線が動かなくなる。
 
-**この 45 エピソードは計算し直せない。** 内蔵 AI どうしの測定は `local/episodes/` のエピソード記録ではなく `tools/Measure-MatchOutcomes.ps1` が残す実行ログから読むもので、そのログは後の実行に上書きされている。**測定であることは変わらないが、再現できるものとして読んではならない。** ログが残っているのは下の[難易度に差を付けた 24 エピソード](#実測-難易度に差を付けても決着しない)の方であり、そちらは全項目が読み直せる。**二つは別の集合である。** 上のユニット数と下のそれは一致しない。
+**この 45 エピソードは計算し直せない。** 内蔵 AI どうしの測定は `local/episodes/` のエピソード記録ではなく `tools/windows/Measure-MatchOutcomes.ps1` が残す実行ログから読むもので、そのログは後の実行に上書きされている。**測定であることは変わらないが、再現できるものとして読んではならない。** ログが残っているのは下の[難易度に差を付けた 24 エピソード](#実測-難易度に差を付けても決着しない)の方であり、そちらは全項目が読み直せる。**二つは別の集合である。** 上のユニット数と下のそれは一致しない。
 
 ## 帰結: 勝敗だけを主指標にはできない
 
@@ -226,7 +226,7 @@
 
 ```powershell
 python -m rwintel.eval --instances 4 --episodes 3 --arm script --arm arm --map Lake --max-seconds 300
-.\tools\Start-RwAgents.ps1 -Count 4 -Speed 10
+.\tools\windows\Start-RwAgents.ps1 -Count 4 -Speed 10
 ```
 
 `--arm` が比較する方策である。`script` が階梯に任せたもの、姿勢の名前を渡すとその姿勢に固定したものになる。固定は人間が戦略層を引き取るための経路そのものであり([04-model-design.md](04-model-design.md))、比較のために作った仕掛けではない。`--episodes` は**方策ごと**の回数なので、上の例は 1 インスタンスあたり 6 エピソード、合計 24 になる。
@@ -240,5 +240,5 @@ python -m rwintel.eval --from local\episodes\lake.jsonl
 内蔵 AI 同士を戦わせて分布だけを見るには、従来の道具が使える。ローカルプレイヤーを含む余分なプレイヤーを観戦者に移す必要がある。既存のプレイヤーを AI に差し替えることはできない([../game/05-match-control.md](../game/05-match-control.md))。
 
 ```powershell
-.\tools\Measure-MatchOutcomes.ps1 -Count 8 -Episodes 6 -Map Islands -Difficulty 1
+.\tools\windows\Measure-MatchOutcomes.ps1 -Count 8 -Episodes 6 -Map Islands -Difficulty 1
 ```

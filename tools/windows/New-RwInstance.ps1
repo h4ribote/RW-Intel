@@ -31,9 +31,9 @@ param(
     [ValidateRange(1, 64)]
     [int]$Count,
 
-    [string]$MasterPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'local\rw'),
+    [string]$MasterPath = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'local\rw'),
 
-    [string]$InstanceRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'local\instances'),
+    [string]$InstanceRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'local\instances'),
 
     [switch]$Force
 )

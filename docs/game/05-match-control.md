@@ -20,7 +20,7 @@
 実装は `tools/probe-agent/RwProbeAgent.java` にあり、次で再現できる。
 
 ```powershell
-.\tools\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 200 -Map Lake -Difficulty 3
+.\tools\windows\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 200 -Map Lake -Difficulty 3
 ```
 
 ## `-sandbox` の正体
@@ -117,7 +117,7 @@ match: contestants 1->team0,2->team1, everyone else is watching
 match: aliveTeams=[0, 1] [0 team=-3 ai=false] [1 team=0 ai=true credits=1426] [2 team=1 ai=true credits=590] [3 team=-3 ai=true wiped] ...
 ```
 
-**選んだ対戦相手の枠には出撃地点が要る。** 2 人の対戦者を立てるにはローカルプレイヤーの枠を含めて 3 つ以上、すなわち 4 人用マップが必要である。再現するには `tools/Measure-MatchOutcomes.ps1` を使う。
+**選んだ対戦相手の枠には出撃地点が要る。** 2 人の対戦者を立てるにはローカルプレイヤーの枠を含めて 3 つ以上、すなわち 4 人用マップが必要である。再現するには `tools/windows/Measure-MatchOutcomes.ps1` を使う。
 
 | 値 | 難易度 |
 | --- | --- |

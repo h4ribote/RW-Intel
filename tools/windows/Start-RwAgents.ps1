@@ -6,7 +6,7 @@ Starts game instances under the control agent, which dial in to the control proc
 Start the control process first; the agents wait for it and retry until it is listening.
 
     python -m rwintel.control --instances 1 --map Lake --max-seconds 300
-    .\tools\Start-RwAgents.ps1 -Count 1
+    .\tools\windows\Start-RwAgents.ps1 -Count 1
 
 The agents drive nothing by themselves. Episodes start when the control process says so, which is what keeps the settings of a run in one place.
 
@@ -47,13 +47,13 @@ param(
 
     [string]$AgentOptions = '',
 
-    [string]$MasterPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'local\rw'),
+    [string]$MasterPath = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'local\rw'),
 
-    [string]$InstanceRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'local\instances'),
+    [string]$InstanceRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'local\instances'),
 
-    [string]$AgentJar = (Join-Path (Split-Path $PSScriptRoot -Parent) 'agent\rwagent.jar'),
+    [string]$AgentJar = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'agent\rwagent.jar'),
 
-    [string]$LogRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'local\agent-logs'),
+    [string]$LogRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'local\agent-logs'),
 
     [string]$HeapSize = '800M'
 )

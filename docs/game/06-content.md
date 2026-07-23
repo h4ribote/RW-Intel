@@ -191,5 +191,5 @@ python tools\Show-UnitCatalog.py
 `Show-UnitCatalog.py` が読めるのは定義ファイルを持つ種別だけである。完全な一覧は実行中のプロセスから取る。
 
 ```powershell
-.\tools\Start-RwProbe.ps1 -Count 1 -Speed 5 -Seconds 90 -Map Lake -AgentOptions 'catalog=true'
+.\tools\windows\Start-RwProbe.ps1 -Count 1 -Speed 5 -Seconds 90 -Map Lake -AgentOptions 'catalog=true'
 ```

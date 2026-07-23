@@ -84,7 +84,7 @@ sequenceDiagram
 再現するには次を実行する。
 
 ```powershell
-.\tools\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 200 -Map Lake -AgentOptions 'obs=true'
+.\tools\windows\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 200 -Map Lake -AgentOptions 'obs=true'
 ```
 
 ## 周期と遅延
@@ -484,7 +484,7 @@ flowchart TD
 ```powershell
 python tests\test_wire.py
 python -m rwintel.control --instances 2 --episodes 2 --map Lake --max-seconds 300
-.\tools\Start-RwAgents.ps1 -Count 2 -Speed 10
+.\tools\windows\Start-RwAgents.ps1 -Count 2 -Speed 10
 ```
 
 制御プロセスを先に起動する。エージェントは接続できるまで待ち、接続してから初めてエピソードが始まる。
@@ -493,5 +493,5 @@ python -m rwintel.control --instances 2 --episodes 2 --map Lake --max-seconds 30
 
 ```powershell
 python -m rwintel.control --instances 2 --episodes 1 --map Lake --max-seconds 180 --paired --spawn-probe 6
-.\tools\Start-RwPairedMatch.ps1 -Speed 10
+.\tools\windows\Start-RwPairedMatch.ps1 -Speed 10
 ```

@@ -6,7 +6,7 @@ Starts the two game instances of one paired lockstep match.
 Start the control process first; the agents wait for it and retry until it is listening.
 
     python -m rwintel.control --instances 2 --map Lake --max-seconds 300
-    .\tools\Start-RwPairedMatch.ps1
+    .\tools\windows\Start-RwPairedMatch.ps1
 
 Both instances are launched identically. Which of them hosts and which joins is not decided here but by the control process, which sends host, port and join alongside the start command, and the port it sends has to be the one checked here.
 
@@ -45,13 +45,13 @@ param(
 
     [string]$AgentOptions = '',
 
-    [string]$MasterPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'local\rw'),
+    [string]$MasterPath = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'local\rw'),
 
-    [string]$InstanceRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'local\instances'),
+    [string]$InstanceRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'local\instances'),
 
-    [string]$AgentJar = (Join-Path (Split-Path $PSScriptRoot -Parent) 'agent\rwagent.jar'),
+    [string]$AgentJar = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'agent\rwagent.jar'),
 
-    [string]$LogRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'local\agent-logs'),
+    [string]$LogRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'local\agent-logs'),
 
     [string]$HeapSize = '800M'
 )

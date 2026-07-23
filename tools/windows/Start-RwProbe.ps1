@@ -64,13 +64,13 @@ param(
 
     [string]$AgentOptions = '',
 
-    [string]$MasterPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'local\rw'),
+    [string]$MasterPath = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'local\rw'),
 
-    [string]$InstanceRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'local\instances'),
+    [string]$InstanceRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'local\instances'),
 
-    [string]$AgentJar = (Join-Path $PSScriptRoot 'probe-agent\rwprobe.jar'),
+    [string]$AgentJar = (Join-Path (Split-Path $PSScriptRoot -Parent) 'probe-agent\rwprobe.jar'),
 
-    [string]$LogRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'local\probe-logs'),
+    [string]$LogRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'local\probe-logs'),
 
     [string]$HeapSize = '800M'
 )

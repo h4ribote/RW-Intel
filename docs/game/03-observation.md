@@ -230,7 +230,7 @@ player[0] = com.corrodinggames.rts.game.d
 再現するには次を実行する。
 
 ```powershell
-.\tools\Start-RwProbe.ps1 -Count 1 -Speed 5 -Seconds 60
+.\tools\windows\Start-RwProbe.ps1 -Count 1 -Speed 5 -Seconds 60
 ```
 
 エージェントに `dump=<件数>` を渡すと、種類の異なるゲームオブジェクトと全プレイヤーの全フィールドを一度だけ出力する。

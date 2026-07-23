@@ -620,7 +620,7 @@ stateDiagram-v2
 
 ```powershell
 python -m rwintel.learn tactics --instances 4 --save local\tactics.pt
-.\tools\Start-RwAgents.ps1 -Count 4 -Speed 10
+.\tools\windows\Start-RwAgents.ps1 -Count 4 -Speed 10
 ```
 
 **戦術層の学習実行は、始まってすぐに「どちらの読みで払い、割引と trace をいくつで回すか」をログに出す。** 三つとも実行ごとに変えられるものなので、後からログだけを見る者がそれを推測することにならないようにしてある。**割引と trace は 1 個の数字ずつが rollout と整形の両方へ渡る**([アリーナの用務は割り引かない](#アリーナの用務は割り引かない))ので、二つがずれる経路そのものが無い。
@@ -628,7 +628,7 @@ python -m rwintel.learn tactics --instances 4 --save local\tactics.pt
 **`-Offset` は、既に走っている実行が使っていないインスタンスディレクトリの上に小さな実行を載せるためのものである。** 制御プロセスは自分のインスタンスを常に 0 から番号付けるので、ずれるのはディレクトリとログだけで、実行がインスタンスを呼ぶ番号は動かない。測定を止めずに変更の煙試験をするための道具であって、並列数を増やす道具ではない。
 
 ```powershell
-.\tools\Start-RwAgents.ps1 -Count 2 -Offset 12 -Speed 10
+.\tools\windows\Start-RwAgents.ps1 -Count 2 -Offset 12 -Speed 10
 ```
 
 作戦層の学習である。通常のスキルミッシュであり、`--intruder` でスクリプト乱入者を注入する。**[04-model-design.md](04-model-design.md) が学習と評価の両方に乱入を要求している**ので、これを付けないのは既定ではなく手抜きである。

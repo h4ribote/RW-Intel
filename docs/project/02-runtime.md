@@ -50,19 +50,19 @@ java.lang.UnsatisfiedLinkError: rocketConnector64.dll: Can't find dependent libr
 
 | 道具 | 用途 |
 | --- | --- |
-| `tools/New-RwInstance.ps1` | インスタンス用ディレクトリを作成する |
+| `tools/windows/New-RwInstance.ps1` | インスタンス用ディレクトリを作成する |
 | `agent/build.ps1` | 制御エージェントをビルドする |
-| `tools/Start-RwAgents.ps1` | 制御プロセスへ接続するインスタンスを起動する |
+| `tools/windows/Start-RwAgents.ps1` | 制御プロセスへ接続するインスタンスを起動する |
 | `tools/probe-agent/build.ps1` | 計測エージェントをビルドする |
-| `tools/Start-RwProbe.ps1` | 指定数のインスタンスを起動し、速度を集計する |
-| `tools/Measure-MatchOutcomes.ps1` | 同一の対戦を多数のエピソード回し、勝敗と長さの分布を報告する |
+| `tools/windows/Start-RwProbe.ps1` | 指定数のインスタンスを起動し、速度を集計する |
+| `tools/windows/Measure-MatchOutcomes.ps1` | 同一の対戦を多数のエピソード回し、勝敗と長さの分布を報告する |
 | `tools/Show-MapRegions.py` | マップを領域に切り出し、数と大きさを報告する |
 | `tools/Show-UnitCatalog.py` | 定義ファイル由来のユニット種別を一覧し、価格が戦闘力を代理するかを検査する |
 
 ```powershell
 .\tools\probe-agent\build.ps1
-.\tools\New-RwInstance.ps1 -Count 8
-.\tools\Start-RwProbe.ps1 -Count 8 -Speed 10 -Seconds 90
+.\tools\windows\New-RwInstance.ps1 -Count 8
+.\tools\windows\Start-RwProbe.ps1 -Count 8 -Speed 10 -Seconds 90
 ```
 
 Python の二つはゲームを起動せずに動く。読むのはエンジンが読むのと同じファイルであり、追加の依存はない。共通の読み取りは `rwintel/data` にある。
@@ -85,7 +85,7 @@ Python の二つはゲームを起動せずに動く。読むのはエンジン�
 
 ```powershell
 python -m rwintel.control --instances 2 --episodes 2 --map Lake --max-seconds 300
-.\tools\Start-RwAgents.ps1 -Count 2 -Speed 10
+.\tools\windows\Start-RwAgents.ps1 -Count 2 -Speed 10
 ```
 
 制御プロセスは待ち受けポートを排他で確保する。**同じポートで二重に起動すると、Windows では後から起動した側も待ち受けに成功してしまい**、どちらが接続を受け取るかが不定になる。古いプロセスが生き残ったまま新しいコードを試していたことに気づかない、という形で現れる。

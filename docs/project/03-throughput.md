@@ -112,9 +112,9 @@ Rusted Warfare は元来モバイルで 30fps 動作する delta 駆動設計な
 ## 測定を再現する
 
 ```powershell
-.\tools\New-RwInstance.ps1 -Count 8
-.\tools\Start-RwProbe.ps1 -Count 8 -Speed 10 -Seconds 80
-.\tools\Start-RwProbe.ps1 -Count 8 -Speed 10 -Seconds 200 -Map Lake -Difficulty 1 -MaxSeconds 900
+.\tools\windows\New-RwInstance.ps1 -Count 8
+.\tools\windows\Start-RwProbe.ps1 -Count 8 -Speed 10 -Seconds 80
+.\tools\windows\Start-RwProbe.ps1 -Count 8 -Speed 10 -Seconds 200 -Map Lake -Difficulty 1 -MaxSeconds 900
 ```
 
 `-Map` を付けると実際のスキルミッシュを自動で開始し、付けなければメニュー背景の戦闘を負荷とする。
