@@ -407,6 +407,27 @@ def _contested(arena, region_id, point, weight):
     arena.garrison_share[region_id] = 0.5
 
 
+def test_a_scored_episode_says_which_discs_it_had_to_take_and_which_to_hold():
+    """A final share on its own cannot say whether a region was one this side had to take from the enemy's garrison or one it only had to hold, and the two are the whole question when an arm's advantage might be that it declined to attack. So the record carries what each contested region started as, beside what it ended as."""
+    arena = _arena(seed=7)
+    _contested(arena, 4, (0.0, 0.0), 0.9)
+    _contested(arena, 9, (2000.0, 0.0), 0.4)
+    # Ours stands on one of the pair and the enemy's on its reflection, which is how the draw places them.
+    arena.garrison_share = {4: 1.0, 9: 0.0}
+    arena.squads = {}
+    arena.our_ops = arena.their_ops = None
+    arena.enemy = {}
+
+    arena._score(_observation(units=[_unit(1, 0.0, 0.0), _unit(2, 2000.0, 0.0, hostile=1)]))
+    record = arena.statistics.as_dict()
+
+    assert sorted(record["shares"]) == sorted(record["held"]) == sorted(record["priorities"]) == [4, 9]
+    assert record["held"] == {4: 1.0, 9: 0.0}
+    assert record["priorities"] == {4: 0.9, 9: 0.4}
+    # And what happened: the disc we held is ours, the one we would have had to take is the enemy's.
+    assert record["shares"] == {4: 1.0, 9: 0.0}
+
+
 def test_the_two_credit_readings_pay_a_pile_of_squads_differently():
     """Two squads converge on one region and take it between them; a third is sent to a region it never reaches.
 

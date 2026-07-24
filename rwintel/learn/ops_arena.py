@@ -123,6 +123,9 @@ class OpsStatistics:
     garrison_value: float = 0.0
     #: Each contested region's final our-share, for a log a person reads.
     shares: Dict[int, float] = field(default_factory=dict)
+    #: What each contested region was at the start: which side's garrison stood there (whole where ours did, none where the enemy's did) and what the draw said the region was worth. Journalled beside the final shares because a share on its own cannot say whether a region was one this side had to take or one it had to hold, and the two are the whole question when an arm's advantage might be that it declined to attack at all. A run that only writes the outcome cannot be asked afterwards which discs were which.
+    held: Dict[int, float] = field(default_factory=dict)
+    priorities: Dict[int, float] = field(default_factory=dict)
     #: Whether the episode was refused because the room exposed no baseless sparring slot to own the enemy side.
     refused: bool = False
     #: The seed this episode's board was drawn from, which is the board's name. Written down so that a later comparison can say which episodes were played on one construction instead of deriving it from the instance and the episode number and the arm count — a derivation that is right until a run is arranged differently and then silently pairs the wrong episodes.
@@ -141,6 +144,8 @@ class OpsStatistics:
         return {"scored": self.scored, "side_score": round(self.side_score, 6),
                 "contests": self.contests, "garrison_value": round(self.garrison_value, 1),
                 "shares": {int(r): round(s, 4) for r, s in self.shares.items()},
+                "held": {int(r): round(s, 4) for r, s in self.held.items()},
+                "priorities": {int(r): round(w, 4) for r, w in self.priorities.items()},
                 "refused": self.refused, "our_alive": self.our_alive,
                 "our_in_catchment": self.our_in_catchment, "our_reach": round(self.our_reach, 1),
                 "board": self.board, "horizon_ms": self.horizon_ms, "radius": round(self.radius, 1),
@@ -450,6 +455,8 @@ class OpsArena(Arena):
         self.statistics.scored = True
         self.statistics.side_score = self.side_score
         self.statistics.shares = dict(shares)
+        self.statistics.held = {region: self.garrison_share.get(region, 0.5) for region in shares}
+        self.statistics.priorities = {region: self.priorities.get(region, 0.0) for region in shares}
 
         # Diagnose whether the staged squads reached the catchments at all, or the mirror garrisons decided the score by themselves. A member is any unit still on the board belonging to one of this side's staged squads.
         members = {m for squad in self.squads.values() for m in squad.members}
