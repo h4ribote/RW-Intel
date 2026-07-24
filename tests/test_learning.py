@@ -49,7 +49,7 @@ from rwintel.learn.encoding import (
     task_mask,
 )
 from rwintel.learn.imitation import Sample, TeacherMismatch, fit, read_teacher
-from rwintel.learn.layers import LearntTactics
+from rwintel.learn.layers import LearntOperations, LearntTactics
 from rwintel.learn.net import OperationalNet, TacticalNet
 from rwintel.learn.reward import (
     COMPLETE_REWARD,
@@ -59,6 +59,7 @@ from rwintel.learn.reward import (
     HOLDING_WEIGHT,
     LOSING_REWARD,
     OperationalReward,
+    Outcome,
     SPENDING_WEIGHT,
     TacticalReward,
     WIPED_REWARD,
@@ -697,6 +698,34 @@ def test_a_squad_handed_a_new_contract_begins_a_new_trajectory():
     assert not ended.finished and [step.at_ms for step in ended.steps] == [21000, 22000]
     assert ended.steps[-1].reward == 0.0 and ended.tail_value == ended.steps[-1].value
     assert [step.at_ms for step in rollout.live[(0, squad.id)].steps] == [23000]
+
+
+def test_an_operational_squad_that_leaves_the_board_is_cut_rather_than_ended():
+    """The operational reward is a statement about the whole board, so a squad leaving it — folded into another by the organisation layer, disbanded, or wiped — does not end the board or the errand the reward is about: the orders and every other squad go on. Its last decision is therefore bootstrapped from its own value estimate, as any decision that merely stopped being observed is, and not closed against a continuation of nought.
+
+    Marking it done would bootstrap from nought and assert the world ended where a squad turned over, which a routine merge of a healthy squad does several times a match. That would teach the critic that the states before every merge are worth nothing from here, corrupting the baseline the operational advantage of every other squad is taken against — the one thing a benign merge must leave untouched.
+    """
+    class _WholeBoardReward:
+        def step(self, view, orders, squads):
+            return Outcome(reward=0.1)
+
+    rollout = Rollout()
+    layer = LearntOperations(None, None, None, rollout=rollout, instance=0)
+    layer.reward = _WholeBoardReward()
+    layer.pending[0] = Step(state=[0.0], action=0, mask=[1.0], value=0.4, squad=0)
+    layer.pending[1] = Step(state=[0.0], action=0, mask=[1.0], value=0.7, squad=1)
+
+    # Squad 0 is still on the board this period; squad 1 has left it.
+    layer._settle(None, None, [_squad(id=0, contract=False)])
+
+    # The squad still present keeps a live trajectory that goes on accruing; the one that left is cut, not finished, and its last decision bootstraps from its own value rather than from nought.
+    assert (0, 0) in rollout.live and not rollout.live[(0, 0)].finished
+    cut, = rollout.done
+    step, = cut.steps
+    assert not cut.finished and not step.done
+    assert cut.tail_value == step.value == 0.7
+    assert step.reward == 0.1
+    assert not layer.pending
 
 
 def test_a_layer_built_with_a_discount_pays_its_shaping_at_that_discount():

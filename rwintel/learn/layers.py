@@ -177,8 +177,10 @@ class LearntOperations(Operations):
         present = {squad.id for squad in squads}
         for squad_id, step in list(self.pending.items()):
             step.reward = outcome.reward
-            step.done = squad_id not in present
             self.rollout.add((self.instance, squad_id), step)
+            if squad_id not in present:
+                # The squad is gone — folded into another by the organisation layer, disbanded, or wiped — but the reward is a statement about the whole board, which goes on without it, so the continuation is not nothing. Cut the trajectory rather than ending it: its last decision is bootstrapped from its own value estimate, as any decision that stopped being observed is, not closed against a terminal potential of nought. Marking it done would bootstrap from nought and teach the critic that every state a squad turns over from — a routine merge of a healthy squad included — is worth nothing from here, which corrupts the baseline every other squad's advantage is taken against.
+                self.rollout.cut((self.instance, squad_id))
         self.pending.clear()
 
     def _settled(self, view: WorldView, orders, squad: SquadRecord, chosen, avoid):
