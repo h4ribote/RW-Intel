@@ -385,6 +385,60 @@ def test_a_trajectory_that_is_still_running_is_left_alone_by_a_drain():
     assert len(rollout) == 1
 
 
+def test_a_finished_trajectory_is_held_from_the_gated_drain_until_its_episode_is_sealed():
+    """The trainer takes only sealed trajectories, and a trajectory is sealed only when its episode closes. Between a mid-episode finish — a squad wiped, a contract renewed, a squad off the board — and the close, the finished trajectory sits in the buffer but must not be drained: the close is where the episode's interference is marked, and a decision drained before then would enter the update before it could be told it had been interfered with."""
+    rollout = Rollout()
+    for index in range(3):
+        rollout.add((0, 1), Step(state=[0.0], action=0, mask=[1.0], squad=1, done=index == 2))
+    # Finished and in the buffer, but the episode has not closed.
+    assert len(rollout.done) == 1 and not rollout.done[0].sealed
+    assert rollout.drain(sealed_only=True) == []
+    assert len(rollout.done) == 1  # still held
+    rollout.seal(0)
+    drained = rollout.drain(sealed_only=True)
+    assert len(drained) == 3 and not rollout.done
+
+
+def test_an_interfered_decision_that_finished_mid_episode_is_tainted_before_it_can_be_drained():
+    """The race the seal closes: a squad the intruder touched finishes its errand in the middle of an episode, so its trajectory joins the finished set several periods before the episode closes and the tainting runs, and the trainer thread drains on its own clock. Held unsealed, the trajectory cannot be drained in that window; when the episode closes the taint marks it and the seal releases it, and the gated drain then drops it as interfered with, so the decision never reaches an update. Squad 2, untouched, is the control that proves the gate releases what it should."""
+    rollout = Rollout()
+    for index in range(3):
+        rollout.add((0, 1), Step(state=[0.0], action=0, mask=[1.0], squad=1, done=index == 2))
+        rollout.add((0, 2), Step(state=[0.0], action=0, mask=[1.0], squad=2, done=index == 2))
+    # Before the episode closes nothing is drainable, so the touched squad cannot leak.
+    assert rollout.drain(sealed_only=True) == []
+    # The episode closes: squad 1 was interfered with, and only then is everything sealed.
+    rollout.taint(0, [1])
+    rollout.seal(0)
+    drained = rollout.drain(sealed_only=True)
+    assert {step.squad for step in drained} == {2}
+
+
+def test_the_seal_releases_only_the_instance_whose_episode_closed():
+    """One buffer serves every instance. An episode closing on one instance says nothing about the fight another is in the middle of, so the seal is scoped to the instance that closed, exactly as the taint and the cut are. Here instance 0 closes and instance 1 is still fighting; only instance 0's finished trajectory becomes drainable."""
+    rollout = Rollout()
+    rollout.add((0, 1), Step(state=[0.0], action=0, mask=[1.0], squad=1, at_ms=0, done=True))
+    rollout.add((1, 1), Step(state=[0.0], action=0, mask=[1.0], squad=1, at_ms=9, done=True))
+    rollout.seal(0)
+    drained = rollout.drain(sealed_only=True)
+    assert [step.at_ms for step in drained] == [0]
+    assert len(rollout.done) == 1 and rollout.done[0].key == (1, 1)
+
+
+def test_a_layers_flush_leaves_its_work_unsealed_and_only_its_close_seals_it():
+    """A layer's close is two things: flush, which ends the episode's errands, and seal, which releases them to the trainer. They are separate because the operational chain marks the episode's interference in between — flush, then taint, then seal — and a flush that sealed would let a decision the intruder touched be drained before it was tainted. So flush alone must leave the work unsealed and undrainable, and close (here with no intruder above it) must seal it."""
+    rollout = Rollout()
+    layer = LearntTactics(None, _CATALOGUE, _Fixed(), rollout=rollout, instance=0)
+    squad = _squad()
+    layer.decide(_skirmish(), [squad], 21000)
+    layer.finish(squad, 0.75, "called")
+    layer.flush()
+    assert rollout.done and not rollout.done[0].sealed
+    assert rollout.drain(sealed_only=True) == []
+    layer.close()
+    assert len(rollout.drain(sealed_only=True)) == 1
+
+
 # ---- driving both sides of a fight ---------------------------------------------------------
 
 def test_the_board_read_from_the_other_side_exchanges_the_sides_and_nothing_else():

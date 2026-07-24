@@ -219,11 +219,12 @@ class Trainer(threading.Thread):
 
     def run(self) -> None:
         while not self._halt.is_set():
-            finished = sum(len(t.steps) for t in self.rollout.done)
+            # Sealed trajectories only. A trajectory that finished in the middle of an episode is drainable only once that episode has closed and its interference has been marked; counting and draining the unsealed ones here would pull an intruder-touched decision into an update before the taint that excludes it had run. The finishing drain below takes whatever is left without the gate, by which point every episode has closed.
+            finished = sum(len(t.steps) for t in self.rollout.done if t.sealed)
             if finished < self.batch:
                 self._halt.wait(0.25)
                 continue
-            steps = self.rollout.drain()
+            steps = self.rollout.drain(sealed_only=True)
             if not steps:
                 continue
             report = self.optimiser.update(steps)

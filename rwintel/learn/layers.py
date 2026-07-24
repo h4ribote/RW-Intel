@@ -131,8 +131,11 @@ class LearntTactics(Tactics):
                 value=choice.value, squad=squad.id, at_ms=self._now)
         return Deviation(choice.action)
 
-    def close(self) -> None:
-        """Ends every open errand at the end of an episode. They did not fail; they stopped being observed, so they are bootstrapped rather than treated as terminal."""
+    def flush(self) -> None:
+        """Ends every open errand at the end of an episode, without yet releasing the episode's trajectories to be drained. They did not fail; they stopped being observed, so they are bootstrapped rather than treated as terminal.
+
+        Separated from the seal that follows it because the operational chain has to mark the episode's interference in between: the decisions still owed payment are added here, then the intruder's touched squads are tainted, and only then are the trajectories sealed. Sealing here instead would let a decision the intruder touched be sealed and drained before it was tainted.
+        """
         if self.rollout is None:
             return
         for squad_id, step in list(self.pending.items()):
@@ -140,6 +143,12 @@ class LearntTactics(Tactics):
         self.pending.clear()
         # This instance's errands only. One buffer serves every instance of a run, and an episode ending here says nothing about the fight another instance is in the middle of.
         self.rollout.cut_all(owner=self.instance)
+
+    def close(self) -> None:
+        """Ends every open errand and releases this episode's trajectories to the trainer. The tactical arena has no intruder, so there is nothing to taint between the flush and the seal; the two are one call here and split only where an intruder sits above the layer."""
+        self.flush()
+        if self.rollout is not None:
+            self.rollout.seal(self.instance)
 
 
 class LearntOperations(Operations):
@@ -221,7 +230,8 @@ class LearntOperations(Operations):
                 squad=squad.id, at_ms=view.observation.game_time_ms)
         return Task(choice.second), region
 
-    def close(self) -> None:
+    def flush(self) -> None:
+        """Ends every open period at the end of an episode, without yet releasing its trajectories to be drained. Split from the seal for the same reason the tactical layer's is: the operational chain marks the episode's interference between the two, and this is the layer an intruder actually interferes with."""
         if self.rollout is None:
             return
         for squad_id, step in list(self.pending.items()):
@@ -229,3 +239,9 @@ class LearntOperations(Operations):
         self.pending.clear()
         self.rollout.cut_all(owner=self.instance)
         self.reward.reset()
+
+    def close(self) -> None:
+        """Ends every open period and releases this episode's trajectories to the trainer. The operational chain reaches the seal through its policy's close, which taints first; this direct close is the path with no intruder above it, where flush and seal are one call."""
+        self.flush()
+        if self.rollout is not None:
+            self.rollout.seal(self.instance)

@@ -41,15 +41,17 @@ class LearningPolicy(ScriptPolicy):
         """
         learnt = getattr(self, self.layer, None)
         rollout = getattr(learnt, "rollout", None)
-        # Flush this instance's outstanding decisions into the buffer before tainting, not after. The layer's close is where the decision each squad was still owed payment for is finally added; run after the taint, those freshly added steps escape it, so the last decision about an interfered squad — a seized or rewritten squad still on the board at the episode's end — would enter the update untainted while the decisions before it were dropped.
-        if hasattr(learnt, "close"):
-            learnt.close()
+        # Flush this instance's outstanding decisions into the buffer before tainting, not after. The layer's flush is where the decision each squad was still owed payment for is finally added; run after the taint, those freshly added steps escape it, so the last decision about an interfered squad — a seized or rewritten squad still on the board at the episode's end — would enter the update untainted while the decisions before it were dropped. Flush, not close: close would also seal, and a sealed trajectory is drainable, so sealing before the taint would reopen exactly the window the taint closes. The seal is run below, once the taint has marked every touched decision.
+        if hasattr(learnt, "flush"):
+            learnt.flush()
         if rollout is not None:
             for commander in self.outside:
                 touched = getattr(getattr(commander, "log", None), "touched", None)
                 if touched:
                     # This instance only. The buffer is shared across instances and keyed by (instance, squad); tainting by the bare squad number would drop every other instance's clean decisions about the same number.
                     rollout.taint(learnt.instance, touched)
+            # Now that the episode's interference is marked, release this instance's finished trajectories to the trainer. Unconditional, not only when something was touched: a run without an intruder still has to seal, or the trainer — which now drains only sealed trajectories — never takes anything and the policy never moves. A trajectory that finished mid-episode has waited in the buffer undrainable until this point, which is the whole of the fix; without it, the trainer thread could have drained and updated it several periods before the taint above ran.
+            rollout.seal(learnt.instance)
 
 
 def learning_arm(layer: str, decider_for: Callable[[object], object],

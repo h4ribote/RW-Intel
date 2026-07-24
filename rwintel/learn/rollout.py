@@ -66,6 +66,8 @@ class Trajectory:
     finished: bool = False
     #: The value of the state after the last step, used to bootstrap a trajectory that was cut off.
     tail_value: float = 0.0
+    #: True once the episode this trajectory finished in has closed and its interference has been marked, which is the point past which the trainer may drain it. A trajectory that finished in the middle of an episode is added to the finished set the moment it ends, several periods before the episode closes and the intruder's touched set is complete; drained in that gap it would carry an interfered-with decision into the update untainted, because the tainting has not run yet. Held undrainable until sealed, it cannot.
+    sealed: bool = False
 
 
 class Rollout:
@@ -143,13 +145,31 @@ class Rollout:
                 if step.squad in touched:
                     step.tainted = True
 
-    def drain(self, keep_tainted: bool = False) -> List[Step]:
-        """Every finished trajectory's steps, with advantages and returns filled in, oldest first. Live trajectories are left alone: they are still accruing."""
-        out: List[Step] = []
+    def seal(self, owner: object = None) -> None:
+        """Marks this owner's finished trajectories — every one when no owner is given — as ready to be drained into an update.
+
+        Called at the end of an episode's close, after any interference with the episode has been marked. Until then a trajectory that finished in the middle of the episode sits in the finished set drainable, and the trainer thread runs on its own clock: it can pull that trajectory into an update before the episode closes and the tainting runs, so an intruder-touched decision leaks into the gradient untainted. Sealing only at close, after the taint, is what shuts that window. Scoped to the owner exactly as taint and cut_all are, because one buffer serves every instance of a run and an episode closing on one instance says nothing about the fight another is still in the middle of. Setting a flag in place rather than moving the trajectory keeps this safe to call from an instance's own thread while the trainer reads the same set: the trainer only ever removes trajectories, and only the ones already sealed.
+        """
         for trajectory in self.done:
+            key = trajectory.key
+            if owner is None or (isinstance(key, tuple) and key and key[0] == owner):
+                trajectory.sealed = True
+
+    def drain(self, keep_tainted: bool = False, sealed_only: bool = False) -> List[Step]:
+        """Every finished trajectory's steps, with advantages and returns filled in, oldest first. Live trajectories are left alone: they are still accruing.
+
+        With ``sealed_only`` the trainer takes only the trajectories an episode's close has sealed and leaves the rest in place, so a trajectory that finished mid-episode is never drained before the tainting that decides whether it is clean has run. The finishing paths that take the whole buffer at once — the last update of a run and the collecting run's single read — seal everything first and drain without the gate.
+        """
+        if sealed_only:
+            ready = [trajectory for trajectory in self.done if trajectory.sealed]
+            self.done = [trajectory for trajectory in self.done if not trajectory.sealed]
+        else:
+            ready = self.done
+            self.done = []
+        out: List[Step] = []
+        for trajectory in ready:
             self._finish(trajectory)
             out.extend(trajectory.steps)
-        self.done = []
         if keep_tainted:
             return out
         return [step for step in out if not step.tainted]
