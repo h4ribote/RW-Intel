@@ -26,7 +26,14 @@ from rwintel.control.policy.catalogue import Catalogue
 from rwintel.control.policy.contracts import Doctrine, SquadRecord, TaskContract
 from rwintel.control.policy.view import build as build_view
 from rwintel.control.session import UnitType
-from rwintel.learn.arena import BY_HEALTH, BY_KILLS, SCORES, STRENGTH_SLOPE, Engagement
+from rwintel.learn.arena import (
+    BY_HEALTH,
+    BY_KILLS,
+    SCORES,
+    STRENGTH_SLOPE_HEALTH,
+    STRENGTH_SLOPE_KILLS,
+    Engagement,
+)
 from rwintel.learn.deciders import Choice
 from rwintel.learn.encoding import (
     OPERATIONAL_SIZE,
@@ -448,8 +455,8 @@ def test_the_score_of_a_fight_read_from_the_other_side_is_the_same_number_negate
         ours = _fight(our_value, their_value, our_left, their_left)
         theirs = _fight(their_value, our_value, their_left, our_left)
         assert abs(ours.outcome + theirs.outcome) < 1e-12
-        # Bounded by the shares, which run from minus one to plus one, less a term that cannot exceed half the slope and at present is nought.
-        assert -1.0 - STRENGTH_SLOPE / 2 <= ours.outcome <= 1.0 + STRENGTH_SLOPE / 2
+        # Bounded by the shares, which run from minus one to plus one, less the draw term, which cannot move the score by more than half the slope.
+        assert -1.0 - STRENGTH_SLOPE_KILLS / 2 <= ours.outcome <= 1.0 + STRENGTH_SLOPE_KILLS / 2
 
     # A side that was never built at all is worth nothing and has lost nothing, which has to be a number rather than a division by nought: an engagement whose spawns never arrived on one side still reaches the point where it is scored.
     empty = _fight(0.0, 1200.0, 0.0, 0.0)
@@ -459,13 +466,28 @@ def test_the_score_of_a_fight_read_from_the_other_side_is_the_same_number_negate
 def test_destroying_the_other_side_without_a_loss_is_the_top_of_the_scale():
     """What fixes the size of the scale, and with it how much a called fight is worth against the errand's own conclusions: a massacre is paid exactly what taking the contracted ground is paid, and no more, so that a layer is never taught to prefer the one to the other.
 
-    Stated on an even draw, so that it holds whatever the term that takes out what the draw was worth is set to. That term is nought at present, having been measured to inject a bias larger than anything it was meant to help see, but the scale is exactly one on an even draw either way.
+    Stated on an even draw, so that it holds whatever the term that takes out what the draw was worth is set to. On an even draw the strength share is a half and that term is nought regardless of the multiple, so the scale is exactly one whatever the multiple is; away from an even draw the term moves the score, which is the next test.
     """
     assert _fight(3000.0, 3000.0, 3000.0, 0.0).outcome == 1.0
     assert _fight(3000.0, 3000.0, 0.0, 3000.0).outcome == -1.0
     assert _fight(2000.0, 4000.0, 2000.0, 0.0).outcome >= 1.0
     # And the middle of it is an even trade between sides of equal worth.
     assert _fight(2000.0, 2000.0, 1000.0, 1000.0).outcome == 0.0
+
+
+def test_the_draw_term_charges_the_stronger_side_for_the_advantage_it_was_dealt():
+    """A fight the two sides destroy each other in is an even result, but not from an even start: the side dealt the larger force was the one expected to win it and only broke even, so the draw term marks its score down by what the advantage was worth and the weaker side's up by the same. What it subtracts is exactly the multiple times how far the share sat from a half, which is the part of the score that was the draw rather than the play, and it leaves the antisymmetry the measurement rests on untouched.
+
+    On the sparse and the health readings alike, because each carries its own multiple and the draw is a property of the start rather than of which reading scores the end.
+    """
+    share = 4000.0 / 6000.0
+    strong = _fight(4000.0, 2000.0, 0.0, 0.0)  # dealt two thirds of the strength, traded down to nothing
+    weak = _fight(2000.0, 4000.0, 0.0, 0.0)
+    assert abs(strong.outcome - (-STRENGTH_SLOPE_KILLS * (share - 0.5))) < 1e-9
+    assert abs(strong.outcome_health - (-STRENGTH_SLOPE_HEALTH * (share - 0.5))) < 1e-9
+    assert strong.outcome < 0.0 < weak.outcome
+    assert abs(strong.outcome + weak.outcome) < 1e-12
+    assert abs(strong.outcome_health + weak.outcome_health) < 1e-12
 
 
 def test_the_health_reading_of_a_fight_is_the_same_number_negated_as_well():
@@ -486,7 +508,7 @@ def test_the_health_reading_of_a_fight_is_the_same_number_negated_as_well():
                         ours.their_left_health, ours.our_left_health)
         assert abs(ours.outcome + theirs.outcome) < 1e-12
         assert abs(ours.outcome_health + theirs.outcome_health) < 1e-12
-        assert -1.0 - STRENGTH_SLOPE / 2 <= ours.outcome_health <= 1.0 + STRENGTH_SLOPE / 2
+        assert -1.0 - STRENGTH_SLOPE_HEALTH / 2 <= ours.outcome_health <= 1.0 + STRENGTH_SLOPE_HEALTH / 2
 
     # A side whose spawns never arrived reaches the point where it is scored like any other, and on this reading too that has to be a number rather than a division by nought.
     empty = _fight(0.0, 1200.0, 0.0, 0.0)

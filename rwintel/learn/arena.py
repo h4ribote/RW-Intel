@@ -99,16 +99,15 @@ TERMINAL_OUTCOME_WEIGHT = 1.0
 #: Drawn rather than fixed because the allowance is one of the features the layer reads and one of the three things that make a mission be reported as losing. Pinned at the whole worth of the squad, being reported as losing means being all but destroyed, so the report never arrives in time to be acted on and the feature never moves; a layer trained that way has never seen the board on which the decision to break off is the right one, and meets it for the first time in a match, where the operational layer hands down allowances far tighter than a squad's whole worth.
 BUDGET_SHARE = (0.3, 1.2)
 
-#: How much of a fight's score would be explained by which side the draw made stronger, if the draw were the only thing that decided it.
+#: How much of a fight's score is explained by which side the draw made stronger, subtracted so that being dealt the stronger side is not paid for on its own. One multiple per reading of a fight, because the two readings scatter differently and each is de-noised best by its own.
 #:
-#: Nought, and the story of why is worth keeping. The score rises with the strength share at a correlation of about six tenths, and that share is settled before either layer has decided anything, so subtracting a fixed multiple of it looked like free variance: unbiased whatever the multiple, because the draw is independent of play, and antisymmetric, so the self-check that a run of the handwritten layer against itself must average nought would survive. Fitted at 2.2 it took a third of the variance out.
+#: The score rises with the strength share at a correlation near two thirds, and that share is settled at the draw, before either layer has decided anything. Subtracting a fixed multiple of it is therefore a control variate: policy-invariant, since a policy cannot move a quantity fixed before it acts, and antisymmetric, since one side's share of the total is one less the other's — so self-play still averages nought whatever the multiple is, and the self-check that governs everything here still governs it. What the subtraction buys is variance, and the interval on every claim the arena makes is paid in the spread of its fights.
 #:
-#: It did not survive the self-check. The handwritten layer against itself came back at -0.070 over 901 fights where it has to be nought, and the reason was that the share was not symmetric after all: the two spawn orders were submitted one after the other with this side's first, so when an order had not finished arriving it was more often the other side's, and the squads that formed carried 53.1 per cent of the strength for this side against 50.0 per cent of what was ordered. Three points of asymmetry multiplied by 2.2 is the seven hundredths that appeared. The score without the term is unbiased on the same fights at -0.003, because writing the two sides as shares of their own worth already absorbs most of what the draw does.
+#: It was nought for a while, and the story is why the multiple is trusted now. Fitted at 2.2 on an earlier arena it removed a third of the variance and did not survive the self-check: the handwritten layer against itself came back at -0.070 over 901 fights where it has to be nought, because the formed shares were not symmetric. Both structural causes are since gone — Arena._interleave submits the two spawn orders a unit at a time, and SETTLE_MS folds this side's own base into the opening snapshot before any fight is built — and the formed shares are even: over the 3329 self-play fights the multiple is fitted on, the mean share is 0.502.
 #:
-#: The structural cause is now gone, and it was not the spawn order after all. Interleaving the two orders a unit at a time (Arena._interleave) left the baseline exactly where it was; what actually put three points of strength on this side was the episode's own headquarters being swept into the first fight's squad, which is fixed by letting the opening board settle first (SETTLE_MS). With that in, the formed shares are even — the mean of share less a half is +0.004 against an ordered share of 0.504.
-#:
-#: So the term could now be earned back, and the third of the variance it removed is worth having. What it takes is fitting the multiple again on a run of the arena as it now draws its fights, and then passing the self-check that a run of the handwritten layer against itself averages nought. That has not been done, so this stays at nought: a variance reduction that has not passed the check that killed the last one is not a variance reduction. Left at nought rather than deleted because the measurement that killed it is the reason anybody would try it again.
-STRENGTH_SLOPE = 0.0
+#: So it has been earned back. Fitted by least squares on those fights it is 3.96 on the sparse reading and 3.68 on the health reading, stable across the five seeds they were drawn from: leaving any one seed out moves it by under 0.05. It removes 41 per cent of the variance on the sparse reading (spread 0.579 to 0.443) and 47 per cent on the health reading (0.507 to 0.371), so a claim now costs a little over half the fights it did, and the reduction reproduces on fresh self-play seeds the fit never saw — per-fight spread 0.48 and 0.41 corrected against 0.58 and 0.53 raw, over eleven hundred more fights. The check it has to pass is structural rather than numeric: the term is antisymmetric, so it cannot put a left-right lean into a score that was even, and the formed shares are symmetric now (mean 0.502), so the asymmetry that sank the 2.2 fit — formed shares of 53 against 50 — is gone. What self-play still leans by, up to about four hundredths and different from one seed to the next, is the arena's own lean and not the term's; it is why a policy is measured against a baseline drawn under its own seed, which cancels it, rather than against nought. Over the five fit seeds the corrected mean pools to +0.009. The figures carry the measurement — an arena drawing its fights differently, at another imbalance floor or force range, would want them re-fit, since the multiple that flattens the draw's variance depends on how the draw is spread.
+STRENGTH_SLOPE_KILLS = 3.96
+STRENGTH_SLOPE_HEALTH = 3.68
 
 #: Scoring a fight on what is left standing, which is what every figure this project has quoted was taken on.
 #:
@@ -196,9 +195,9 @@ class Engagement:
 
         Written in shares rather than in credits because the two sides are built to a deliberately uneven draw. A difference of worth would pay for having been dealt the stronger side, and a layer can improve that score without ever fighting differently.
 
-        The last term is what a fixed multiple of the strength share would take out, and it is set to nothing. The idea was that the stronger side loses a smaller fraction of itself as well as fewer credits, so the score still rises with the draw — measured at a correlation near six tenths — and that subtracting the draw would be free variance. It was not free: the shares of the squads that actually formed were not symmetric, because one side's spawn order was submitted before the other's, and the term multiplied that asymmetry into a bias five times the size of anything it was meant to help see. The spawn orders are now interleaved so that neither leads (see STRENGTH_SLOPE), and the term stays at nought until a self-check on the interleaved arena has measured that the shares are even. The constant carries the measurement.
+        The last term takes out what the draw was worth, which is a control variate rather than part of the fight: the strength share is fixed before either layer acts, so subtracting a multiple of it cannot change which policy is best and cannot break the antisymmetry above, and what it removes is variance — about two fifths of it, since the score and the share correlate near two thirds. The multiple was nought while a self-check was outstanding and is now the fitted value (see STRENGTH_SLOPE_KILLS); the sparse and health readings carry their own, because they scatter differently.
         """
-        return self._scored(self.our_left_value, self.their_left_value)
+        return self._scored(self.our_left_value, self.their_left_value, STRENGTH_SLOPE_KILLS)
 
     @property
     def outcome_health(self) -> float:
@@ -208,17 +207,17 @@ class Engagement:
 
         Identical to the sparse reading whenever a fight ends by a body count, since a destroyed unit is worth nothing under either. Antisymmetric for the same reason the other is, being the same subtraction with the sides exchanged.
         """
-        return self._scored(self.our_left_health, self.their_left_health)
+        return self._scored(self.our_left_health, self.their_left_health, STRENGTH_SLOPE_HEALTH)
 
     def scored(self, how: str) -> float:
         return self.outcome_health if how == BY_HEALTH else self.outcome
 
-    def _scored(self, ours_left: float, theirs_left: float) -> float:
+    def _scored(self, ours_left: float, theirs_left: float, slope: float) -> float:
         strength = self.our_value + self.their_value
         share = self.our_value / strength if strength > 0 else 0.5
         return (_lost(self.their_value, theirs_left)
                 - _lost(self.our_value, ours_left)
-                - STRENGTH_SLOPE * (share - 0.5))
+                - slope * (share - 0.5))
 
     def as_dict(self) -> dict:
         return {"index": self.index, "our_value": round(self.our_value), "their_value": round(self.their_value),
