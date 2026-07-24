@@ -74,7 +74,7 @@ def train(arguments) -> int:
     _save(net, arguments.save)
     if report_ is not None:
         log.info("last update: %s", report_.as_dict())
-    # The learnt side's own domination over the horizon, as a run of it — not a duel, which ops_run does against the pin and the script. A rising figure over a run is the layer learning to dominate; the honest comparison is the separate paired duel, and it is on boards this run never trained on.
+    # The learnt side's own domination over the horizon, as a run of it — not a duel, which ops_run does against the pin and the script. A rising figure over a run is the layer learning to dominate; the honest comparison is the separate paired duel, which has to be given a base seed this run did not use — both runners build a board from the same seed arithmetic, so a duel at the training seed replays the very boards the policy was fitted on.
     report(pool(sessions), "learnt")
     return 0
 

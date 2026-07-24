@@ -2,11 +2,11 @@
 
     python -m rwintel.learn.ops_compare local/ops-eval-learnt.jsonl local/ops-eval-pin.jsonl
 
-This reads journals; it starts nothing and needs no game. Two `ops_run` invocations at the same seed draw the same boards — `_arena_seed` is the base seed advanced by the instance and by the episode, and nothing else — so the same instance and episode in two runs is the same board played by two arms, and subtracting them there removes the board before any averaging happens.
+This reads journals; it starts nothing and needs no game. `_arena_seed` is the base seed advanced by the instance and by the board, and a multi-arm run holds the board still until every arm has played it, so a board is named by the seed it was drawn from and every episode writes that name down. Two runs share boards when they were made at the same base seed; two arms of one run share all of them. Subtracting two episodes that name the same board removes the board before any averaging happens.
 
 That subtraction is worth doing but it is not free of the board. One arm's scored episodes scatter by about 0.11 while the differences the arms are being compared for are around 0.04, so an unpaired difference carries about 0.15 of spread; paired, the same two runs carried 0.12, which is the two arms' scores correlating at about 0.36 across the shared boards. **The board is a third of the scatter, not all of it**, because the same board played twice is the same staging, the same garrisons and the same regions but not the same fight — the engine is delta-driven and does not reproduce. So a pair is two plays of one construction rather than two plays of one match, the residual is the fight's own scatter, and that residual is what the reported interval measures. The report says all three spreads and the correlation between them every time, so how much the pairing actually bought is never assumed.
 
-The two runs must be the same instrument. Map, horizon, catchment radius, staged squads and contest pairs all change what is being measured, and a run drawn under different ones is a different arena; this refuses to pair across them rather than quietly reporting the change in the instrument as a difference between the arms.
+The two runs must be the same instrument. Map, horizon, catchment radius, staged squads, contest pairs and the credits a defender is drawn out of all change what is being measured, and a run drawn under different ones is a different arena; this refuses to pair across them rather than quietly reporting the change in the instrument as a difference between the arms.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 
 #: The episode settings that have to agree before two runs are the same instrument, and the arena draw settings that have to agree beside them. The seed is deliberately not among them: two runs at different base seeds simply share no board and pair on nothing, which the pair count says by itself.
 EPISODE_KEYS = ("map", "opponents", "difficulty", "credits", "starting_units", "fog", "income", "arena")
-DRAW_KEYS = ("horizon_ms", "radius", "squads", "pairs")
+DRAW_KEYS = ("horizon_ms", "radius", "squads", "pairs", "garrison")
 
 
 def board_of(entry: dict) -> Optional[int]:

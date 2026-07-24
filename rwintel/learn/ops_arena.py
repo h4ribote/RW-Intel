@@ -45,7 +45,7 @@ SQUAD_VALUE = (1500.0, 4500.0)
 GARRISON_VALUE = (0.4, 1.2)
 GARRISON_SCALE = 3000.0
 
-#: Radius of the disc a contest is scored over, in world units. Sized to the engagement standoff band, because that is where an assaulting squad halts against the garrison: measured, the nearest surviving squad member stopped about 490 units from its contest on Lake and about 280 on the more compact Hills, so a 250-unit disc saw only the garrison and the choice never registered. At 400 the assaulting squads enter the disc, the shares spread off the garrison's nought-or-one, and the choice moves the score. The diameter must stay below the least separation of two contest points so the discs do not overlap, which is what `_draw_pairs` enforces — and at 400 that separation is hard enough to place on a compact map that a third of episodes refuse, which is a tuning cost of the standoff-sized disc, not a bias (a refused board is never scored).
+#: Radius of the disc a contest is scored over, in world units. Sized to the engagement standoff band, because that is where an assaulting squad halts against the garrison: measured, the nearest surviving squad member stopped about 490 units from its contest on Lake and about 280 on the more compact Hills, so a 250-unit disc saw only the garrison and the choice never registered. At 400 the assaulting squads enter the disc, the shares spread off the garrison's nought-or-one, and the choice moves the score. The diameter must stay below the least separation of two contest points so the discs do not overlap, which is what `_draw_pairs` enforces — and at 400 that separation is hard enough to place on a compact map that a fair share of boards refuse, which is a tuning cost of the standoff-sized disc, not a bias (a refused board is never scored, and a board refused for one arm is refused for every arm of the run, since the draw is the seed's). Measured on Hills at seed 70001 with the current draw floor and the clearance from what was standing: 13 boards of 64 refused, the same 13 for each of four arms.
 CATCHMENT_RADIUS = 400.0
 
 #: How far a contest point sits from the centre, drawn uniformly. Above the merge distance so a pair's two points fall on distinct regions. The floor a draw actually uses is this or the catchment radius, whichever is larger, because a pair's own two points are twice the offset apart and have to clear the same catchment diameter that two different pairs are held to — a floor below the radius let the one pair every board carries overlap itself, which no later test looked for.
@@ -130,11 +130,12 @@ class OpsStatistics:
     refused: bool = False
     #: The seed this episode's board was drawn from, which is the board's name. Written down so that a later comparison can say which episodes were played on one construction instead of deriving it from the instance and the episode number and the arm count — a derivation that is right until a run is arranged differently and then silently pairs the wrong episodes.
     board: int = 0
-    #: How the board was drawn: the horizon in game milliseconds, the catchment radius, the squads staged a side and the contest pairs asked for. Journalled with the episode because none of these reach the episode settings, and two runs drawn under different ones are two different instruments: a later comparison that pairs them board by board would be reading the change in the instrument as a difference between the arms. Kept here so that comparison can refuse rather than have to be trusted not to.
+    #: How the board was drawn: the horizon in game milliseconds, the catchment radius, the squads staged a side, the contest pairs asked for and the credits a defender was drawn out of. Journalled with the episode because none of these reach the episode settings, and two runs drawn under different ones are two different instruments: a later comparison that pairs them board by board would be reading the change in the instrument as a difference between the arms. Kept here so that comparison can refuse rather than have to be trusted not to.
     horizon_ms: int = 0
     radius: float = 0.0
     squads: int = 0
     pairs: int = 0
+    garrison: float = 0.0
     #: Diagnostics that say whether the staged squads — the thing whose deployment the arena exists to measure — actually reached and contested the catchments, or whether the score was decided by the pre-placed garrisons alone. If the squads never register in a catchment the self-play zero is trivially met by the mirror garrisons and the arena resolves nothing.
     our_alive: int = 0
     our_in_catchment: int = 0
@@ -149,7 +150,7 @@ class OpsStatistics:
                 "refused": self.refused, "our_alive": self.our_alive,
                 "our_in_catchment": self.our_in_catchment, "our_reach": round(self.our_reach, 1),
                 "board": self.board, "horizon_ms": self.horizon_ms, "radius": round(self.radius, 1),
-                "squads": self.squads, "pairs": self.pairs}
+                "squads": self.squads, "pairs": self.pairs, "garrison": round(self.garrison, 1)}
 
 
 class OpsArena(Arena):
@@ -205,7 +206,7 @@ class OpsArena(Arena):
         self._sandbox_sent = False
         # The draw's settings are written into the statistics at construction rather than at scoring, so that an episode which never reaches its horizon still says under what instrument it was run.
         self.statistics = OpsStatistics(board=seed, horizon_ms=horizon_ms, radius=catchment_radius,
-                                        squads=our_squads, pairs=contest_pairs)
+                                        squads=our_squads, pairs=contest_pairs, garrison=garrison_scale)
 
     # ---- the one entry point (mirrors Arena.decide) ------------------------------------
 
@@ -529,7 +530,7 @@ class OpsArena(Arena):
 
         `marginal` pays the difference the squad itself made: the region's domination as it stands, less what the same catchment would have read with that squad's surviving units taken out of it. Several squads on one region then divide what they jointly produced rather than each taking all of it, and a squad that added nothing to a region already won is paid nothing for it. It is the difference reward, and the reason it is the more honest signal is that it is the part of the team's score that this decision actually moved. Its known cost is that a squad wiped out at the horizon has nothing left in the catchment and is paid nothing, however much of the enemy it took with it — the counterfactual it can compute is "had these units not been standing here", not "had this squad never been sent".
 
-        The marginal reading is exactly the change the squad's own units made to this side's score: the other regions' terms are identical with and without it, so the one region's difference is the whole difference. That identity is the reason to prefer it — a squad is paid in the very quantity the arena is measured by, and in no part of it that another squad produced. It is not antisymmetric between the sides, and is not meant to be: both sides can truthfully say a contested disc would have been lost without them, so two opposing squads can both be paid well. A credit is not a score. Neither reading touches the side score the episode is measured by, which is what the self-play zero is a statement about.
+        The marginal reading is the change the squad's own units made to this side's score, on the scale the terminal is paid at: the other regions' terms are identical with and without it, so the one region's difference is the whole difference, and it is that difference before the side score's final division by the sum of the board's priorities — proportional to the change in the side score, by a factor fixed within an episode, rather than equal to it. That identity is the reason to prefer it — a squad is paid in the very quantity the arena is measured by, and in no part of it that another squad produced. It is not antisymmetric between the sides, and is not meant to be: both sides can truthfully say a contested disc would have been lost without them, so two opposing squads can both be paid well. A credit is not a score. Neither reading touches the side score the episode is measured by, which is what the self-play zero is a statement about.
         """
         finish = getattr(ops, "finish", None)
         if finish is None:

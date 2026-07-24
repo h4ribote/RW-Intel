@@ -92,7 +92,7 @@ class Operations:
     def __init__(self, session, catalogue: Catalogue, crowding: float = CROWDING_COST) -> None:
         self.session = session
         self.catalogue = catalogue
-        #: How much our own strength already standing in a region discounts it as a target. Held on the instance rather than read from the constant so that the one term which decides whether the layer spreads or masses can be turned off and measured, which is what the operations arena's massed arm does: with it at nought the same ladder sends every squad at the single best region, and the difference between the two runs on the same boards is what the spreading rule is worth. Nothing in a match changes it; it is a knob for the instrument.
+        #: How much our own strength already standing in a region discounts it as a target. Held on the instance rather than read from the constant so that the one term which decides whether the layer spreads or masses can be turned off and measured, which is what the operations arena's massed arm does: with it at nought a doctrine's squads all go at the one region that doctrine's own ladder ranks first, and the difference between the two arms on the same boards is what the spreading rule is worth. Each doctrine ranks a different pool, so what masses is a doctrine and not the whole side. Nothing in a match changes it; it is a knob for the instrument.
         self.crowding = crowding
         #: Squads a human held as of the last decision. A squad coming back is left alone for one period, because its composition and its position are both unknown to the command chain until it has been seen once under machine command again.
         self.human_held: set = set()
