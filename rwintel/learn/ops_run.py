@@ -20,6 +20,8 @@ from ..control.session import EpisodeSettings
 from ..data import AssetPaths
 from ..eval.journal import Journal, default_path
 from ..eval.sampling import Summary
+from .deciders import PinnedRegion
+from .layers import LearntOperations
 from .ops_arena import CATCHMENT_RADIUS, HORIZON_MS, OpsArena
 
 log = logging.getLogger(__name__)
@@ -34,9 +36,17 @@ def _arena_seed(base_seed: int, session) -> int:
 
 
 def _arm(arguments):
-    """The self-play arm: one `OpsArena` per episode with the script chain on both sides, seeded so each episode is a fresh paired board."""
+    """One `OpsArena` per episode, seeded so each episode is a fresh board and two runs at the same seed draw the same boards.
+
+    Our side is the script chain by default (the self-play zero) or a pinned deployment when `--our pin` is given: a layer that sends every squad to the lowest-numbered legal region and task, making no operational choice at all. Running the two at the same seed and subtracting the pinned run from the self-play run cancels the enemy and the board lean and leaves how much the script's careful deployment beat making no choice — the resolution the arena exists to produce. The enemy is always the script, so the pinned run is our-pin against their-script on the very board the self-play run drew.
+    """
+    if arguments.our == "pin":
+        operations = lambda session, catalogue: LearntOperations(session, catalogue, PinnedRegion(), None, -1)
+    else:
+        operations = None
+
     def build(session) -> OpsArena:
-        return OpsArena(session, seed=_arena_seed(arguments.seed, session),
+        return OpsArena(session, operations=operations, seed=_arena_seed(arguments.seed, session),
                         horizon_ms=arguments.horizon * 1000, our_squads=arguments.squads,
                         catchment_radius=arguments.radius, contest_pairs=arguments.pairs)
     return build
@@ -76,7 +86,7 @@ def self_play(arguments) -> Summary:
     )
     settings = ServerSettings(
         host=arguments.host, port=arguments.port, instances=arguments.instances,
-        episodes=arguments.episodes, arms=[("ops-script", _arm(arguments))],
+        episodes=arguments.episodes, arms=[("ops-" + arguments.our, _arm(arguments))],
         assets=AssetPaths.at(arguments.assets) if arguments.assets else AssetPaths.default(),
         episode=episode,
         journal=Journal(arguments.record or default_path("ops-self-play")),
@@ -118,6 +128,8 @@ def main(argv=None) -> int:
                         help="game seconds the two chains run before the board is scored")
     parser.add_argument("--squads", type=int, default=4, help="assorted-doctrine squads staged per side")
     parser.add_argument("--pairs", type=int, default=2, help="contested offset pairs, so twice this many scored regions")
+    parser.add_argument("--our", choices=("script", "pin"), default="script",
+                        help="our side's operational layer: the script chain (the self-play zero) or a pinned deployment that makes no choice; run both at one seed and subtract to read the resolution")
     parser.add_argument("--radius", type=float, default=CATCHMENT_RADIUS, help="world units a contest's catchment disc reaches; sized to the engagement standoff so an assaulting squad registers")
     parser.add_argument("--max-seconds", type=int, default=0,
                         help="game time an episode is cut off at, defaulting to the horizon plus the settle and spawn waits and a margin")
