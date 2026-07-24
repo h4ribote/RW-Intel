@@ -27,7 +27,8 @@ require_docker() {
 }
 
 require_image() {
-    docker image inspect "$RW_IMAGE" >/dev/null 2>&1 || {
+    # docker image inspect resolves a name against the host platform's manifest, so on an arm64 host it reports the amd64 image as absent even though docker run finds and runs it. docker images -q reads the tag store directly and returns the id when the tag exists and nothing when it does not, which is the presence question this check actually asks.
+    [ -n "$(docker images -q "$RW_IMAGE" 2>/dev/null)" ] || {
         echo "no image $RW_IMAGE; build it with tools/macos/build-image.sh" >&2
         exit 1
     }

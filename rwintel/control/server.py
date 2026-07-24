@@ -59,9 +59,11 @@ class Server:
 
     def serve(self) -> List[Session]:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Not SO_REUSEADDR: on Windows it lets a second process bind a port that is already listening, and which of the two then receives a connection is undefined. A stale control process would silently keep serving the agents while the new one looked healthy. Failing to bind is the behaviour that is wanted here.
+        # The address option is set to the one that is safe on the platform, and the two platforms need opposite ones. On Windows SO_REUSEADDR lets a second process bind a port that is already listening, and which of the two then receives a connection is undefined, so a stale control process would silently keep serving the agents while the new one looked healthy; SO_EXCLUSIVEADDRUSE is what forbids that there. On the BSD sockets macOS and Linux use, SO_REUSEADDR does not permit a second live listener to take an actively bound port at all — that requires SO_REUSEPORT, which is not set — so the only bind it lets through is one onto a port left in TIME_WAIT by a control process that has already closed. That is exactly the bind that must succeed: back-to-back runs would otherwise each have to wait out the previous socket's TIME_WAIT before they could listen. Not setting it is what produced Address already in use between two runs seconds apart.
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((self.settings.host, self.settings.port))
         listener.listen(max(1, self.settings.instances))
         listener.settimeout(1.0)

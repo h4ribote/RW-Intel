@@ -57,7 +57,7 @@ from rwintel.learn.reward import (
     WIPED_REWARD,
 )
 from rwintel.learn.rollout import Rollout, Step
-from rwintel.learn.train import Optimiser
+from rwintel.learn.train import Optimiser, Trainer
 from rwintel.control.policy.tactics import Tactics, _Track
 from rwintel.eval.sampling import Summary
 from rwintel.wire import (
@@ -756,6 +756,31 @@ def test_a_warming_update_moves_the_critic_and_leaves_the_policy_exactly_where_i
     moved = {name for name, parameter in net.named_parameters()
              if not torch.equal(parameter, before[name])}
     assert moved == {name for name, _ in net.named_parameters()}, sorted(moved)
+
+
+def test_the_trainer_thread_finishes_without_shadowing_the_threads_own_shutdown():
+    """A run ends by joining the trainer thread, and the join is where the collection this exercises would fail.
+
+    The Trainer is a Thread, and the standard library calls Thread._stop on itself from inside join, the instant the thread has ended, through _wait_for_tstate_lock. An instance attribute named _stop shadows that method, so the join tries to call it, and if it is anything other than a method — an Event, say — the join raises TypeError rather than returning. That is exactly the shape of finish: it sets its stop flag and then joins, so the failure lands after the last episode has been fought and before the trained parameters have been saved, which is the most expensive place in the whole run for it to land. This starts a trainer over a rollout with finished work in it, lets it run, and finishes it, which is the sequence a training run performs on its way out.
+    """
+    torch.manual_seed(0)
+    net = TacticalNet()
+    optimiser = Optimiser(net)
+    rollout = Rollout()
+    draw = random.Random(0)
+    for trajectory in range(4):
+        for index in range(8):
+            rollout.add(trajectory, Step(state=[draw.uniform(-1.0, 1.0) for _ in range(TACTICAL_SIZE)],
+                                         action=draw.randrange(TACTICAL_ACTIONS),
+                                         mask=[1.0] * TACTICAL_ACTIONS, log_prob=-1.6, value=0.1,
+                                         reward=1.0 if index % 2 else -1.0, done=index == 7))
+    trainer = Trainer(rollout, optimiser, batch=8)
+    trainer.start()
+    # finish() sets the stop flag and joins; the join is the call that raised before the fix.
+    report = trainer.finish()
+    assert not trainer.is_alive()
+    # The last partial batch is spent on the way out, so at least one update was taken over the finished work.
+    assert report is not None and report.updates >= 1
 
 
 # ---- the widened tactical action space ------------------------------------------------------

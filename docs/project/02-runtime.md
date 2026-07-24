@@ -2,6 +2,8 @@
 
 学習環境としてゲームを走らせるための構成と道具を記録する。ゲーム側の起動引数や速度制御の仕組みそのものは [../game/02-launch.md](../game/02-launch.md) にある。
 
+本基盤は二つの実行系を持つ。ネイティブに走らせる Windows 系(`tools/windows`)と、amd64 Linux コンテナの中でゲームを走らせて制御プロセスだけをホストにネイティブで置く macOS/Linux 系(`tools/macos`)である。まず Windows 系を、次に macOS/Linux 系を記す。制御プロセス、方策、通信形式、学習と評価のコードは共通で、違うのはゲームプロセスをどう起動して並列化するかだけである。
+
 ## ゲームの複製
 
 インストール先をそのまま使わず、`local/rw` に複製して使う。32bit 版 JVM とログ類は不要である。
@@ -114,6 +116,60 @@ python -m rwintel.control --instances 2 --episodes 2 --map Lake --max-seconds 30
 - 命令は `l.cf.b(player)` で取得したコマンドにフィールドを埋めることで発行される
 
 詳細はそれぞれ [../game/01-internals.md](../game/01-internals.md)、[../game/04-actions.md](../game/04-actions.md)、[../game/05-match-control.md](../game/05-match-control.md) にある。
+
+## macOS(および amd64 Linux)での実行
+
+Apple Silicon の macOS ではゲームをネイティブに走らせられない。ゲームが同梱する LWJGL 2.9.3 の macOS ネイティブは x86_64 専用であり、その表示モード列挙のネイティブは現行 macOS でフォールトする。そこで、ゲーム本体は amd64 Linux ディストリビューションを Docker コンテナに入れて Rosetta で駆動し、制御プロセスはホストにネイティブで置く。同じイメージは実機の x86-64 Linux ホストではエミュレーションなしで走る。
+
+Linux ディストリビューションは独自の JVM(`jvm-linux`、JRE)と独自のネイティブ(`liblwjgl64.so`、`librocketConnector.so`、libRocket 一式)を同梱するので、イメージが供給するのはそれらがリンクする先だけである。仮想ディスプレイ(Xvfb)、ソフトウェア OpenGL ラスタライザ(Mesa)、LWJGL が要求する X クライアントライブラリ、libRocket が要求する freetype と libstdc++ である。エンジンが開くウィンドウは 10x10 なので、ソフトウェアラスタライズの費用は測るに値しない。
+
+### ゲームの複製とディレクトリ構成
+
+macOS 系が使うゲーム本体は `local/RustedWarfare_Linux`、すなわち `jvm-linux` と `.so` ネイティブを持つ Linux ディストリビューションである。これは `local/rw`(JVM とネイティブを剥いだ macOS 複製)とは別物で、コンテナはネイティブなしでは動かない。
+
+Windows 系のようなインスタンス用ディレクトリをホストに作る手順はない。コンテナモデルでは、ゲーム本体を読み取り専用でマウントし、インスタンスごとの作業ディレクトリはコンテナ内で起動時に作る(`tools/macos/rw-run.sh`)。作業ディレクトリは `assets`、`font`、`res`、`mods` とネイティブへのシンボリックリンク、および `saves`、`cache`、`replays` の実体だけからなる。したがってインスタンスの実ディスク消費はほぼゼロで、Windows 系のジャンクションとハードリンクが果たす役割をシンボリックリンクが果たす。
+
+### 道具
+
+| 道具 | 用途 |
+| --- | --- |
+| `tools/macos/build-image.sh` | ゲームを走らせる amd64 Linux ランタイムイメージ(`rw-linux:latest`)をビルドする |
+| `agent/build.sh` | 制御エージェントをビルドする。JDK 9 以上が要る(Linux 版は JRE のみ、macOS 版は同梱なし)。Java 8 バイトコードに落とすのでゲームの Java 8 JVM で読める |
+| `tools/probe-agent/build.sh` | 計測エージェントをビルドする。同様に JDK が要る |
+| `tools/macos/start-probe.sh` | 指定数のインスタンスをコンテナで起動し、速度を集計する |
+| `tools/macos/start-agents.sh` | 制御プロセスへ接続するインスタンスをコンテナで起動する |
+| `tools/macos/learn-run.sh` | ホストの制御・学習コマンドとゲームコンテナのライフサイクルを結ぶ |
+| `tools/macos/measure-match-outcomes.sh` | 同一の対戦を多数のエピソード回し、勝敗と長さの分布を報告する |
+| `tools/macos/start-paired-match.sh` | 二つのゲームを一つのロックステップ試合に入れる |
+
+Python の二つ(`tools/Show-MapRegions.py`、`tools/Show-UnitCatalog.py`)はゲームを起動せずに動くので、どちらの実行系でも同じである。読むのはエンジンが読むのと同じファイルで、追加の依存はない。
+
+### 起動順序とホスト・コンテナの結線
+
+Windows 系と同じく制御プロセスを先に起動する。ただしコンテナはホストを別ホストとして見るので、制御プロセスは `127.0.0.1` ではなく `0.0.0.0` で待ち受けさせ、コンテナ側は `host.docker.internal` でホストへ達する。
+
+```bash
+tools/macos/build-image.sh
+agent/build.sh
+python -m rwintel.control --host 0.0.0.0 --instances 2 --episodes 2 --map Lake --max-seconds 300
+tools/macos/start-agents.sh -Count 2 -Speed 10
+```
+
+学習と評価の実行では、ホストの制御プロセスとコンテナのゲームは同時に生きていなければならない。Windows では二つのコンソールを人が並べるが、macOS では一方がホストプロセス、もう一方がコンテナで、両者の寿命を結ぶものがない。`learn-run.sh` がこれを結ぶ。ホストのコマンドを `--` の後にそのまま与えると、それを起動し、コンテナをその相手として立ち上げ、ホストのコマンドがエピソードを終えた瞬間にコンテナを止める。取り残したゲームが次の実行とコアを取り合うことがない。
+
+```bash
+tools/macos/learn-run.sh --count 8 --speed 10 -- \
+    python -m rwintel.learn tactics --host 0.0.0.0 --instances 8 --episodes 40 \
+        --load local/tactics-bc.pt --warmup 5 --save local/tactics.pt
+```
+
+### 待ち受けポートの排他はプラットフォームで向きが逆である
+
+制御プロセスは待ち受けポートを、そのプラットフォームで安全な方の指定で確保する。二つのプラットフォームは逆の指定を要る。Windows では `SO_REUSEADDR` が既に待ち受けているポートへの二重 bind を許してしまい、どちらが接続を受け取るかが不定になるので、`SO_EXCLUSIVEADDRUSE` でそれを禁じる。macOS と Linux が使う BSD ソケットでは、`SO_REUSEADDR` は稼働中のリスナーからポートを奪うことを許さず(それには `SO_REUSEPORT` が要り、設定していない)、既に閉じた制御プロセスが `TIME_WAIT` に残したポートへの bind だけを通す。連続して実行を回すには、この bind が成功しなければならない。設定しないと、数秒あけた二つの実行が `Address already in use` で弾かれる。
+
+### イメージの存在確認は名前で問うと amd64 単一プラットフォームで誤る
+
+`docker image inspect <名前>` は名前をホストのプラットフォームのマニフェストに照らして解決するので、arm64 ホストでは amd64 のイメージを「無い」と報告する。`docker run` はそれでも見つけて走らせる。`tools/macos/_common.sh` の存在確認は `docker images -q` で、タグの実体を直接読んで存在すれば id を、なければ何も返さない。これがこの確認が本来問うている存在の問いである。
 
 ## 再現性のための注意
 

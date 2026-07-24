@@ -214,13 +214,14 @@ class Trainer(threading.Thread):
         self.batch = batch
         self.on_update = on_update
         self.reports: List[Report] = []
-        self._stop = threading.Event()
+        # Named _halt rather than _stop on purpose: this class is a Thread, and Thread._stop is a method the standard library calls on itself from inside join, through _wait_for_tstate_lock, the moment the thread has finished. An instance attribute called _stop shadows that method, so join tries to call this Event and raises TypeError: 'Event' object is not callable. That is exactly where finish fails — it sets the flag, then joins — so every training run would crash on the way out, after the last episode and before the trained parameters were saved. The name is the whole of the fix.
+        self._halt = threading.Event()
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             finished = sum(len(t.steps) for t in self.rollout.done)
             if finished < self.batch:
-                self._stop.wait(0.25)
+                self._halt.wait(0.25)
                 continue
             steps = self.rollout.drain()
             if not steps:
@@ -236,7 +237,7 @@ class Trainer(threading.Thread):
 
     def finish(self) -> Optional[Report]:
         """Stops collecting and spends whatever is left. A last partial batch is worth taking: the alternative is throwing away the most recent and most relevant experience of the run."""
-        self._stop.set()
+        self._halt.set()
         self.join(timeout=5.0)
         self.rollout.cut_all()
         steps = self.rollout.drain()

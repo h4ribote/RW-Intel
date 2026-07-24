@@ -89,6 +89,14 @@ robocopy "<ゲームのインストール先>" local\rw /E /XD jvm cache /XF "hs
 .\tools\windows\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 60
 ```
 
+macOS(Apple Silicon)では、ゲームをネイティブに走らせられないため、amd64 Linux ディストリビューションを Docker コンテナに入れて Rosetta で駆動し、制御プロセスだけをホストにネイティブで置く。ゲーム本体は `local/RustedWarfare_Linux`(`jvm-linux` と `.so` ネイティブを持つ Linux 版)を置く。構成と道具の詳細は [docs/project/02-runtime.md](docs/project/02-runtime.md) にある。
+
+```bash
+tools/macos/build-image.sh
+tools/probe-agent/build.sh
+tools/macos/start-probe.sh -Count 1 -Speed 10 -Seconds 60
+```
+
 速度が 10 倍前後で報告されれば、ゲームをプロセス内から制御できている。実際のスキルミッシュを自動で回すには `-Map Lake` を加える。
 
 マップとユニット定義を読むだけの道具はゲームを起動せずに動く。Python 3 以外の依存はない。
@@ -106,6 +114,14 @@ python .\tools\Show-UnitCatalog.py
 .\agent\build.ps1
 python -m rwintel.control --instances 2 --episodes 2 --map Lake --max-seconds 300
 .\tools\windows\Start-RwAgents.ps1 -Count 2 -Speed 10
+```
+
+macOS では、コンテナがホストを別ホストとして見るので、制御プロセスは `127.0.0.1` ではなく `0.0.0.0` で待ち受けさせる。コンテナ側は `host.docker.internal` でホストへ達する。以降の `python -m rwintel.control` と `python -m rwintel.learn` のすべての例で `--host 0.0.0.0` を足し、`Start-RwAgents.ps1` を `tools/macos/start-agents.sh` に読み替える。
+
+```bash
+agent/build.sh
+python -m rwintel.control --host 0.0.0.0 --instances 2 --episodes 2 --map Lake --max-seconds 300
+tools/macos/start-agents.sh -Count 2 -Speed 10
 ```
 
 エピソードごとに勝敗と、決着しなかった場合の軍事価値差が報告される。詳細は [docs/project/05-interface.md](docs/project/05-interface.md) と [docs/project/02-runtime.md](docs/project/02-runtime.md) にある。
@@ -140,6 +156,13 @@ python -m rwintel.learn tactics --instances 4 --save local\tactics.pt
 python -m rwintel.learn operations --instances 4 --episodes 6 --map Lake --max-seconds 300 --intruder --save local\operations.pt
 python -m rwintel.learn collect --layer tactics --instances 4 --record local\teacher.jsonl
 .\tools\windows\Start-RwAgents.ps1 -Count 4 -Speed 10
+```
+
+macOS では、ホストの学習コマンドとコンテナのゲームを同時に生かして寿命を結ぶ `tools/macos/learn-run.sh` を使う。`--` の後にホストのコマンドをそのまま与えると、それを起動し、コンテナをその相手として立ち上げ、エピソードが終われば取り残さずコンテナを止める。
+
+```bash
+tools/macos/learn-run.sh --count 4 --speed 10 -- \
+    python -m rwintel.learn tactics --host 0.0.0.0 --instances 4 --save local/tactics.pt
 ```
 
 **アリーナの実行に `--max-seconds` を渡す必要はない。** 省略時の既定はアリーナの 240 秒(`operations` だけ 300 秒)であり、**これを伸ばすのは throughput のつまみではなく測定を壊す操作である**。交戦は片付けられないので、1 本のエピソードの中の交戦は生き残りが溜まっていく同じ盤面を共有し、**件数のわりに標本が痩せる**。交戦を増やしたいなら `--episodes` を増やす。

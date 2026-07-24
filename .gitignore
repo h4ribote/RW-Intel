@@ -18,3 +18,6 @@ __pycache__/
 # Build output of agent
 agent/classes/
 agent/*.jar
+
+# Python virtual environment for the control process (torch and its dependencies)
+.venv/
