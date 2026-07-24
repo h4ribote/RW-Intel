@@ -24,7 +24,7 @@ from rwintel.control.policy.contracts import (
     SquadRecord,
     TaskContract,
 )
-from rwintel.control.policy.operations import Operations
+from rwintel.control.policy.operations import Concentrated, Operations
 from rwintel.control.policy.view import WorldView
 from rwintel.data.regions import Region
 from rwintel.learn.ops_arena import (
@@ -517,6 +517,33 @@ def test_the_marginal_credit_is_the_change_the_squad_made_to_the_side_score():
     for squad_id, member in ((1, 1), (2, 3)):
         without = _weighted([unit for unit in units if unit.id != member])
         assert abs(paid.paid[squad_id] - (standing - without)) < 1e-9
+
+
+def test_the_concentrating_arm_sends_every_squad_at_the_one_region_most_wanted():
+    """The arm that actually concentrates replaces the region and keeps the doctrine's task, so squads of different doctrines converge on one place while still doing different things there. Setting the ladder's crowding discount to nought does not do this on the arena, where that discount is already nought — which is why this arm exists as well as that one."""
+    regions = [
+        RegionState(id=1, resources=3, held_by_us=1, held_by_enemy=0, x=0.0, y=0.0,
+                    our_value=500.0, enemy_value=200.0, enemy_seen_at_ms=0, distance_from_home=300.0),
+        RegionState(id=2, resources=1, held_by_us=0, held_by_enemy=1, x=100.0, y=0.0,
+                    our_value=0.0, enemy_value=1000.0, enemy_seen_at_ms=0, distance_from_home=900.0),
+    ]
+    view = WorldView(observation=_observation(), catalogue=_CATALOGUE, regions=regions)
+    # Region 2 is what the strategic layer wants; the ladder's own discounts would send a vanguard elsewhere for its distance.
+    orders = OperationsOrders(posture=Posture.ARM, priorities={1: 0.2, 2: 1.0}, offensive=True, loss_allowance=1000.0)
+
+    ladder, massed = Operations(None, _CATALOGUE), Concentrated(None, _CATALOGUE)
+    for doctrine in (Doctrine.VANGUARD, Doctrine.GARRISON, Doctrine.RAID):
+        squad = SquadRecord(id=1, doctrine=doctrine, value=1000.0)
+        plain = ladder._pick(view, orders, squad, None)
+        massed_pick = massed._pick(view, orders, squad, None)
+        assert massed_pick is not None and massed_pick[1].id == 2, doctrine
+        # The task is the doctrine's own, untouched: only where it goes is overridden.
+        assert plain is not None and massed_pick[0] == plain[0], doctrine
+
+    # A board on which the strategic layer wants nothing leaves the ladder's answer alone.
+    barren = OperationsOrders(posture=Posture.ARM, priorities={}, offensive=True, loss_allowance=1000.0)
+    squad = SquadRecord(id=1, doctrine=Doctrine.VANGUARD, value=1000.0)
+    assert massed._pick(view, barren, squad, None) == ladder._pick(view, barren, squad, None)
 
 
 def test_the_massed_arm_is_the_ladder_with_only_its_spreading_term_removed():

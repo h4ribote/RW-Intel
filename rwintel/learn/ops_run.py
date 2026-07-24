@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Dict, List, Optional
 
-from ..control.policy.operations import Operations
+from ..control.policy.operations import Concentrated, Operations
 from ..control.server import Server, ServerSettings
 from ..control.session import EpisodeSettings
 from ..data import AssetPaths
@@ -56,12 +56,16 @@ def _arm(arguments, our: str, arms: int = 1, net=None, device=None, batcher=None
 
     `massed` was meant to be the concentration arm the reading needed, and measurement says it is not one. It is the script ladder with the discount a region takes for the strength we already have standing in it removed — and on this arena that discount is already nought, because the squads are at the staging point and not in the contested regions when the choice is made. Measured: the two arms score identically on 43 of 51 boards at the default garrison and on 37 of 38 at half of it, and the engine does not reproduce, so identical scores mean identical decisions. It is therefore an ablation of one term of the ladder, worth keeping as that, and it is no evidence about concentration. An arm that actually concentrates would have to replace the region choice rather than remove a term from it, and there is not one. Against the script it says what the spreading rule costs; against the pin it says whether massing on the right ground beats leaving it.
 
+    `concentrate` is the arm that does what the massed arm was supposed to do. It keeps the doctrine's own choice of task and overrides only the region, sending every squad at the single region the strategic layer wants most. On this arena the priorities sit on the contested regions alone, so that is every squad at one contest — concentration in the plain sense, made by replacing the choice rather than by removing a term from it.
+
     `learnt` is a trained network read from a file.
     """
     if our == "pin":
         operations = lambda session, catalogue: LearntOperations(session, catalogue, PinnedRegion(), None, -1)
     elif our == "massed":
         operations = lambda session, catalogue: Operations(session, catalogue, crowding=0.0)
+    elif our == "concentrate":
+        operations = lambda session, catalogue: Concentrated(session, catalogue)
     elif our == "learnt":
         # The trained layer read greedily — its most probable region and task, not a draw — since this measures the policy rather than trains it, and with no rollout it records nothing.
         operations = lambda session, catalogue: LearntOperations(
@@ -227,8 +231,8 @@ def main(argv=None) -> int:
                         help="game seconds the two chains run before the board is scored")
     parser.add_argument("--squads", type=int, default=4, help="assorted-doctrine squads staged per side")
     parser.add_argument("--pairs", type=int, default=2, help="contested offset pairs, so twice this many scored regions")
-    parser.add_argument("--our", choices=("script", "pin", "massed", "learnt"), action="append", default=None,
-                        help="our side's operational layer, repeatable: the script chain (the self-play zero), a pinned deployment that makes no choice, the script with its crowding discount removed, which on this arena decides the same as the script, or a learnt network read from --load. Give it more than once and every arm plays every board and the run reports the paired difference between every pair of arms itself; --episodes is per arm")
+    parser.add_argument("--our", choices=("script", "pin", "massed", "concentrate", "learnt"), action="append", default=None,
+                        help="our side's operational layer, repeatable: the script chain (the self-play zero), a pinned deployment that makes no choice, the script with its crowding discount removed, which on this arena decides the same as the script, an arm that sends every squad at the single region the strategic layer wants most, or a learnt network read from --load. Give it more than once and every arm plays every board and the run reports the paired difference between every pair of arms itself; --episodes is per arm")
     parser.add_argument("--load", default=None, help="parameters for the learnt arm, read greedily")
     parser.add_argument("--device", default=None)
     parser.add_argument("--radius", type=float, default=CATCHMENT_RADIUS, help="world units a contest's catchment disc reaches; sized to the engagement standoff so an assaulting squad registers")

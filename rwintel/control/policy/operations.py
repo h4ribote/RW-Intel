@@ -306,3 +306,24 @@ class Operations:
             if kind is not None:
                 establishment += count * float(kind.price)
         return max(0.0, establishment - squad.value)
+
+
+class Concentrated(Operations):
+    """The ladder with the region it targets replaced by the one the strategic layer wants most, whatever the doctrine's own ranking said.
+
+    This exists as an arm of the constructed operations arena, to answer a question the ladder itself cannot be made to answer by turning a constant off. The arena measured that a pinned deployment — every squad at a fixed region that is never one of the scored ones — beats the ladder, and the first reading of that was concentration of force against a spreading opponent. Testing it by setting the ladder's crowding discount to nought did not test it: on that board the discount is already nought, because a squad is at its staging point and not in the region it is being sent to, and the two arms then decide alike. Concentration has to be made by replacing the choice.
+
+    So the task stays whatever the doctrine would have chosen — a garrison still defends and a raider still raids, which is what keeps this an operational choice rather than a different chain — and only the region is overridden, to the highest-priority one on the board. Regions the strategic layer did not ask for carry no priority and are not candidates, so on the arena, where the priorities sit on the contested regions alone, this is every squad at one contest. In a match, where many regions carry a priority, it is every squad at the most wanted of them, which is the same statement about force.
+    """
+
+    def _pick(self, view: WorldView, orders: OperationsOrders, squad: SquadRecord,
+              avoid: Optional[int]) -> Optional[Tuple[Task, RegionState]]:
+        chosen = super()._pick(view, orders, squad, avoid)
+        if chosen is None:
+            return None
+        wanted = [region for region in view.regions
+                  if region.id != avoid and orders.priorities.get(region.id, 0.0) > 0.0]
+        if not wanted:
+            return chosen
+        # Ties by the nearer region, as every other ladder here breaks them, so the arm is deterministic on a board with two equally wanted regions.
+        return chosen[0], max(wanted, key=lambda r: (orders.priorities.get(r.id, 0.0), -r.distance_from_home))
