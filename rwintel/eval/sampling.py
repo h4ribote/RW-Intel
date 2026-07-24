@@ -83,6 +83,9 @@ class Comparison:
     def of(cls, first: Summary, second: Summary) -> "Comparison":
         difference = first.mean - second.mean
         pooled = _pooled_sd(first, second)
+        if difference != 0.0 and pooled <= 0.0:
+            # A pooled scatter of nought here is not the certainty that no scatter would be; it is its absence. It comes from too few episodes between the two arms to have any within-group scatter at all (one a side leaves _pooled_sd's degrees at nought), or from a handful that happen to be identical. Sizing against it would return nought episodes and declare the difference established off a single or coincidental pair, which is the one thing a sample size exists to refuse. So a nonzero difference with no measured scatter is unresolved and never sufficient, not settled by nought.
+            return cls(first, second, difference, pooled, UNBOUNDED_EPISODES, False)
         needed = episodes_for(pooled, abs(difference))
         return cls(first, second, difference, pooled, needed,
                    first.n >= needed and second.n >= needed)

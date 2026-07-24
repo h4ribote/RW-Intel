@@ -221,6 +221,17 @@ def test_comparison_of_two_identical_means_is_never_sufficient():
     assert not same.sufficient
 
 
+def test_a_difference_with_no_measured_scatter_is_unresolved_not_certain():
+    """A pooled scatter of nought is the absence of a measurement, not certainty. One episode a side leaves no within-group scatter to size against, and a handful that happen to be identical leave none either; sizing off that would call a difference established on a single or coincidental pair, which is what a sample size exists to refuse."""
+    # One episode each: _pooled_sd has no degrees of freedom and returns nought.
+    lone = Comparison.of(Summary(1, 0.5, 0.0), Summary(1, -0.5, 0.0))
+    assert lone.difference == 1.0 and lone.pooled_sd == 0.0
+    assert lone.needed == UNBOUNDED_EPISODES and not lone.sufficient
+    # Several episodes each but each arm internally identical: still no scatter to size against.
+    flat = Comparison.of(Summary(5, 0.3, 0.0), Summary(5, -0.3, 0.0))
+    assert flat.needed == UNBOUNDED_EPISODES and not flat.sufficient
+
+
 if __name__ == "__main__":
     for name, function in sorted(globals().items()):
         if name.startswith("test_"):
