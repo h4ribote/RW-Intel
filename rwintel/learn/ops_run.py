@@ -20,8 +20,10 @@ from ..control.session import EpisodeSettings
 from ..data import AssetPaths
 from ..eval.journal import Journal, default_path
 from ..eval.sampling import Summary
-from .deciders import PinnedRegion
+from .__main__ import _device, _load
+from .deciders import NetworkOperations, PinnedRegion, operational_batcher
 from .layers import LearntOperations
+from .net import OperationalNet
 from .ops_arena import CATCHMENT_RADIUS, HORIZON_MS, OpsArena
 
 log = logging.getLogger(__name__)
@@ -35,13 +37,17 @@ def _arena_seed(base_seed: int, session) -> int:
     return base_seed + INSTANCE_STRIDE * session.instance + len(session.records)
 
 
-def _arm(arguments):
+def _arm(arguments, net=None, device=None, batcher=None):
     """One `OpsArena` per episode, seeded so each episode is a fresh board and two runs at the same seed draw the same boards.
 
     Our side is the script chain by default (the self-play zero) or a pinned deployment when `--our pin` is given: a layer that sends every squad to the lowest-numbered legal region and task, making no operational choice at all. Running the two at the same seed and subtracting the pinned run from the self-play run cancels the enemy and the board lean and leaves how much the script's careful deployment beat making no choice — the resolution the arena exists to produce. The enemy is always the script, so the pinned run is our-pin against their-script on the very board the self-play run drew.
     """
     if arguments.our == "pin":
         operations = lambda session, catalogue: LearntOperations(session, catalogue, PinnedRegion(), None, -1)
+    elif arguments.our == "learnt":
+        # The trained layer read greedily — its most probable region and task, not a draw — since this measures the policy rather than trains it, and with no rollout it records nothing.
+        operations = lambda session, catalogue: LearntOperations(
+            session, catalogue, NetworkOperations(net, device, batcher, greedy=True), None, -1)
     else:
         operations = None
 
@@ -84,22 +90,32 @@ def self_play(arguments) -> Summary:
         # An arena episode starts with nothing on the board: there is no command that removes a unit, so the only clean board to construct on is one nothing was ever put on.
         starting_units=0, arena=True,
     )
+    # A learnt arm reads one network off a file and shares it across every instance, built once here rather than per session for the same reason the training runner does: the network is what is being measured, and one copy batched across the instances is the whole point of batching the inference. The script and pin arms need none of this.
+    net = device = batcher = None
+    if arguments.our == "learnt":
+        device = _device(arguments.device)
+        net = OperationalNet().to(device)
+        _load(net, arguments.load, device)
+        batcher = operational_batcher(net, device=device, greedy=True)
+
     settings = ServerSettings(
         host=arguments.host, port=arguments.port, instances=arguments.instances,
-        episodes=arguments.episodes, arms=[("ops-" + arguments.our, _arm(arguments))],
+        episodes=arguments.episodes, arms=[("ops-" + arguments.our, _arm(arguments, net, device, batcher))],
         assets=AssetPaths.at(arguments.assets) if arguments.assets else AssetPaths.default(),
         episode=episode,
         journal=Journal(arguments.record or default_path("ops-self-play")),
     )
     server = Server(settings)
-    log.info("measuring the operations arena self-play zero over %d episode(s) each on %d instance(s), horizon %ds",
-             arguments.episodes, arguments.instances, arguments.horizon)
+    log.info("measuring the operations arena %s arm over %d episode(s) each on %d instance(s), horizon %ds",
+             arguments.our, arguments.episodes, arguments.instances, arguments.horizon)
     try:
         sessions = server.serve()
     except KeyboardInterrupt:
         server.stop()
         sessions = server.sessions
     finally:
+        if batcher is not None:
+            batcher.stop()
         if settings.journal is not None:
             settings.journal.close()
     summary = pool(sessions)
@@ -128,8 +144,10 @@ def main(argv=None) -> int:
                         help="game seconds the two chains run before the board is scored")
     parser.add_argument("--squads", type=int, default=4, help="assorted-doctrine squads staged per side")
     parser.add_argument("--pairs", type=int, default=2, help="contested offset pairs, so twice this many scored regions")
-    parser.add_argument("--our", choices=("script", "pin"), default="script",
-                        help="our side's operational layer: the script chain (the self-play zero) or a pinned deployment that makes no choice; run both at one seed and subtract to read the resolution")
+    parser.add_argument("--our", choices=("script", "pin", "learnt"), default="script",
+                        help="our side's operational layer: the script chain (the self-play zero), a pinned deployment that makes no choice, or a learnt network read from --load; run any two at one seed and subtract to read what the choice was worth")
+    parser.add_argument("--load", default=None, help="parameters for the learnt arm, read greedily")
+    parser.add_argument("--device", default=None)
     parser.add_argument("--radius", type=float, default=CATCHMENT_RADIUS, help="world units a contest's catchment disc reaches; sized to the engagement standoff so an assaulting squad registers")
     parser.add_argument("--max-seconds", type=int, default=0,
                         help="game time an episode is cut off at, defaulting to the horizon plus the settle and spawn waits and a margin")
