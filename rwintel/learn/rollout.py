@@ -127,12 +127,18 @@ class Rollout:
             if owner is None or (isinstance(key, tuple) and key and key[0] == owner):
                 self.cut(key, tail_value)
 
-    def taint(self, squads: Iterable[int]) -> None:
-        """Marks every decision taken about these squads, in trajectories still open and in trajectories already finished, as one somebody else interfered with."""
+    def taint(self, owner: object, squads: Iterable[int]) -> None:
+        """Marks every decision this owner's instance took about these squads, in trajectories still open and in trajectories already finished, as one somebody else interfered with.
+
+        Scoped to the owner, exactly as cut_all is, and for the same reason. One buffer serves every instance of a run and a trajectory is keyed by (instance, squad); the squad-number pool is identical on every instance, the organisation layer capping squads at eight. Tainting by the bare squad number would reach out of the instance the interference actually happened on and mark every other instance's clean decisions about the same number, dropping them from the update by a factor of the instance count. Matched against the trajectory key's first element, so a trajectory keyed some other way is left alone.
+        """
         touched = set(squads)
         if not touched:
             return
         for trajectory in list(self.done) + list(self.live.values()):
+            key = trajectory.key
+            if not (isinstance(key, tuple) and key and key[0] == owner):
+                continue
             for step in trajectory.steps:
                 if step.squad in touched:
                     step.tainted = True

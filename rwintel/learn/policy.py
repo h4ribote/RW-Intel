@@ -41,13 +41,15 @@ class LearningPolicy(ScriptPolicy):
         """
         learnt = getattr(self, self.layer, None)
         rollout = getattr(learnt, "rollout", None)
+        # Flush this instance's outstanding decisions into the buffer before tainting, not after. The layer's close is where the decision each squad was still owed payment for is finally added; run after the taint, those freshly added steps escape it, so the last decision about an interfered squad — a seized or rewritten squad still on the board at the episode's end — would enter the update untainted while the decisions before it were dropped.
+        if hasattr(learnt, "close"):
+            learnt.close()
         if rollout is not None:
             for commander in self.outside:
                 touched = getattr(getattr(commander, "log", None), "touched", None)
                 if touched:
-                    rollout.taint(touched)
-        if hasattr(learnt, "close"):
-            learnt.close()
+                    # This instance only. The buffer is shared across instances and keyed by (instance, squad); tainting by the bare squad number would drop every other instance's clean decisions about the same number.
+                    rollout.taint(learnt.instance, touched)
 
 
 def learning_arm(layer: str, decider_for: Callable[[object], object],

@@ -362,15 +362,20 @@ def test_a_finished_errand_and_a_cut_off_one_are_scored_differently():
 
 
 def test_decisions_about_a_squad_somebody_interfered_with_are_not_learnt_from():
-    """The design's rule: praising a policy for what a person's squad achieved, or blaming it for what a person's squad lost, teaches the wrong thing. Marking happens late because which squads were interfered with is not known when the decision was taken."""
+    """The design's rule: praising a policy for what a person's squad achieved, or blaming it for what a person's squad lost, teaches the wrong thing. Marking happens late because which squads were interfered with is not known when the decision was taken.
+
+    Scoped to the instance the interference happened on. One buffer serves every instance of a run and each keys its trajectories by its own (instance, squad); the squad-number pool is identical on every instance, so tainting by the bare number would drop every other instance's clean decisions about the same number. Here instance 0's squad 1 is interfered with, and instance 1's squad 1 — a different trajectory that happens to reuse the number — must survive.
+    """
     rollout = Rollout()
     for index in range(3):
-        rollout.add("a", Step(state=[0.0], action=0, mask=[1.0], squad=0, done=index == 2))
-        rollout.add("b", Step(state=[0.0], action=0, mask=[1.0], squad=1, done=index == 2))
-    rollout.taint([1])
+        rollout.add((0, 0), Step(state=[0.0], action=0, mask=[1.0], squad=0, at_ms=0, done=index == 2))
+        rollout.add((0, 1), Step(state=[0.0], action=0, mask=[1.0], squad=1, at_ms=1, done=index == 2))
+        rollout.add((1, 1), Step(state=[0.0], action=0, mask=[1.0], squad=1, at_ms=2, done=index == 2))
+    rollout.taint(0, [1])
     kept = rollout.drain()
-    assert {step.squad for step in kept} == {0}
-    assert len(kept) == 3
+    # Tagged by at_ms: 0 is instance 0's clean squad 0, 1 is instance 0's interfered squad 1, 2 is instance 1's clean squad 1.
+    assert sorted(step.at_ms for step in kept) == [0, 0, 0, 2, 2, 2]
+    assert all(step.at_ms != 1 for step in kept)
 
 
 def test_a_trajectory_that_is_still_running_is_left_alone_by_a_drain():
