@@ -319,21 +319,46 @@ def test_a_squad_destroyed_under_contract_is_the_worst_outcome_of_all():
 
 
 def test_the_operational_layer_is_paid_for_the_ground_its_orders_named():
+    """The dense term is per-squad and region-specific: a squad is paid the priority-weighted domination of the one region its contract named, so the reward moves when that region does. That this was a single global figure written into every squad's step was what made the operational gradient dead."""
     class _Orders:
         posture = 0
         priorities = {1: 1.0}
         offensive = True
         loss_allowance = 2000.0
 
+    squad = _squad(id=0)  # its contract names region 1
     reward = OperationalReward()
     losing = _view([], [_region(1, ours=100.0, theirs=900.0)])
     winning = _view([], [_region(1, ours=900.0, theirs=100.0)])
-    reward.step(losing, _Orders(), [])
-    assert reward.step(winning, _Orders(), []).reward > 0.0
+    reward.step(squad, losing, _Orders())  # opens the mission on the losing board
+    assert reward.step(squad, winning, _Orders()).reward > 0.0  # the region swung our way
 
     reward.reset()
-    reward.step(winning, _Orders(), [])
-    assert reward.step(losing, _Orders(), []).reward < 0.0
+    reward.step(squad, winning, _Orders())
+    assert reward.step(squad, losing, _Orders()).reward < 0.0
+
+
+def test_two_operational_squads_on_different_regions_are_paid_differently():
+    """The whole point of making the operational reward per-squad: a global figure paid every squad the same number, so the advantage barely depended on which region a squad was sent to. Now, on one board, a squad contracted to a region going our way and one contracted to a region going theirs are paid opposite signs."""
+    class _Orders:
+        posture = 0
+        priorities = {1: 1.0, 2: 1.0}
+        offensive = True
+        loss_allowance = 2000.0
+
+    ours = _squad(id=0)  # contract names region 1
+    theirs = _squad(id=1)
+    theirs.contract = TaskContract(squad=1, task=Task.ATTACK, target_region=2,
+                                   stance=Stance.AGGRESSIVE, cost_budget=1000.0,
+                                   deadline_ms=90000, issued_at_ms=20000)
+    reward = OperationalReward()
+    even = _view([], [_region(1, ours=500.0, theirs=500.0), _region(2, ours=500.0, theirs=500.0)])
+    swung = _view([], [_region(1, ours=900.0, theirs=100.0), _region(2, ours=100.0, theirs=900.0)])
+    reward.step(ours, even, _Orders())
+    reward.step(theirs, even, _Orders())
+    held_ours = reward.step(ours, swung, _Orders()).reward     # region 1 went our way
+    held_theirs = reward.step(theirs, swung, _Orders()).reward  # region 2 went theirs
+    assert held_ours > 0.0 > held_theirs
 
 
 # ---- the buffers --------------------------------------------------------------------------
@@ -764,27 +789,74 @@ def test_an_operational_squad_that_leaves_the_board_is_cut_rather_than_ended():
 
     Marking it done would bootstrap from nought and assert the world ended where a squad turned over, which a routine merge of a healthy squad does several times a match. That would teach the critic that the states before every merge are worth nothing from here, corrupting the baseline the operational advantage of every other squad is taken against — the one thing a benign merge must leave untouched.
     """
-    class _WholeBoardReward:
-        def step(self, view, orders, squads):
+    class _PerSquadReward:
+        def step(self, squad, view, orders):
             return Outcome(reward=0.1)
+        def forget(self, squad_id):
+            pass
 
     rollout = Rollout()
     layer = LearntOperations(None, None, None, rollout=rollout, instance=0)
-    layer.reward = _WholeBoardReward()
+    layer.reward = _PerSquadReward()
+    # Squad 1 has a decision already accruing in the buffer from an earlier period, plus one still pending.
+    rollout.add((0, 1), Step(state=[0.0], action=0, mask=[1.0], value=0.7, reward=0.05, squad=1))
     layer.pending[0] = Step(state=[0.0], action=0, mask=[1.0], value=0.4, squad=0)
     layer.pending[1] = Step(state=[0.0], action=0, mask=[1.0], value=0.7, squad=1)
 
     # Squad 0 is still on the board this period; squad 1 has left it.
     layer._settle(None, None, [_squad(id=0, contract=False)])
 
-    # The squad still present keeps a live trajectory that goes on accruing; the one that left is cut, not finished, and its last decision bootstraps from its own value rather than from nought.
+    # The squad still present is paid and keeps a live trajectory that goes on accruing; the one that left has its accrued trajectory cut, not finished, so its last decision bootstraps from its own value rather than from nought. A squad off the board cannot be paid from anything, so its still-pending decision is dropped rather than scored against a board it is no longer on.
     assert (0, 0) in rollout.live and not rollout.live[(0, 0)].finished
+    assert rollout.live[(0, 0)].steps[-1].reward == 0.1
     cut, = rollout.done
     step, = cut.steps
     assert not cut.finished and not step.done
     assert cut.tail_value == step.value == 0.7
-    assert step.reward == 0.1
+    assert step.reward == 0.05
     assert not layer.pending
+
+
+def test_finishing_an_operational_errand_pays_its_terminal_net_of_the_last_potential():
+    """The terminal comes from outside — the constructed operations arena at its horizon, which knows the region domination the whole errand is scored on — not from the board. It is paid net of the last shaping term, against a terminal potential of nought, so the shaping over the errand telescopes away and cannot move which policy is best."""
+    class _Orders:
+        priorities = {1: 1.0}
+
+    rollout = Rollout()
+    layer = LearntOperations(None, None, None, rollout=rollout, instance=0)
+    squad = _squad(id=0)
+    view = _view([], [_region(1, ours=100.0, theirs=900.0)])
+    layer.reward.step(squad, view, _Orders())  # opens the mission at potential 1.0 * share(100,900) = 0.1
+    held = layer.reward.missions[squad.id].potential
+    layer.pending[squad.id] = Step(state=[0.0], action=0, mask=[1.0], value=0.5, squad=squad.id)
+
+    layer.finish(squad, 0.6, "dominated")
+    trajectory, = rollout.done
+    step, = trajectory.steps
+    assert trajectory.finished and step.done
+    assert abs(step.reward - (0.6 - held)) < 1e-9
+    assert layer.terminals["dominated"] == 1
+    assert squad.id not in layer.reward.missions
+
+
+def test_a_wiped_operational_squad_takes_its_terminal_on_the_last_step_it_left_behind():
+    """A squad gone between periods has no decision waiting to hang the terminal on: the period that finds it gone takes no decision, and the last one there was has already gone into the buffer as an ordinary step. So the terminal is reached back to that step through the buffer's close-with, exactly as the tactical layer does for a squad wiped between periods."""
+    class _Orders:
+        priorities = {1: 1.0}
+
+    rollout = Rollout()
+    layer = LearntOperations(None, None, None, rollout=rollout, instance=0)
+    squad = _squad(id=0)
+    view = _view([], [_region(1, ours=100.0, theirs=900.0)])
+    layer.reward.step(squad, view, _Orders())  # potential 0.1, no pending decision waits
+    rollout.add((0, squad.id), Step(state=[0.0], action=0, mask=[1.0], value=0.5, squad=squad.id))
+
+    layer.finish(squad, 0.6, "wiped")
+    trajectory, = rollout.done
+    step, = trajectory.steps
+    assert trajectory.finished and step.done
+    assert abs(step.reward - (0.6 - 0.1)) < 1e-9
+    assert layer.terminals["wiped"] == 1
 
 
 def test_a_layer_built_with_a_discount_pays_its_shaping_at_that_discount():

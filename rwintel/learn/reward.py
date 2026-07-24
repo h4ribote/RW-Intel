@@ -12,7 +12,7 @@ The potentials are written in shares rather than in credits for the same reason 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Optional, Tuple
 
 from ..wire import Status
 from ..control.policy.contracts import SquadRecord
@@ -45,12 +45,6 @@ OVERSPEND_PENALTY = 0.5
 #:
 #: This is the figure for an errand that is a fragment of a longer match. A constructed fight is not that — it is one errand from beginning to end, over inside a minute — and what it is discounted at is handed in rather than read from here. See the fight-scoped figures in the rollout.
 DISCOUNT = 0.99
-
-#: What the operational potential is made of: how much of what the strategic layer said it wanted is actually being stood on, how far ahead our army is, and how much of the allowance has gone.
-PRIORITY_WEIGHT = 0.5
-EDGE_WEIGHT = 0.4
-ALLOWANCE_WEIGHT = 0.1
-
 
 def _share(part: float, against: float) -> float:
     total = part + against
@@ -173,44 +167,66 @@ class TacticalReward:
 
 
 class OperationalReward:
-    """Pays the operational layer for meeting the strategic layer's orders.
+    """Pays the operational layer for meeting the strategic layer's orders, one squad at a time.
 
-    Three things are in the potential and the match is not one of them. The design gives the terminal result of the match to the strategic layer alone, and a layer that could see it would be learning to win rather than learning to carry out the orders it was given — which sounds like an improvement until the strategic layer is changed and everything below it has to be learnt again. What is here instead is the strategic layer's own statement of what it wants: which regions it called valuable, how far ahead the army is, and how much of the loss allowance has gone.
+    The match is not in the potential. The design gives the terminal result of the match to the strategic layer alone, and a layer that could see it would be learning to win rather than to carry out the orders it was given — which sounds like an improvement until the strategic layer is changed and everything below it has to be learnt again. What is here instead is the strategic layer's own statement of what it wants: how much of the ground it called valuable is being stood on.
+
+    Per squad, and region-specific, because a single global board figure written identically into every squad's step was the disease. The per-decision advantage barely depended on which region a squad was sent to, so only the entropy bonus had a consistent gradient and the policy spread toward uniform while the return sat still: a dead gradient. The potential of a decision is now the priority-weighted domination of the one region that decision's contract named, so a squad sent to a region it took and a squad sent to one it lost are paid differently, and the shaping already points where the choice does. Keyed by the contract's issue time exactly as the tactical layer's errand is, so a squad handed a new region begins a fresh mission and the two are not run into one trajectory.
+
+    There is no status terminal here. What ends an operational errand — the region taken, the deadline past — is not read from the board and paid the way the tactical layer's is; the constructed arena that this per-squad form exists for pays a region-domination terminal from outside through `finish`, and a match pays none at all (the match result is the strategic layer's). So `step` only ever shapes and renews, and `close`/`ended` are here for the outside terminal to telescope against.
     """
 
-    def __init__(self) -> None:
-        self.potential: Optional[float] = None
-        self.spent = 0.0
+    def __init__(self, discount: float = DISCOUNT) -> None:
+        self.missions: Dict[int, _Mission] = {}
+        # The factor the shaping telescopes with, which has to be the one the returns are discounted at or the shaping leaves a residue and stops being harmless. An argument rather than the constant for the same reason the tactical layer's is: a match discounts an operational errand as a fragment of itself, while the constructed arena is one errand from end to end and discounts it at nothing.
+        self.discount = discount
+
+    def forget(self, squad_id: int) -> None:
+        self.missions.pop(squad_id, None)
+
+    def ended(self, squad_id: int) -> bool:
+        """Whether this squad's errand has already been paid its terminal, which a caller ending errands from outside asks before paying another."""
+        mission = self.missions.get(squad_id)
+        return mission is not None and mission.ended
+
+    def close(self, squad_id: int) -> float:
+        """Hands back the potential this squad's errand was last valued at and forgets the errand, so a caller ending it from outside can pay the shaping's last term itself against a terminal potential of nought. Nought when nothing is held."""
+        mission = self.missions.pop(squad_id, None)
+        return mission.potential if mission is not None else 0.0
 
     def reset(self) -> None:
-        self.potential = None
-        self.spent = 0.0
+        self.missions.clear()
 
-    def step(self, view: WorldView, orders, squads: Sequence[SquadRecord]) -> Outcome:
-        potential = self._potential(view, orders, squads)
-        if self.potential is None:
-            self.potential = potential
+    def step(self, squad: SquadRecord, view: WorldView, orders) -> Outcome:
+        contract = squad.contract
+        if contract is None:
+            self.forget(squad.id)
             return Outcome()
-        reward = DISCOUNT * potential - self.potential
-        self.potential = potential
+
+        mission = self.missions.get(squad.id)
+        if mission is None or mission.issued_at_ms != contract.issued_at_ms:
+            # A fresh contract is a fresh errand. The potential is taken now and paid from the next period, so the step that merely received the contract is not paid for the board it arrived on.
+            replaced = mission is not None
+            mission = _Mission(issued_at_ms=contract.issued_at_ms,
+                               potential=self._potential(squad, view, orders))
+            self.missions[squad.id] = mission
+            return Outcome(renewed=replaced)
+
+        if mission.ended:
+            return Outcome()
+
+        potential = self._potential(squad, view, orders)
+        reward = self.discount * potential - mission.potential
+        mission.potential = potential
         return Outcome(reward=reward)
 
-    def _potential(self, view: WorldView, orders, squads: Sequence[SquadRecord]) -> float:
-        priorities = orders.priorities if orders is not None else {}
-        wanted = sum(priorities.values())
-        covered = 0.0
-        for region in view.regions:
-            priority = priorities.get(region.id, 0.0)
-            if priority > 0:
-                covered += priority * _share(region.our_value, region.enemy_value)
-        coverage = covered / wanted if wanted > 0 else 0.5
-
-        ours = sum(s.value for s in view.fighters)
-        theirs = sum(s.value for s in view.enemies)
-        edge = _share(ours, theirs)
-
-        allowance = orders.loss_allowance if orders is not None else 0.0
-        losses = sum(squad.losses for squad in squads)
-        spent = min(1.0, losses / allowance) if allowance > 0 else 0.0
-
-        return PRIORITY_WEIGHT * coverage + EDGE_WEIGHT * edge + ALLOWANCE_WEIGHT * (1.0 - spent)
+    def _potential(self, squad: SquadRecord, view: WorldView, orders) -> float:
+        contract = squad.contract
+        if contract is None:
+            return 0.0
+        region = view.region(contract.target_region)
+        if region is None:
+            return 0.0
+        # The priority the strategic layer put on the region this squad is contracted to, times how much of that region is ours. A region the strategic layer did not ask for carries no priority and so no shaping, which is the point: the layer is paid for meeting the orders, not for holding ground nobody wanted.
+        priority = orders.priorities.get(region.id, 0.0) if orders is not None else 0.0
+        return priority * _share(region.our_value, region.enemy_value)

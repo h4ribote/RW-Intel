@@ -155,13 +155,16 @@ class LearntOperations(Operations):
     """The operational layer with the choice of where and what taken from a decider."""
 
     def __init__(self, session, catalogue, decider, rollout: Optional[Rollout] = None,
-                 instance: int = -1) -> None:
+                 instance: int = -1, discount: float = REWARD_DISCOUNT) -> None:
         super().__init__(session, catalogue)
         self.decider = decider
         self.rollout = rollout
         self.instance = instance
-        self.reward = OperationalReward()
+        # The discount is handed in for the same reason the tactical layer's is: a match discounts an operational errand as a fragment of itself, while the constructed operations arena is one errand from end to end and discounts it at nothing. Whoever builds the layer knows which case this is.
+        self.reward = OperationalReward(discount=discount)
         self.pending: Dict[int, Step] = {}
+        #: How many errands were closed for each reason, so a run can be asked whether its terminals are firing. An operational errand takes its terminal only from outside, through finish, so this stays empty in a match and fills in the arena.
+        self.terminals: Counter = Counter()
         self._state: List[float] = []
         self._regions: List[float] = []
         self._view: Optional[WorldView] = None
@@ -176,21 +179,51 @@ class LearntOperations(Operations):
         return super().decide(view, orders, squads, reports, game_time_ms)
 
     def _settle(self, view: WorldView, orders: OperationsOrders, squads: Sequence[SquadRecord]) -> None:
-        """Pays the previous period's decisions.
+        """Pays each squad's previous decision from the board that has now arrived, one squad at a time.
 
-        One figure pays all of them, because what the strategic layer asked for is a statement about the whole board and not about any one squad: how much of the ground it called valuable is being stood on, how far ahead the army is, how much of the allowance has gone. Cutting that per squad would need an attribution nothing in the observation supports, and inventing one would be a stronger claim than the measurement can carry.
+        Each decision is paid the shaping of the region its own contract named, not one board-wide figure shared out to all of them. The figure that paid all of them was the disease: what the strategic layer asks for is region by region, and a squad sent to a region it took has to be paid differently from one sent to a region it lost, or the advantage does not depend on the choice and the gradient is dead.
+
+        A squad handed a new contract has begun a different errand and its old trajectory is cut, because advantage estimation would otherwise run what the new errand earned backwards into the decisions of the old, whose potential is measured against different ground. A squad gone from the board — folded into another by the organisation layer, disbanded, or wiped — is cut rather than ended: its last decision is bootstrapped from its own value estimate, as any decision that merely stopped being observed is, not closed against a terminal potential of nought. Marking it done would teach the critic that every state a squad turns over from, a routine merge of a healthy squad included, is worth nothing from here, corrupting the baseline every other squad's advantage is taken against. What ends an operational errand as a terminal comes only from outside, through finish, which the constructed arena calls at the horizon.
         """
         if self.rollout is None:
             return
-        outcome = self.reward.step(view, orders, squads)
         present = {squad.id for squad in squads}
-        for squad_id, step in list(self.pending.items()):
-            step.reward = outcome.reward
-            self.rollout.add((self.instance, squad_id), step)
-            if squad_id not in present:
-                # The squad is gone — folded into another by the organisation layer, disbanded, or wiped — but the reward is a statement about the whole board, which goes on without it, so the continuation is not nothing. Cut the trajectory rather than ending it: its last decision is bootstrapped from its own value estimate, as any decision that stopped being observed is, not closed against a terminal potential of nought. Marking it done would bootstrap from nought and teach the critic that every state a squad turns over from — a routine merge of a healthy squad included — is worth nothing from here, which corrupts the baseline every other squad's advantage is taken against.
-                self.rollout.cut((self.instance, squad_id))
-        self.pending.clear()
+        for squad in squads:
+            outcome = self.reward.step(squad, view, orders)
+            step = self.pending.pop(squad.id, None)
+            if step is not None:
+                step.reward = outcome.reward
+                step.done = outcome.done
+                self.rollout.add((self.instance, squad.id), step)
+            if outcome.renewed:
+                self.rollout.cut((self.instance, squad.id))
+        for squad_id in [key for key in self.pending if key not in present]:
+            self.pending.pop(squad_id, None)
+            self.rollout.cut((self.instance, squad_id))
+            self.reward.forget(squad_id)
+
+    def finish(self, squad: SquadRecord, terminal: float, reason: str) -> None:
+        """Ends this squad's errand from outside, paying the decision still waiting on it as the last of its trajectory. Structurally the tactical layer's finish: whoever runs the contest knows when it is over, the layer only sees periods.
+
+        The payment is the terminal handed in plus the last shaping term taken against a terminal potential of nought, so the shaping over the errand telescopes away and cannot change which policy is best. A squad whose errand already took its terminal has its still-waiting decision cut instead of paid, and a squad gone between periods has no decision waiting, so the terminal is added to the last step there was through the buffer's close-with — exactly the three cases the tactical finish handles.
+        """
+        if self.reward.ended(squad.id):
+            self.pending.pop(squad.id, None)
+            if self.rollout is not None:
+                self.rollout.cut((self.instance, squad.id))
+            self.reward.forget(squad.id)
+            return
+        payment = terminal + (0.0 - self.reward.close(squad.id))
+        step = self.pending.pop(squad.id, None)
+        if step is None:
+            if self.rollout is not None and self.rollout.close_with((self.instance, squad.id), payment):
+                self.terminals[reason] += 1
+            return
+        step.reward = payment
+        step.done = True
+        self.terminals[reason] += 1
+        if self.rollout is not None:
+            self.rollout.add((self.instance, squad.id), step)
 
     def _settled(self, view: WorldView, orders, squad: SquadRecord, chosen, avoid):
         """Whatever was chosen, unchanged.
