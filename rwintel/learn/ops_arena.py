@@ -27,8 +27,8 @@ from ..control.policy.tactics import Tactics
 from ..control.policy.view import WorldView, build as build_view
 from .arena import Arena, MAX_UNITS, MINIMUM_FORCE, OURS, SETTLE_MS, SPAWN_WAIT_MS, THEIRS
 
-#: How long an episode runs the two chains before it is scored, in game milliseconds. Long enough for a staged squad to march to a contest and fight the garrison, short enough that survivors do not wander into a catchment they were not sent to. Measured like `ARENA_SECONDS`: swept as arms and picked by the resolution gate.
-HORIZON_MS = 120000
+#: How long an episode runs the two chains before it is scored, in game milliseconds. Long enough for a staged squad to march to a contest and fight the garrison, short enough that survivors do not wander into a catchment they were not sent to. Measured: at 120 s the staged squads have not resolved the contests — they survive but are still short of the garrisons — and the score is decided by the mirror garrisons alone, which cancel, giving a trivial self-play zero. At 300 s the squads reach and contest, the domination shares spread, and the choice moves the score. Swept as arms and picked by the resolution gate.
+HORIZON_MS = 300000
 
 #: Assorted-doctrine squads staged per side.
 OUR_SQUADS = 4
@@ -43,8 +43,8 @@ SQUAD_VALUE = (1500.0, 4500.0)
 GARRISON_VALUE = (0.4, 1.2)
 GARRISON_SCALE = 3000.0
 
-#: Radius of the disc a contest is scored over, in world units. Inside the region merge distance of 400 so a catchment is smaller than a region, and its diameter is smaller than the least separation of two contest points, so the discs never overlap and each scores its own ground. The catchment is congruent between a mirror pair by construction, which the map's region buckets are not.
-CATCHMENT_RADIUS = 250.0
+#: Radius of the disc a contest is scored over, in world units. Sized to the engagement standoff band, because that is where an assaulting squad halts against the garrison: measured, the nearest surviving squad member stopped about 490 units from its contest on Lake and about 280 on the more compact Hills, so a 250-unit disc saw only the garrison and the choice never registered. At 400 the assaulting squads enter the disc, the shares spread off the garrison's nought-or-one, and the choice moves the score. The diameter must stay below the least separation of two contest points so the discs do not overlap, which is what `_draw_pairs` enforces — and at 400 that separation is hard enough to place on a compact map that a third of episodes refuse, which is a tuning cost of the standoff-sized disc, not a bias (a refused board is never scored).
+CATCHMENT_RADIUS = 400.0
 
 #: How far a contest point sits from the centre, drawn uniformly. Above the merge distance so a pair's two points fall on distinct regions, and its own draw floor keeps every pair of points at least a catchment diameter apart.
 CONTEST_MIN = 350.0

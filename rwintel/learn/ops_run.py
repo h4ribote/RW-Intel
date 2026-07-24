@@ -20,7 +20,7 @@ from ..control.session import EpisodeSettings
 from ..data import AssetPaths
 from ..eval.journal import Journal, default_path
 from ..eval.sampling import Summary
-from .ops_arena import HORIZON_MS, OpsArena
+from .ops_arena import CATCHMENT_RADIUS, HORIZON_MS, OpsArena
 
 log = logging.getLogger(__name__)
 
@@ -108,7 +108,8 @@ def main(argv=None) -> int:
     parser.add_argument("--port", type=int, default=8642)
     parser.add_argument("--instances", type=int, default=1)
     parser.add_argument("--episodes", type=int, default=1)
-    parser.add_argument("--map", default="Lake")
+    parser.add_argument("--map", default="Hills",
+                        help="a symmetric, compact map: the point-reflected layout only stays even where the map's terrain is even under the reflection, and Lake's is not (it self-play-leans about +0.06 while Hills holds nought)")
     parser.add_argument("--opponents", type=int, default=1)
     parser.add_argument("--difficulty", type=int, default=1)
     parser.add_argument("--credits", type=int, default=0)
@@ -117,7 +118,7 @@ def main(argv=None) -> int:
                         help="game seconds the two chains run before the board is scored")
     parser.add_argument("--squads", type=int, default=4, help="assorted-doctrine squads staged per side")
     parser.add_argument("--pairs", type=int, default=2, help="contested offset pairs, so twice this many scored regions")
-    parser.add_argument("--radius", type=float, default=250.0, help="world units a contest's catchment disc reaches")
+    parser.add_argument("--radius", type=float, default=CATCHMENT_RADIUS, help="world units a contest's catchment disc reaches; sized to the engagement standoff so an assaulting squad registers")
     parser.add_argument("--max-seconds", type=int, default=0,
                         help="game time an episode is cut off at, defaulting to the horizon plus the settle and spawn waits and a margin")
     parser.add_argument("--assets", default=None)

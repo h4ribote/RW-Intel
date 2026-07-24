@@ -253,7 +253,8 @@ def test_the_mirror_layout_pairs_every_point_and_equalises_the_garrisons():
 def test_the_synthesized_priorities_are_invariant_under_the_mirror_map():
     """A weight drawn once per unordered mirror pair and set on both of its regions, so the priority a region carries equals the priority its mirror carries. Any unpaired or mismatched weight is an asymmetric board statement and a direct lean; drawing region by region instead would re-randomise the second member of a pair."""
     session = _Session(_grid())
-    arena = _arena(session=session, seed=3, sites=_CORNERS)
+    # A seed whose draw places both contest pairs on this grid at the default catchment radius; the invariance under test does not depend on which seed, only on both pairs being placed.
+    arena = _arena(session=session, seed=7, sites=_CORNERS)
     arena._deploy(_observation(slot=0), Action(), 0)
     assert not arena.refused
 
