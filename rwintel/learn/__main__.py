@@ -231,6 +231,25 @@ def _serve(arguments, arms, episode: EpisodeSettings, journal) -> list:
 
 # ---- the tactical run ---------------------------------------------------------------------
 
+#: Value-head warmup for a run that loaded parameters and was not told how much to warm. A policy loaded from somewhere — an imitation of the handwritten layer, an earlier run — arrives without its critic, so its value head is random and every advantage the first thousands of steps produce is noise the size of the returns; a policy gradient taken against that dismantles the policy before it has been paid for anything. The successful reinforced runs warmed for this many, and forgetting the flag was a way to reinforce from a random critic and lose the run without anything saying so.
+WARMUP_FROM_LOAD = 5
+
+
+def _warmup(arguments) -> int:
+    """How many updates fit the value head alone before the policy is let move.
+
+    Obeyed exactly when given, 0 included, since a run that means to reinforce straight from a loaded critic has to be able to say so. Left unset it is the protective default: a warmup when parameters were loaded, because their critic did not come with them, and none when starting from a fresh policy, where the critic is as new as the policy and there is nothing to protect.
+    """
+    if arguments.warmup is not None:
+        return arguments.warmup
+    chosen = WARMUP_FROM_LOAD if arguments.load else 0
+    if chosen:
+        log.info("warming the value head for %d update(s): parameters were loaded and no --warmup was given, "
+                 "so the loaded critic is caught up before the policy moves; pass --warmup 0 to reinforce from it straight away",
+                 chosen)
+    return chosen
+
+
 def train_tactics(arguments) -> int:
     from .net import TacticalNet
 
@@ -247,7 +266,7 @@ def train_tactics(arguments) -> int:
              arguments.score, discount, trace)
 
     rollout = Rollout(discount=discount, trace=trace)
-    optimiser = Optimiser(net, device=device, warmup=arguments.warmup,
+    optimiser = Optimiser(net, device=device, warmup=_warmup(arguments),
                           **_given(entropy_weight=arguments.entropy, learning_rate=arguments.learning_rate))
     batcher = tactical_batcher(net, device=device)
     trainer = Trainer(rollout, optimiser, **_given(batch=arguments.batch))
@@ -595,7 +614,7 @@ def train_operations(arguments) -> int:
              device, OPERATIONAL_SIZE, sum(p.numel() for p in net.parameters()))
 
     rollout = Rollout()
-    optimiser = Optimiser(net, device=device, two_headed=True, warmup=arguments.warmup,
+    optimiser = Optimiser(net, device=device, two_headed=True, warmup=_warmup(arguments),
                           **_given(entropy_weight=arguments.entropy, learning_rate=arguments.learning_rate))
     batcher = operational_batcher(net, device=device)
     trainer = Trainer(rollout, optimiser, **_given(batch=arguments.batch))
@@ -777,10 +796,12 @@ def main(argv=None) -> int:
                              "reaches every decision taken in it. The shaping telescopes at whatever this is")
     parser.add_argument("--trace", type=float, default=None,
                         help="how far the advantage estimator trades bias against variance")
-    parser.add_argument("--warmup", type=int, default=0,
+    parser.add_argument("--warmup", type=int, default=None,
                         help="updates at the start that fit the value head alone, holding the trunk and the "
                              "policy still. Meant for a run started from imitated parameters, whose critic "
-                             "did not come with them")
+                             "did not come with them. Left unset it defaults to a short warmup when --load "
+                             "supplies parameters and to none when starting from a fresh policy; pass it "
+                             "explicitly, 0 included, to override that")
     parser.add_argument("--teacher", default=None,
                         help="decisions to clone from, as written by a collecting run, defaulting to "
                              "local/teacher.jsonl")
