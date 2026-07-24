@@ -21,7 +21,7 @@ from .__main__ import _device, _given, _load, _save, _serve, _warmup
 from .deciders import NetworkOperations, operational_batcher
 from .layers import LearntOperations
 from .net import OperationalNet
-from .ops_arena import CATCHMENT_RADIUS, HORIZON_MS, OpsArena
+from .ops_arena import CATCHMENT_RADIUS, CREDIT, CREDITS, GARRISON_SCALE, HORIZON_MS, OpsArena
 from .ops_run import _arena_seed, pool, report
 from .rollout import FIGHT_DISCOUNT, FIGHT_TRACE, Rollout
 from .train import Trainer
@@ -50,9 +50,11 @@ def train(arguments) -> int:
                                 rollout, session.instance, discount=FIGHT_DISCOUNT)
 
     def arm(session) -> OpsArena:
-        return OpsArena(session, operations=learnt, seed=_arena_seed(arguments.seed, session),
+        # One arm trains, so the board advances with every episode.
+        return OpsArena(session, operations=learnt, seed=_arena_seed(arguments.seed, session, 1),
                         horizon_ms=arguments.horizon * 1000, our_squads=arguments.squads,
-                        catchment_radius=arguments.radius, contest_pairs=arguments.pairs)
+                        catchment_radius=arguments.radius, contest_pairs=arguments.pairs,
+                        credit=arguments.credit, garrison_scale=arguments.garrison)
 
     episode = EpisodeSettings(
         map=arguments.map, opponents=arguments.opponents, difficulty=arguments.difficulty,
@@ -71,8 +73,8 @@ def train(arguments) -> int:
     _save(net, arguments.save)
     if report_ is not None:
         log.info("last update: %s", report_.as_dict())
-    # The learnt side's own domination over the horizon, as a run of it — not a duel, which ops_run does against the pin and the script. A rising figure over a run is the layer learning to dominate; the honest comparison is the separate paired duel.
-    report(pool(sessions))
+    # The learnt side's own domination over the horizon, as a run of it — not a duel, which ops_run does against the pin and the script. A rising figure over a run is the layer learning to dominate; the honest comparison is the separate paired duel, and it is on boards this run never trained on.
+    report(pool(sessions), "learnt")
     return 0
 
 
@@ -96,6 +98,10 @@ def main(argv=None) -> int:
     parser.add_argument("--squads", type=int, default=4)
     parser.add_argument("--pairs", type=int, default=2)
     parser.add_argument("--radius", type=float, default=CATCHMENT_RADIUS)
+    parser.add_argument("--garrison", type=float, default=GARRISON_SCALE,
+                        help="credits a contested region's defender is drawn out of, which is what decides whether taking ground pays at all")
+    parser.add_argument("--credit", choices=CREDITS, default=CREDIT,
+                        help="what a squad's terminal is: the whole domination of the region its contract named, which every squad sent there takes in full, or only the part its own surviving units account for")
     parser.add_argument("--max-seconds", type=int, default=0)
     parser.add_argument("--device", default=None)
     parser.add_argument("--load", default=None, help="parameters to start from, an imitation of the script or an earlier run")

@@ -817,24 +817,81 @@ def test_an_operational_squad_that_leaves_the_board_is_cut_rather_than_ended():
     assert not layer.pending
 
 
+def test_shaping_earned_in_a_period_with_no_decision_waiting_is_carried_and_not_dropped():
+    """A layer does not take a decision about every squad every period — the inherited operational rule leaves a squad worn below the health it will task at all out of the decision, with its contract still standing — while the reward advances that squad's potential regardless.
+
+    The shaping only means anything because it telescopes: what an errand returns is its terminal less the potential it opened at, and only if every increment in between reached a step. A period whose increment was computed and thrown away punches a hole in that sum, and the return of the errand is then wrong by whatever the board did over that period. So an unpaid increment is carried to the next decision that is paid, and to the terminal if none is.
+    """
+    class _Ticking:
+        """A reward that pays a tenth every period, so what arrived and what was paid can be told apart by counting."""
+
+        def step(self, squad, view, orders):
+            return Outcome(reward=0.1)
+
+        def forget(self, squad_id):
+            pass
+
+        def ended(self, squad_id):
+            return False
+
+        def close(self, squad_id):
+            return 0.0
+
+    rollout = Rollout()
+    layer = LearntOperations(None, None, None, rollout=rollout, instance=0)
+    layer.reward = _Ticking()
+    squad = _squad(id=0)
+
+    # Three periods in which the layer took no decision about this squad, then one in which it did.
+    for _ in range(3):
+        layer._settle(None, None, [squad])
+    assert abs(layer.owed[squad.id] - 0.3) < 1e-9
+    layer.pending[squad.id] = Step(state=[0.0], action=0, mask=[1.0], value=0.5, squad=squad.id)
+    layer._settle(None, None, [squad])
+
+    paid, = rollout.live[(0, squad.id)].steps
+    assert abs(paid.reward - 0.4) < 1e-9, "the periods without a decision were dropped instead of carried"
+    assert squad.id not in layer.owed
+
+    # And what is still carried when the errand ends from outside goes into the terminal payment, which with no decision waiting is reached back to the step already in the buffer and added to what it holds.
+    for _ in range(2):
+        layer._settle(None, None, [squad])
+    layer.finish(squad, 0.6, "horizon")
+    trajectory, = rollout.done
+    assert abs(trajectory.steps[-1].reward - (0.4 + 0.6 + 0.2)) < 1e-9
+    assert not layer.owed
+
+
 def test_finishing_an_operational_errand_pays_its_terminal_net_of_the_last_potential():
-    """The terminal comes from outside — the constructed operations arena at its horizon, which knows the region domination the whole errand is scored on — not from the board. It is paid net of the last shaping term, against a terminal potential of nought, so the shaping over the errand telescopes away and cannot move which policy is best."""
+    """The terminal comes from outside — the constructed operations arena at its horizon, which knows the region domination the whole errand is scored on — not from the board. What the errand returns has to be that terminal and nothing else: the shaping cancels over the errand, both its last term and its first.
+
+    Cancelling only the last one is what the code used to do, and it left the opening potential standing in every return. That residue is not a constant — the opening potential is read off the region the decision itself named — so it was a term of the action: a squad sent at ground the enemy held opened near the bottom and kept its whole terminal, while a squad sent to hold ground already ours opened near the top and had that much taken away. The arena's score says the second is worth half the region's priority and the first is worth nothing, so the signal was pointed the other way round from the quantity being measured.
+
+    Here the board moves under the errand, so the shaping is not zero, and the sum of everything the errand was paid still has to come to the terminal exactly.
+    """
     class _Orders:
         priorities = {1: 1.0}
 
     rollout = Rollout()
-    layer = LearntOperations(None, None, None, rollout=rollout, instance=0)
+    # Built at the discount the arena uses, which is the only place a terminal is paid at all: an arena contest is one whole bounded errand and is discounted at nothing, and it is at nothing that the shaping cancels exactly.
+    layer = LearntOperations(None, None, None, rollout=rollout, instance=0, discount=1.0)
     squad = _squad(id=0)
-    view = _view([], [_region(1, ours=100.0, theirs=900.0)])
-    layer.reward.step(squad, view, _Orders())  # opens the mission at potential 1.0 * share(100,900) = 0.1
-    held = layer.reward.missions[squad.id].potential
+    orders = _Orders()
+    # Opens at 1.0 * (share(100, 900) - a half) = -0.4, a region we are being beaten in.
+    layer.reward.step(squad, _view([], [_region(1, ours=100.0, theirs=900.0)]), orders)
+    assert abs(layer.reward.missions[squad.id].opening - -0.4) < 1e-9
+
+    # Two periods in which the region comes our way, each paying its own shaping term.
+    for ours, theirs in ((500.0, 500.0), (900.0, 100.0)):
+        layer.pending[squad.id] = Step(state=[0.0], action=0, mask=[1.0], value=0.5, squad=squad.id)
+        layer._settle(_view([], [_region(1, ours=ours, theirs=theirs)]), orders, [squad])
     layer.pending[squad.id] = Step(state=[0.0], action=0, mask=[1.0], value=0.5, squad=squad.id)
 
     layer.finish(squad, 0.6, "dominated")
     trajectory, = rollout.done
-    step, = trajectory.steps
-    assert trajectory.finished and step.done
-    assert abs(step.reward - (0.6 - held)) < 1e-9
+    assert trajectory.finished and trajectory.steps[-1].done
+    assert abs(sum(step.reward for step in trajectory.steps) - 0.6) < 1e-9, (
+        "the errand returned something other than its terminal, so the shaping did not cancel")
     assert layer.terminals["dominated"] == 1
     assert squad.id not in layer.reward.missions
 
@@ -848,14 +905,16 @@ def test_a_wiped_operational_squad_takes_its_terminal_on_the_last_step_it_left_b
     layer = LearntOperations(None, None, None, rollout=rollout, instance=0)
     squad = _squad(id=0)
     view = _view([], [_region(1, ours=100.0, theirs=900.0)])
-    layer.reward.step(squad, view, _Orders())  # potential 0.1, no pending decision waits
+    # Opens the mission at 1.0 * (share(100, 900) - a half) = -0.4, the priority-weighted domination of a region we are being beaten in.
+    layer.reward.step(squad, view, _Orders())
     rollout.add((0, squad.id), Step(state=[0.0], action=0, mask=[1.0], value=0.5, squad=squad.id))
 
     layer.finish(squad, 0.6, "wiped")
     trajectory, = rollout.done
     step, = trajectory.steps
     assert trajectory.finished and step.done
-    assert abs(step.reward - (0.6 - 0.1)) < 1e-9
+    # Nothing moved under this errand, so its shaping is nought either way and the return is the terminal alone.
+    assert abs(step.reward - 0.6) < 1e-9
     assert layer.terminals["wiped"] == 1
 
 

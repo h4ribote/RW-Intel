@@ -89,9 +89,11 @@ def _share(part: float, against: float) -> float:
 class Operations:
     """The operational layer. Reads the board, the strategic orders, the squads the organisation layer has formed and what the tactical layer reports back, and answers with contracts and with what it could not do for want of strength."""
 
-    def __init__(self, session, catalogue: Catalogue) -> None:
+    def __init__(self, session, catalogue: Catalogue, crowding: float = CROWDING_COST) -> None:
         self.session = session
         self.catalogue = catalogue
+        #: How much our own strength already standing in a region discounts it as a target. Held on the instance rather than read from the constant so that the one term which decides whether the layer spreads or masses can be turned off and measured, which is what the operations arena's massed arm does: with it at nought the same ladder sends every squad at the single best region, and the difference between the two runs on the same boards is what the spreading rule is worth. Nothing in a match changes it; it is a knob for the instrument.
+        self.crowding = crowding
         #: Squads a human held as of the last decision. A squad coming back is left alone for one period, because its composition and its position are both unknown to the command chain until it has been seen once under machine command again.
         self.human_held: set = set()
 
@@ -201,7 +203,7 @@ class Operations:
         def score(region: RegionState) -> float:
             return (self._priority(orders, region)
                     - self._reach(region)
-                    - CROWDING_COST * _share(region.our_value, squad.value))
+                    - self.crowding * _share(region.our_value, squad.value))
 
         region = max(contested, key=lambda r: (score(r), -r.distance_from_home))
         # Surrounding is what you do when you can afford to spend the time; against odds that are merely even it splits a squad that needs to arrive as one.
@@ -223,7 +225,7 @@ class Operations:
             return (self._priority(orders, region)
                     + RESOURCE_WORTH * region.resources
                     + THREAT_WEIGHT * _share(region.enemy_value, squad.value)
-                    - CROWDING_COST * _share(region.our_value, squad.value)
+                    - self.crowding * _share(region.our_value, squad.value)
                     - self._reach(region))
 
         return Task.DEFEND, max(ours, key=lambda r: (score(r), -r.distance_from_home))

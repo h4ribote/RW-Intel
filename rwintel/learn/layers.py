@@ -42,6 +42,8 @@ class LearntTactics(Tactics):
         self.reward = TacticalReward(status_terminals=status_terminals, discount=discount)
         #: The decision each squad is owed payment for, held until the next period says what it earned.
         self.pending: Dict[int, Step] = {}
+        #: Shaping earned in a period where this squad had no decision waiting to be paid, carried to the next one that has. A layer does not take a decision about every squad every period — the inherited rule skips a squad worn below the health it will task at all, and leaves its contract standing — while the reward advances that squad's potential regardless. Dropped, those periods punch holes in a sum that only means anything because it telescopes: what an errand returns is its terminal less the potential it opened at, and only if every increment in between was paid to something. Carried, the telescope closes again.
+        self.owed: Dict[int, float] = {}
         #: How many errands were closed for each reason, so that a run can be asked whether its terminals are firing at all rather than having it guessed at from the shape of the returns. An errand that never terminates is paid nothing but shaping, and shaping sums to nothing, so a policy learning from trajectories that never close is learning from noise.
         self.terminals: Counter = Counter()
         self._view: Optional[WorldView] = None
@@ -69,17 +71,22 @@ class LearntTactics(Tactics):
             outcome = self.reward.step(squad, view, game_time_ms, killed=killed)
             step = self.pending.pop(squad.id, None)
             if step is not None:
-                step.reward = outcome.reward
+                step.reward = outcome.reward + self.owed.pop(squad.id, 0.0)
                 step.done = outcome.done
                 if outcome.done:
                     self.terminals[outcome.reason] += 1
                 self.rollout.add((self.instance, squad.id), step)
+            else:
+                self.owed[squad.id] = self.owed.get(squad.id, 0.0) + outcome.reward
             if outcome.renewed:
+                # Whatever was carried belonged to the errand being cut, whose potentials are measured against different ground; it cannot be paid into the errand that replaces it.
+                self.owed.pop(squad.id, None)
                 # A contract is the unit of work and so the unit of pay, so a squad handed a different one has begun a different errand and the decisions of the two must not share a trajectory: advantage estimation would otherwise run what the new errand earned backwards into decisions taken for the old. Cut rather than closed, because the errand that was replaced did not fail — it stopped being observed, and its last decision is bootstrapped from its own value estimate as any other unobserved ending is. What that decision is paid is nothing, since the potentials of two contracts are measured against different ground and different allowances and a difference between them is not a shaping term.
                 self.rollout.cut((self.instance, squad.id))
         for squad_id in [key for key in self.pending if key not in present]:
-            # A squad that has left the board between periods cannot be paid from anything, so its last decision is cut off rather than scored.
+            # A squad that has left the board between periods cannot be paid from anything, so its last decision is cut off rather than scored, and anything carried for it goes with the errand.
             self.pending.pop(squad_id, None)
+            self.owed.pop(squad_id, None)
             self.rollout.cut((self.instance, squad_id))
             self.reward.forget(squad_id)
 
@@ -96,11 +103,12 @@ class LearntTactics(Tactics):
         """
         if self.reward.ended(squad.id):
             self.pending.pop(squad.id, None)
+            self.owed.pop(squad.id, None)
             if self.rollout is not None:
                 self.rollout.cut((self.instance, squad.id))
             self.reward.forget(squad.id)
             return
-        payment = terminal + (0.0 - self.reward.close(squad.id))
+        payment = terminal + (0.0 - self.reward.close(squad.id)) + self.owed.pop(squad.id, 0.0)
         step = self.pending.pop(squad.id, None)
         if step is None:
             if self.rollout is not None and self.rollout.close_with((self.instance, squad.id), payment):
@@ -141,6 +149,8 @@ class LearntTactics(Tactics):
         for squad_id, step in list(self.pending.items()):
             self.rollout.add((self.instance, squad_id), step)
         self.pending.clear()
+        # Every errand open here is cut rather than ended, so whatever was carried for it is carried no further.
+        self.owed.clear()
         # This instance's errands only. One buffer serves every instance of a run, and an episode ending here says nothing about the fight another instance is in the middle of.
         self.rollout.cut_all(owner=self.instance)
 
@@ -163,6 +173,8 @@ class LearntOperations(Operations):
         # The discount is handed in for the same reason the tactical layer's is: a match discounts an operational errand as a fragment of itself, while the constructed operations arena is one errand from end to end and discounts it at nothing. Whoever builds the layer knows which case this is.
         self.reward = OperationalReward(discount=discount)
         self.pending: Dict[int, Step] = {}
+        #: Shaping earned in a period where this squad had no decision waiting to be paid, carried to the next one that has, for the reason the tactical layer's ledger of the same name gives. It bites harder here: the inherited operational rule leaves a squad worn below the health it will task at all out of the decision entirely while its contract stands, and the arena wears squads down by construction.
+        self.owed: Dict[int, float] = {}
         #: How many errands were closed for each reason, so a run can be asked whether its terminals are firing. An operational errand takes its terminal only from outside, through finish, so this stays empty in a match and fills in the arena.
         self.terminals: Counter = Counter()
         self._state: List[float] = []
@@ -192,13 +204,18 @@ class LearntOperations(Operations):
             outcome = self.reward.step(squad, view, orders)
             step = self.pending.pop(squad.id, None)
             if step is not None:
-                step.reward = outcome.reward
+                step.reward = outcome.reward + self.owed.pop(squad.id, 0.0)
                 step.done = outcome.done
                 self.rollout.add((self.instance, squad.id), step)
+            else:
+                self.owed[squad.id] = self.owed.get(squad.id, 0.0) + outcome.reward
             if outcome.renewed:
+                # Whatever was carried belonged to the errand being cut, whose potential was measured against different ground.
+                self.owed.pop(squad.id, None)
                 self.rollout.cut((self.instance, squad.id))
         for squad_id in [key for key in self.pending if key not in present]:
             self.pending.pop(squad_id, None)
+            self.owed.pop(squad_id, None)
             self.rollout.cut((self.instance, squad_id))
             self.reward.forget(squad_id)
 
@@ -209,11 +226,12 @@ class LearntOperations(Operations):
         """
         if self.reward.ended(squad.id):
             self.pending.pop(squad.id, None)
+            self.owed.pop(squad.id, None)
             if self.rollout is not None:
                 self.rollout.cut((self.instance, squad.id))
             self.reward.forget(squad.id)
             return
-        payment = terminal + (0.0 - self.reward.close(squad.id))
+        payment = terminal + (0.0 - self.reward.close(squad.id)) + self.owed.pop(squad.id, 0.0)
         step = self.pending.pop(squad.id, None)
         if step is None:
             if self.rollout is not None and self.rollout.close_with((self.instance, squad.id), payment):
@@ -270,6 +288,8 @@ class LearntOperations(Operations):
         for squad_id, step in list(self.pending.items()):
             self.rollout.add((self.instance, squad_id), step)
         self.pending.clear()
+        # Every errand open here is cut rather than ended, so whatever was carried for it is carried no further.
+        self.owed.clear()
         self.rollout.cut_all(owner=self.instance)
         self.reward.reset()
 

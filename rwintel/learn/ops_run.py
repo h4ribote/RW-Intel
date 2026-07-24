@@ -1,10 +1,15 @@
-"""Runs the constructed operations arena, the handwritten operational chain on both sides, and reports the pooled side score.
+"""Runs the constructed operations arena over one or more operational arms and reports what each came to and how they differ board by board.
 
-    python -m rwintel.learn.ops_run --instances 4 --episodes 50 --map Lake
+    python -m rwintel.learn.ops_run --instances 4 --episodes 50 --map Hills
+    python -m rwintel.learn.ops_run --instances 8 --episodes 10 --our script --our pin --our massed --our learnt --load local/ops-arena.pt
 
-Start this first and then the game instances, as with every other runner here. What it measures is the self-play zero: with the script `Operations` on both sides of the mirror board, the side score of the two sides is exact negatives every episode, so a run of many fresh paired episodes must pool the reported side score to nought. A nonzero mean is a board lean the mirror-symmetric draw was supposed to have removed — the operational analogue of the headquarters-in-a-squad bias the fight baseline once carried — and it is the only instrument that can see the leans the within-episode sign check cannot: all-enemy garrisons, the free base polluting the region block, a non-congruent reflected layout, and empty regions reading a half under asymmetric reach. Every one of those is a break in exchange symmetry, and only this mean sees it.
+Start this first and then the game instances, as with every other runner here.
 
-This is the gate the arena must pass before any operational policy measured on it is trusted, exactly as the engagement arena gates on its own script-against-itself baseline. It trains nothing and keeps no trajectories: the script layer is handed no rollout, so with nowhere to record a decision it records none.
+With the script chain alone it measures the self-play zero: the script `Operations` on both sides of the mirror board makes the two sides' side scores exact negatives every episode, so a run of many fresh boards must pool the reported side score to nought. A nonzero mean is a board lean the mirror-symmetric draw was supposed to have removed — the operational analogue of the headquarters-in-a-squad bias the fight baseline once carried — and it is the only instrument that can see the leans the within-episode sign check cannot: all-enemy garrisons, the free base polluting the region block, a non-congruent reflected layout, and empty regions reading a half under asymmetric reach. Every one of those is a break in exchange symmetry, and only this mean sees it. This is the gate the arena must pass before any operational policy measured on it is trusted, exactly as the engagement arena gates on its own script-against-itself baseline.
+
+Given several arms it runs all of them on the same boards. The arms alternate inside each instance and the board is held still until every one of them has played it, so each board is one paired observation across the arms and the run reports every pair's difference itself. That is the honest way to compare two operational policies here, because a board's draw moves the side score by more than the arms differ: one arm's episodes scatter by about 0.11 while the differences being looked for are around 0.04. Running the arms separately and subtracting the means pays for that scatter twice and also has to assume two runs, made at different moments on a machine doing different things, were otherwise alike. Running them together assumes nothing of the sort.
+
+It trains nothing and keeps no trajectories: no layer here is handed a rollout, so with nowhere to record a decision none is recorded.
 """
 
 from __future__ import annotations
@@ -12,9 +17,11 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import sys
-from typing import List, Optional
+from typing import Dict, List, Optional
 
+from ..control.policy.operations import Operations
 from ..control.server import Server, ServerSettings
 from ..control.session import EpisodeSettings
 from ..data import AssetPaths
@@ -24,7 +31,7 @@ from .__main__ import _device, _load
 from .deciders import NetworkOperations, PinnedRegion, operational_batcher
 from .layers import LearntOperations
 from .net import OperationalNet
-from .ops_arena import CATCHMENT_RADIUS, HORIZON_MS, OpsArena
+from .ops_arena import CATCHMENT_RADIUS, GARRISON_SCALE, HORIZON_MS, OpsArena
 
 log = logging.getLogger(__name__)
 
@@ -32,19 +39,30 @@ log = logging.getLogger(__name__)
 INSTANCE_STRIDE = 100003
 
 
-def _arena_seed(base_seed: int, session) -> int:
-    """The seed an arena episode draws its board from, advancing with the episode as well as with the instance, so every episode draws a fresh board rather than replaying the first one, and the sample size a pooled mean rests on is the episodes fought rather than the instances. One arm here, so the episode folds in directly."""
-    return base_seed + INSTANCE_STRIDE * session.instance + len(session.records)
+def _arena_seed(base_seed: int, session, arms: int = 1) -> int:
+    """The seed an arena episode draws its board from, advancing with the board as well as with the instance, so every board is fresh rather than the first one replayed, and the sample size a pooled mean rests on is the boards fought rather than the instances.
 
-
-def _arm(arguments, net=None, device=None, batcher=None):
-    """One `OpsArena` per episode, seeded so each episode is a fresh board and two runs at the same seed draw the same boards.
-
-    Our side is the script chain by default (the self-play zero) or a pinned deployment when `--our pin` is given: a layer that sends every squad to the lowest-numbered legal region and task, making no operational choice at all. Running the two at the same seed and subtracting the pinned run from the self-play run cancels the enemy and the board lean and leaves how much the script's careful deployment beat making no choice — the resolution the arena exists to produce. The enemy is always the script, so the pinned run is our-pin against their-script on the very board the self-play run drew.
+    With several arms in one run the board must advance once every arm has played it, not once per episode: a session takes its arm as `records % arms`, so `records // arms` is which board it is on and every arm meets that board exactly once. That is what makes a multi-arm run a paired one — the same construction under each arm, in the same instances, at the same moment of the same machine — and it is the difference between a comparison that has to trust two separate runs to have been alike and one that does not have to.
     """
-    if arguments.our == "pin":
+    return base_seed + INSTANCE_STRIDE * session.instance + len(session.records) // max(1, arms)
+
+
+def _arm(arguments, our: str, arms: int = 1, net=None, device=None, batcher=None):
+    """One `OpsArena` per episode of one arm, seeded so that every arm of the run meets the same boards.
+
+    `script` on our side is the self-play zero: the same chain on both sides of the mirror, whose pooled score must be nought. `pin` is a layer that sends every squad to the lowest-numbered legal region and task, making no operational choice at all; subtracting it from the script arm board by board cancels the enemy and the board lean and leaves how much the script's careful deployment beat making no choice, which is the resolution the arena exists to produce. The enemy is always the script, so every arm is measured against one fixed opponent.
+
+    What the pin is not is a concentration arm. Its region is the lowest live id on the map and the contests are drawn about the board centre, so its squads march off the scored ground: measured on Hills, no squad of it was inside any catchment in fifty of sixty-eight scored episodes and the nearest ended a median of seven hundred and seventy units out against a catchment of four hundred. It beat the script's careful deployment there, but not by overwhelming anything — by leaving discs to empty out, and an empty disc reads a half rather than a loss. That is a floor for abandoning the board, and reading it as evidence that concentration wins was wrong. `diagnose` reports the reach of every arm for this reason.
+
+    `massed` is the concentration arm the reading needed and did not have: the same script ladder with one term taken out, the discount a region takes for the strength we already have standing in it, which is the only thing in the ladder that makes squads spread rather than pile onto the single best region. It masses on the region the ladder itself ranks first, so it is on the scored ground where the pin is not. Against the script it says what the spreading rule costs; against the pin it says whether massing on the right ground beats leaving it.
+
+    `learnt` is a trained network read from a file.
+    """
+    if our == "pin":
         operations = lambda session, catalogue: LearntOperations(session, catalogue, PinnedRegion(), None, -1)
-    elif arguments.our == "learnt":
+    elif our == "massed":
+        operations = lambda session, catalogue: Operations(session, catalogue, crowding=0.0)
+    elif our == "learnt":
         # The trained layer read greedily — its most probable region and task, not a draw — since this measures the policy rather than trains it, and with no rollout it records nothing.
         operations = lambda session, catalogue: LearntOperations(
             session, catalogue, NetworkOperations(net, device, batcher, greedy=True), None, -1)
@@ -52,22 +70,26 @@ def _arm(arguments, net=None, device=None, batcher=None):
         operations = None
 
     def build(session) -> OpsArena:
-        return OpsArena(session, operations=operations, seed=_arena_seed(arguments.seed, session),
+        return OpsArena(session, operations=operations, seed=_arena_seed(arguments.seed, session, arms),
                         horizon_ms=arguments.horizon * 1000, our_squads=arguments.squads,
-                        catchment_radius=arguments.radius, contest_pairs=arguments.pairs)
+                        catchment_radius=arguments.radius, contest_pairs=arguments.pairs,
+                        garrison_scale=arguments.garrison)
     return build
 
 
-def pool(sessions) -> Summary:
-    """Every scored episode's side score as one count, one mean and one spread. An episode cut off before its horizon carries no score and is skipped, so a run whose match length did not clear the horizon pools nothing rather than pooling a nought that was never measured."""
+def pool(sessions, arm: Optional[str] = None) -> Summary:
+    """Every scored episode's side score as one count, one mean and one spread, over one arm of the run or over all of them. An episode cut off before its horizon carries no score and is skipped, so a run whose match length did not clear the horizon pools nothing rather than pooling a nought that was never measured."""
     scores: List[float] = [float(record.statistics.get("side_score", 0.0))
                            for session in sessions for record in session.records
-                           if record.statistics.get("scored")]
+                           if record.statistics.get("scored") and (arm is None or record.arm == arm)]
     return Summary.of(scores)
 
 
-def report(summary: Summary) -> None:
-    """The self-play zero, as a mean and the two standard errors it has to sit inside. A mean inside the interval is a board with no lean the mirror draw did not remove; a mean outside it is a lean to be found and fixed before the arena is trusted."""
+def report(summary: Summary, arm: str = "script") -> None:
+    """The run's pooled side score, as a mean and the two standard errors it has to sit inside.
+
+    What a nonzero mean means depends on which arm produced it, and saying the wrong one of these is worse than saying nothing. For the script arm the two sides are the same chain, so the mean is the self-play zero: inside the interval is a board with no lean the mirror draw did not remove, and outside it is a lean to be found and fixed before the arena is trusted. For every other arm our side is deliberately not the enemy's chain, so a mean outside the interval is the arm beating the script — which is the measurement, not a fault — and warning about a lean there would be reporting the instrument working as if it were broken. The lean is read once, on the script arm, and every other arm is then read against it and against the other arms board by board with `ops_compare`.
+    """
     if summary.n == 0:
         log.warning("no episode reached its horizon, so there is no side score to pool: is the match length longer than the horizon plus the settle and spawn waits?")
         return
@@ -75,39 +97,86 @@ def report(summary: Summary) -> None:
     log.info("pooled side score over %d scored episode(s): %+.4f, 2 standard errors %.4f, interval %+.4f to %+.4f",
              summary.n, summary.mean, interval, summary.mean - interval, summary.mean + interval)
     if summary.n < 2:
-        log.info("one episode has no spread, so it says nothing about whether the arena is even; run several hundred")
-    elif interval > 0.0 and abs(summary.mean) > interval:
+        log.info("one episode has no spread, so it says nothing about how this arm stands; run several hundred")
+        return
+    outside = interval > 0.0 and abs(summary.mean) > interval
+    if arm != "script":
+        log.info("this is the %s arm against the script, so the figure is how far the arm stands from the script's "
+                 "side of the mirror and not a lean: the board's own lean is the script arm's figure, and the honest "
+                 "comparison against another arm is the paired one over the same boards (rwintel.learn.ops_compare)", arm)
+        if not outside:
+            log.info("the interval holds nought, so this arm is not told apart from the script by these episodes")
+    elif outside:
         log.warning("the pooled side score is outside two standard errors of nought, so the board leans under this draw and a policy measured on it would be reading the lean: find and remove it before trusting the arena")
     else:
         log.info("the pooled side score holds nought within two standard errors, which is the self-play zero the arena has to pass before it is trusted")
 
 
-def self_play(arguments) -> Summary:
-    """Runs the self-play arm over the asked instances and episodes and returns the pooled side score. The plumbing a human runs against live game instances; the pooling and the report are the same arithmetic the game-free tests exercise on synthetic captures."""
+def diagnose(sessions, arm: str, radius: float) -> None:
+    """Whether this arm's own squads ever reached the ground the episode was scored on.
+
+    An arm can score well without its squads ever entering a catchment, and the figure alone cannot tell that apart from an arm that fought for the ground and won it — the two look identical in the pooled mean. The distinction is the whole difference between measuring a deployment and measuring an abstention, and the arena already writes down what settles it: how far the nearest surviving squad member ended from a contest, and how many of them ended inside one.
+
+    This is the check that was in hand and not pointed at the pinned arm. That arm sends every squad to the lowest-numbered legal region, which is a fixed region id with nothing to do with where the contests were drawn, so its squads finished outside every scored disc in most episodes and what looked like concentration beating a spread was an arm that had left the scored board. An arm whose median reach is outside the catchment is not deploying onto the contests, whatever its score says, and the run says so rather than leaving it to be noticed.
+    """
+    reaches = sorted(float(record.statistics.get("our_reach", -1.0))
+                     for session in sessions for record in session.records
+                     if record.arm == arm and record.statistics.get("scored")
+                     and float(record.statistics.get("our_reach", -1.0)) >= 0.0)
+    absent = sum(1 for session in sessions for record in session.records
+                 if record.arm == arm and record.statistics.get("scored")
+                 and not record.statistics.get("our_in_catchment"))
+    scored = sum(1 for session in sessions for record in session.records
+                 if record.arm == arm and record.statistics.get("scored"))
+    if not reaches or not scored:
+        return
+    median = reaches[len(reaches) // 2]
+    log.info("this arm's nearest squad member ended a median %.0f world units from a contest, against a catchment of "
+             "%.0f, and no squad of it was inside any catchment in %d of %d scored episode(s)",
+             median, radius, absent, scored)
+    if median > radius:
+        log.warning("this arm's squads ended outside the catchment in the median episode, so its score is not a "
+                    "measure of how it deployed onto the contests but of what happened on ground it never reached: "
+                    "read it as a floor for abandoning the scored board, not as a deployment")
+
+
+def measure(arguments) -> Dict[str, Summary]:
+    """Runs every asked arm over the asked instances and episodes and returns each one's pooled side score.
+
+    Several arms in one run is the paired design and the default way to use this: the arms alternate inside each instance and `_arena_seed` holds the board still until all of them have played it, so every arm meets every board. `--episodes` is per arm, as it is everywhere else in this project, so four arms at ten episodes is forty episodes an instance. The plumbing a human runs against live game instances; the pooling and the report are the same arithmetic the game-free tests exercise on synthetic captures.
+    """
     episode = EpisodeSettings(
         map=arguments.map, opponents=arguments.opponents, difficulty=arguments.difficulty,
         credits=arguments.credits, fog=0, seed=arguments.seed, max_seconds=arguments.max_seconds,
         # An arena episode starts with nothing on the board: there is no command that removes a unit, so the only clean board to construct on is one nothing was ever put on.
         starting_units=0, arena=True,
     )
-    # A learnt arm reads one network off a file and shares it across every instance, built once here rather than per session for the same reason the training runner does: the network is what is being measured, and one copy batched across the instances is the whole point of batching the inference. The script and pin arms need none of this.
+    # A learnt arm reads one network off a file and shares it across every instance, built once here rather than per session for the same reason the training runner does: the network is what is being measured, and one copy batched across the instances is the whole point of batching the inference. The script, pin and massed arms need none of this.
     net = device = batcher = None
-    if arguments.our == "learnt":
+    if "learnt" in arguments.our:
+        # Refused rather than loaded blind, for the same reason the duel refuses it: a missing or mistyped path leaves a freshly initialised network in place, and the run then measures a random policy and journals it under the trained one's name. Nothing downstream can tell those apart afterwards, and the figure looks like an ordinary measurement.
+        if not arguments.load:
+            raise SystemExit("the learnt arm has no parameters to measure: give --load")
+        if not os.path.exists(arguments.load):
+            raise SystemExit("no parameters at %s, so there is nothing for the learnt arm to measure" % arguments.load)
         device = _device(arguments.device)
         net = OperationalNet().to(device)
         _load(net, arguments.load, device)
         batcher = operational_batcher(net, device=device, greedy=True)
 
+    count = len(arguments.our)
+    path = arguments.record or default_path("ops-" + "-".join(arguments.our))
     settings = ServerSettings(
         host=arguments.host, port=arguments.port, instances=arguments.instances,
-        episodes=arguments.episodes, arms=[("ops-" + arguments.our, _arm(arguments, net, device, batcher))],
+        episodes=arguments.episodes,
+        arms=[("ops-" + our, _arm(arguments, our, count, net, device, batcher)) for our in arguments.our],
         assets=AssetPaths.at(arguments.assets) if arguments.assets else AssetPaths.default(),
         episode=episode,
-        journal=Journal(arguments.record or default_path("ops-self-play")),
+        journal=Journal(path),
     )
     server = Server(settings)
-    log.info("measuring the operations arena %s arm over %d episode(s) each on %d instance(s), horizon %ds",
-             arguments.our, arguments.episodes, arguments.instances, arguments.horizon)
+    log.info("measuring the operations arena %s arm(s) over %d board(s) each on %d instance(s), horizon %ds",
+             ", ".join(arguments.our), arguments.episodes, arguments.instances, arguments.horizon)
     try:
         sessions = server.serve()
     except KeyboardInterrupt:
@@ -118,9 +187,23 @@ def self_play(arguments) -> Summary:
             batcher.stop()
         if settings.journal is not None:
             settings.journal.close()
-    summary = pool(sessions)
-    report(summary)
-    return summary
+
+    summaries: Dict[str, Summary] = {}
+    for our in arguments.our:
+        log.info("---- %s ----", our)
+        summaries[our] = pool(sessions, "ops-" + our)
+        report(summaries[our], our)
+        diagnose(sessions, "ops-" + our, arguments.radius)
+    if count > 1:
+        # Every arm met every board, so the run is its own paired comparison and there is no reason to make anyone assemble it by hand from the journal afterwards. Read back off the file that was just written rather than off the sessions, so that what is reported is what was recorded. Imported here rather than at the top because the comparison reads this module for the stride that names a board, and the two would otherwise import each other.
+        from .ops_compare import compare
+
+        # Every pair rather than neighbouring ones: the arms are not on a line, and which two of them the run was really asked about is not something the order they were typed in says.
+        for index, first in enumerate(arguments.our):
+            for second in arguments.our[index + 1:]:
+                log.info("---- %s against %s, board by board ----", first, second)
+                compare(path, path, first_arm="ops-" + first, second_arm="ops-" + second)
+    return summaries
 
 
 def main(argv=None) -> int:
@@ -144,11 +227,13 @@ def main(argv=None) -> int:
                         help="game seconds the two chains run before the board is scored")
     parser.add_argument("--squads", type=int, default=4, help="assorted-doctrine squads staged per side")
     parser.add_argument("--pairs", type=int, default=2, help="contested offset pairs, so twice this many scored regions")
-    parser.add_argument("--our", choices=("script", "pin", "learnt"), default="script",
-                        help="our side's operational layer: the script chain (the self-play zero), a pinned deployment that makes no choice, or a learnt network read from --load; run any two at one seed and subtract to read what the choice was worth")
+    parser.add_argument("--our", choices=("script", "pin", "massed", "learnt"), action="append", default=None,
+                        help="our side's operational layer, repeatable: the script chain (the self-play zero), a pinned deployment that makes no choice, the script with its spreading term removed so it masses on the region it ranks first, or a learnt network read from --load. Give it more than once and every arm plays every board and the run reports the paired difference between neighbouring arms itself; --episodes is per arm")
     parser.add_argument("--load", default=None, help="parameters for the learnt arm, read greedily")
     parser.add_argument("--device", default=None)
     parser.add_argument("--radius", type=float, default=CATCHMENT_RADIUS, help="world units a contest's catchment disc reaches; sized to the engagement standoff so an assaulting squad registers")
+    parser.add_argument("--garrison", type=float, default=GARRISON_SCALE,
+                        help="credits a contested region's defender is drawn out of, which is what decides whether taking ground pays at all; a defender too strong for the squads a side can bring makes holding what one already owns the best play")
     parser.add_argument("--max-seconds", type=int, default=0,
                         help="game time an episode is cut off at, defaulting to the horizon plus the settle and spawn waits and a margin")
     parser.add_argument("--assets", default=None)
@@ -158,10 +243,14 @@ def main(argv=None) -> int:
 
     logging.basicConfig(level=logging.DEBUG if arguments.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
+    # An appending option cannot carry a default without the default staying in front of whatever is given, so the one-arm case is filled in here instead.
+    arguments.our = arguments.our or ["script"]
+    if len(set(arguments.our)) != len(arguments.our):
+        parser.error("an arm given twice would play each board twice under one name and pair with itself")
     if arguments.max_seconds <= 0:
         # The board is scored at the horizon, which the episode has to outlast: the settle and spawn waits come first, and a margin leaves room for the scoring frame to arrive.
         arguments.max_seconds = arguments.horizon + 60
-    self_play(arguments)
+    measure(arguments)
     return 0
 
 

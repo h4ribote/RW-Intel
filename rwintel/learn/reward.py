@@ -69,6 +69,8 @@ class _Mission:
 
     issued_at_ms: int
     potential: float = 0.0
+    #: What the potential was when the errand opened, kept so that an errand ended from outside can be paid its terminal with the whole of its shaping cancelled rather than with the opening term left standing. See `OperationalReward.close`.
+    opening: float = 0.0
     started: bool = False
     #: True once this errand has been paid its one terminal, so that it cannot be paid another.
     ended: bool = False
@@ -171,7 +173,9 @@ class OperationalReward:
 
     The match is not in the potential. The design gives the terminal result of the match to the strategic layer alone, and a layer that could see it would be learning to win rather than to carry out the orders it was given — which sounds like an improvement until the strategic layer is changed and everything below it has to be learnt again. What is here instead is the strategic layer's own statement of what it wants: how much of the ground it called valuable is being stood on.
 
-    Per squad, and region-specific, because a single global board figure written identically into every squad's step was the disease. The per-decision advantage barely depended on which region a squad was sent to, so only the entropy bonus had a consistent gradient and the policy spread toward uniform while the return sat still: a dead gradient. The potential of a decision is now the priority-weighted domination of the one region that decision's contract named, so a squad sent to a region it took and a squad sent to one it lost are paid differently, and the shaping already points where the choice does. Keyed by the contract's issue time exactly as the tactical layer's errand is, so a squad handed a new region begins a fresh mission and the two are not run into one trajectory.
+    Per squad, and region-specific, because a single global board figure written identically into every squad's step was the disease. The per-decision advantage barely depended on which region a squad was sent to, so only the entropy bonus had a consistent gradient and the policy spread toward uniform while the return sat still: a dead gradient. The potential of a decision is the priority-weighted domination of the one region that decision's contract named — the share of that region that is ours, less an even split, times what the strategic layer said the region was worth — so a squad sent to a region it took and a squad sent to one it lost are paid differently, and the shaping already points where the choice does. Keyed by the contract's issue time exactly as the tactical layer's errand is, so a squad handed a new region begins a fresh mission and the two are not run into one trajectory.
+
+    The domination rather than the bare share, and that is not a presentational choice: shaping telescopes, so what survives an errand is the terminal less the potential the errand opened at, and a potential written in a different quantity from the terminal leaves the difference between the two quantities standing in every return. See `_potential` for what that residue was and which way it pointed.
 
     There is no status terminal here. What ends an operational errand — the region taken, the deadline past — is not read from the board and paid the way the tactical layer's is; the constructed arena that this per-squad form exists for pays a region-domination terminal from outside through `finish`, and a match pays none at all (the match result is the strategic layer's). So `step` only ever shapes and renews, and `close`/`ended` are here for the outside terminal to telescope against.
     """
@@ -190,9 +194,14 @@ class OperationalReward:
         return mission is not None and mission.ended
 
     def close(self, squad_id: int) -> float:
-        """Hands back the potential this squad's errand was last valued at and forgets the errand, so a caller ending it from outside can pay the shaping's last term itself against a terminal potential of nought. Nought when nothing is held."""
+        """Hands back how far this squad's errand moved its potential — the last valuation less the opening one — and forgets the errand, so that a caller ending it from outside pays `terminal − (last − opening)` and the errand's whole return comes to the terminal exactly. Nought when nothing is held.
+
+        The cancellation is exact at a discount of one, which is where it has to be: a terminal only ever arrives from the constructed arena, an arena contest is one whole bounded errand, and such an errand is discounted at nothing. A match pays no operational terminal at all, so nothing here runs under the match's discount.
+
+        The difference and not the last valuation, which is what it was, and the distinction is the whole alignment of this layer's signal. The shaping sums over an errand to `last − opening`; subtracting only `last` leaves `− opening` standing in the return, and the opening valuation is taken from the region the decision itself named. So the residue was a function of the action: a squad sent at ground the enemy already held opened near nought and kept its whole terminal, while a squad sent to hold ground that was already ours opened near the top and had that much taken off it. **Taking a region from lost to level paid, and holding a region that was already won paid nothing**, although the arena's own score says the first is worth nothing and the second is worth half that region's priority. Cancelling the opening term as well leaves the return equal to the terminal, which is the region's own contribution to the side score — the quantity the arena is actually measured by.
+        """
         mission = self.missions.pop(squad_id, None)
-        return mission.potential if mission is not None else 0.0
+        return mission.potential - mission.opening if mission is not None else 0.0
 
     def reset(self) -> None:
         self.missions.clear()
@@ -205,10 +214,10 @@ class OperationalReward:
 
         mission = self.missions.get(squad.id)
         if mission is None or mission.issued_at_ms != contract.issued_at_ms:
-            # A fresh contract is a fresh errand. The potential is taken now and paid from the next period, so the step that merely received the contract is not paid for the board it arrived on.
+            # A fresh contract is a fresh errand. The potential is taken now and paid from the next period, so the step that merely received the contract is not paid for the board it arrived on. It is kept as the opening as well, because what the errand returns has to be the terminal alone and the shaping has to cancel whole — see `close`.
             replaced = mission is not None
-            mission = _Mission(issued_at_ms=contract.issued_at_ms,
-                               potential=self._potential(squad, view, orders))
+            opening = self._potential(squad, view, orders)
+            mission = _Mission(issued_at_ms=contract.issued_at_ms, potential=opening, opening=opening)
             self.missions[squad.id] = mission
             return Outcome(renewed=replaced)
 
@@ -227,6 +236,8 @@ class OperationalReward:
         region = view.region(contract.target_region)
         if region is None:
             return 0.0
-        # The priority the strategic layer put on the region this squad is contracted to, times how much of that region is ours. A region the strategic layer did not ask for carries no priority and so no shaping, which is the point: the layer is paid for meeting the orders, not for holding ground nobody wanted.
+        # The priority the strategic layer put on the region this squad is contracted to, times how much of that region is ours less an even split. A region the strategic layer did not ask for carries no priority and so no shaping, which is the point: the layer is paid for meeting the orders, not for holding ground nobody wanted.
+        #
+        # The domination and not the bare share, because the potential has to be written in the same quantity as the terminal it telescopes against, and it was not. The shaping cancels over an errand except for its first term, so a decision's return comes to the terminal less the potential it started at: with the potential at `priority * share` on nought to one and the arena's terminal at `priority * (share - a half)`, that return carried a standing `- 0.5 * priority` — an offset with no board in it at all, which every squad paid in proportion to how valuable the region it was sent to was. Sending a squad at the most wanted region on the board cost it half of that region's priority before the fighting was scored, and the ground it could win back was at most the same priority again. The layer was being taught to leave the valuable ground alone. Written as the domination the offset is nought and the return is exactly `priority * (share at the horizon - share at issue)`, which is what the errand did to the quantity the arena is measured by.
         priority = orders.priorities.get(region.id, 0.0) if orders is not None else 0.0
-        return priority * _share(region.our_value, region.enemy_value)
+        return priority * (_share(region.our_value, region.enemy_value) - 0.5)

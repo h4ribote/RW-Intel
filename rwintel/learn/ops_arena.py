@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..wire import (
     Action,
@@ -40,13 +40,15 @@ CONTEST_PAIRS = 2
 SQUAD_VALUE = (1500.0, 4500.0)
 
 #: A region defender's worth as a share of a staged squad's value range, and the scale that share is taken against. One value is drawn per contest pair and placed on both members by ownership, so total garrison strength is equal between the sides.
+#:
+#: This is the constant that decides whether taking ground is worth doing. A garrison too strong for the squads a side can bring makes the assault unprofitable and the best play is to hold what one already owns, which is a coherent objective but not the one an operational layer has to be good at in a match, where ground must be taken. The scale is a construction argument (`--garrison`) so that the question can be settled by a sweep rather than by the opening value, exactly as the horizon and the catchment radius were.
 GARRISON_VALUE = (0.4, 1.2)
 GARRISON_SCALE = 3000.0
 
 #: Radius of the disc a contest is scored over, in world units. Sized to the engagement standoff band, because that is where an assaulting squad halts against the garrison: measured, the nearest surviving squad member stopped about 490 units from its contest on Lake and about 280 on the more compact Hills, so a 250-unit disc saw only the garrison and the choice never registered. At 400 the assaulting squads enter the disc, the shares spread off the garrison's nought-or-one, and the choice moves the score. The diameter must stay below the least separation of two contest points so the discs do not overlap, which is what `_draw_pairs` enforces — and at 400 that separation is hard enough to place on a compact map that a third of episodes refuse, which is a tuning cost of the standoff-sized disc, not a bias (a refused board is never scored).
 CATCHMENT_RADIUS = 400.0
 
-#: How far a contest point sits from the centre, drawn uniformly. Above the merge distance so a pair's two points fall on distinct regions, and its own draw floor keeps every pair of points at least a catchment diameter apart.
+#: How far a contest point sits from the centre, drawn uniformly. Above the merge distance so a pair's two points fall on distinct regions. The floor a draw actually uses is this or the catchment radius, whichever is larger, because a pair's own two points are twice the offset apart and have to clear the same catchment diameter that two different pairs are held to — a floor below the radius let the one pair every board carries overlap itself, which no later test looked for.
 CONTEST_MIN = 350.0
 CONTEST_MAX = 700.0
 
@@ -56,11 +58,17 @@ SQUAD_STAGGER = 120.0
 #: How far from a staging point a freshly spawned unit is taken to belong to that side's squads. Comfortably beyond the squad stagger and internal scatter, and comfortably inside the march to a contest, so a garrison spawned at a contest point is never swept into a staging squad.
 STAGING_REACH = 800.0
 
-#: How many offsets are tried before an episode gives up on placing its contest pairs. A pair is rejected when its two points share a region, collide with a region already taken, or sit within a catchment diameter of a point already placed.
+#: How many offsets are tried before an episode gives up on placing its contest pairs. A pair is rejected when its two points share a region, collide with a region already taken, sit within a catchment diameter of a point already placed, or reach anything that was already standing when the board was laid out.
 MAX_PAIR_ATTEMPTS = 400
 
 #: Control variate on the initial garrison share, subtracted from the terminal. Antisymmetric and policy-invariant like the fight arena's STRENGTH_SLOPE, so it cannot move the optimum or break the self-play zero; it starts at nought and is fitted only after the structural zero is confirmed.
 STRENGTH_SLOPE = 0.0
+
+#: How a squad's terminal is read off the scored board. `region` pays the whole domination of the region the squad's contract named, which several squads on one region then each take in full; `marginal` pays only the part of it that squad's own surviving units account for. See `OpsArena._finish_side` for what each teaches and what each costs.
+CREDITS = ("region", "marginal")
+
+#: Which of them a run uses unless it says otherwise. The region reading is the one every measurement so far was taken under, so it stays the default until the marginal one has been measured against it on the same boards.
+CREDIT = "region"
 
 #: The doctrines a staged squad may be drawn from. Engineers are excluded because the economy drives them and a contract would land on top of a placement; garrisons are the defenders, drawn separately and never staged as a taskable squad.
 _DOCTRINES = (Doctrine.VANGUARD, Doctrine.GARRISON, Doctrine.RAID)
@@ -117,6 +125,13 @@ class OpsStatistics:
     shares: Dict[int, float] = field(default_factory=dict)
     #: Whether the episode was refused because the room exposed no baseless sparring slot to own the enemy side.
     refused: bool = False
+    #: The seed this episode's board was drawn from, which is the board's name. Written down so that a later comparison can say which episodes were played on one construction instead of deriving it from the instance and the episode number and the arm count — a derivation that is right until a run is arranged differently and then silently pairs the wrong episodes.
+    board: int = 0
+    #: How the board was drawn: the horizon in game milliseconds, the catchment radius, the squads staged a side and the contest pairs asked for. Journalled with the episode because none of these reach the episode settings, and two runs drawn under different ones are two different instruments: a later comparison that pairs them board by board would be reading the change in the instrument as a difference between the arms. Kept here so that comparison can refuse rather than have to be trusted not to.
+    horizon_ms: int = 0
+    radius: float = 0.0
+    squads: int = 0
+    pairs: int = 0
     #: Diagnostics that say whether the staged squads — the thing whose deployment the arena exists to measure — actually reached and contested the catchments, or whether the score was decided by the pre-placed garrisons alone. If the squads never register in a catchment the self-play zero is trivially met by the mirror garrisons and the arena resolves nothing.
     our_alive: int = 0
     our_in_catchment: int = 0
@@ -127,7 +142,9 @@ class OpsStatistics:
                 "contests": self.contests, "garrison_value": round(self.garrison_value, 1),
                 "shares": {int(r): round(s, 4) for r, s in self.shares.items()},
                 "refused": self.refused, "our_alive": self.our_alive,
-                "our_in_catchment": self.our_in_catchment, "our_reach": round(self.our_reach, 1)}
+                "our_in_catchment": self.our_in_catchment, "our_reach": round(self.our_reach, 1),
+                "board": self.board, "horizon_ms": self.horizon_ms, "radius": round(self.radius, 1),
+                "squads": self.squads, "pairs": self.pairs}
 
 
 class OpsArena(Arena):
@@ -139,7 +156,8 @@ class OpsArena(Arena):
     def __init__(self, session, operations=None, opponent=None, tactics=None, seed: int = 0,
                  horizon_ms: int = HORIZON_MS, our_squads: int = OUR_SQUADS,
                  catchment_radius: float = CATCHMENT_RADIUS, contest_pairs: int = CONTEST_PAIRS,
-                 score_slope: float = STRENGTH_SLOPE) -> None:
+                 score_slope: float = STRENGTH_SLOPE, credit: str = CREDIT,
+                 garrison_scale: float = GARRISON_SCALE) -> None:
         super().__init__(session, seed=seed)  # inherits catalogue, random, _sites and every spawn helper
         # The layer under study on this side (a learnt operational layer, or the script for the baseline) and what it is measured against on the other (the script for a duel, its own policy for self-play). Built here rather than handed in already made, for the same reason the engagement arena builds its layers here: both sides must read the same type catalogue as the arena that spawns their units, or a unit would be sorted into a different role on each side. The tactical layer below both actually moves the units and is frozen.
         self.our_ops = operations(session, self.catalogue) if operations else Operations(session, self.catalogue)
@@ -151,6 +169,10 @@ class OpsArena(Arena):
         self.radius = catchment_radius
         self.contest_pairs = contest_pairs
         self.score_slope = score_slope
+        if credit not in CREDITS:
+            raise ValueError("the terminal a squad is paid is either %s" % " or ".join(CREDITS))
+        self.credit = credit
+        self.garrison_scale = garrison_scale
 
         self.phase = "opening"
         # Two taskable dicts and a separate garrison list. The garrisons are never in either taskable dict and are never handed to a command layer.
@@ -176,7 +198,9 @@ class OpsArena(Arena):
         self._wanted: Dict[int, Dict[int, int]] = {}
         self._period = 0
         self._sandbox_sent = False
-        self.statistics = OpsStatistics()
+        # The draw's settings are written into the statistics at construction rather than at scoring, so that an episode which never reaches its horizon still says under what instrument it was run.
+        self.statistics = OpsStatistics(board=seed, horizon_ms=horizon_ms, radius=catchment_radius,
+                                        squads=our_squads, pairs=contest_pairs)
 
     # ---- the one entry point (mirrors Arena.decide) ------------------------------------
 
@@ -233,7 +257,8 @@ class OpsArena(Arena):
         their_stage = self._mirror(our_stage, centre)
         self.centre, self._our_pt, self._their_pt = centre, our_stage, their_stage
 
-        self.pairs = self._draw_pairs(centre)
+        # What is already standing when the board is laid out is the free base every player with a starting position is given — the game has no setting that withholds it — and the arena is built on top of it rather than instead of it. Its worth is thousands of credits, it is not hostile, and the sparring side has no counterpart for it, so a scored disc that reached it would hand this side that worth on every board it happened on and on no board the mirror could answer with. The pairs are drawn clear of it instead.
+        self.pairs = self._draw_pairs(centre, [(unit.x, unit.y) for unit in observation.unit_states])
         if len(self.pairs) < self.contest_pairs:
             # Not enough distinct, well-separated contests could be placed on this board. Refuse rather than run a lopsided one.
             self.refused = True
@@ -280,9 +305,9 @@ class OpsArena(Arena):
         self.garrison_share = {}
         for pair in self.pairs:
             garrison = self._doctrine_force(Doctrine.GARRISON,
-                                            self.random.uniform(*GARRISON_VALUE) * GARRISON_SCALE)
+                                            self.random.uniform(*GARRISON_VALUE) * self.garrison_scale)
             if not garrison:
-                garrison = self._doctrine_force(Doctrine.GARRISON, GARRISON_SCALE)
+                garrison = self._doctrine_force(Doctrine.GARRISON, self.garrison_scale)
             value = sum(kind.price for kind in garrison)
             # This side's own garrison defends the defend member; its exact reflection is the enemy garrison on the attack member. One draw, placed once by ownership, so the sides' garrison worth is equal.
             defend_rows = self._rows(garrison, our_slot, pair.defend_point)
@@ -444,8 +469,8 @@ class OpsArena(Arena):
         self.statistics.our_in_catchment = in_catchment
         self.statistics.our_reach = math.sqrt(reach) if reach != float("inf") else -1.0
 
-        self._finish_side(self.our_ops, self.squads, shares, +1.0)
-        self._finish_side(self.their_ops, self.enemy, shares, -1.0)
+        self._finish_side(self.our_ops, self.squads, shares, +1.0, units)
+        self._finish_side(self.their_ops, self.enemy, shares, -1.0, units)
 
     def _side_score(self, unit_states) -> float:
         """The reported and validated side score: the priority-weighted mean domination over every contested region.
@@ -466,12 +491,17 @@ class OpsArena(Arena):
             score += weight * (share - 0.5)
         return score / total_weight
 
-    def _catchment_worths(self, unit_states, point) -> Tuple[float, float]:
-        """This side's and the other side's health-weighted worth inside one catchment, split by the hostility flag. Read off the unit rows rather than the region block, so the free base, spectators and any stray are excluded by construction and the last-unit-death flip the price block carries cannot enter. Health-weighted like `Arena._health_worth`: a type with no maximum health counts whole, which is what the sparse reading says of it too."""
+    def _catchment_worths(self, unit_states, point, without=()) -> Tuple[float, float]:
+        """This side's and the other side's health-weighted worth inside one catchment, split by the hostility flag. Read off the unit rows rather than the region block, so the free base, spectators and any stray are excluded by construction and the last-unit-death flip the price block carries cannot enter. Health-weighted like `Arena._health_worth`: a type with no maximum health counts whole, which is what the sparse reading says of it too.
+
+        `without` leaves a set of units out of the count, which is how the marginal credit asks what the catchment would have read had one squad not been standing in it. Nothing about the score reported for the episode uses it; it exists for the terminal one squad is paid.
+        """
         radius2 = self.radius * self.radius
         our_worth = 0.0
         enemy_worth = 0.0
         for unit in unit_states:
+            if unit.id in without:
+                continue
             if (unit.x - point[0]) ** 2 + (unit.y - point[1]) ** 2 > radius2:
                 continue
             share = 1.0 if unit.max_health <= 0 else unit.health / unit.max_health
@@ -482,19 +512,39 @@ class OpsArena(Arena):
                 our_worth += worth
         return our_worth, enemy_worth
 
-    def _finish_side(self, ops, squads: Dict[int, SquadRecord], shares: Dict[int, float], sign: float) -> None:
-        """Pays every squad of one side the domination of the region its final contract named, plus the opposite sign for the other side exactly as the engagement arena pays outcome and −outcome. A script layer keeps no trajectories and offers no `finish`, so this is a no-op for the self-play baseline; a learnt operational layer routes the terminal back to the operational decision that produced it. The credit is region-outcome rather than squad-marginal — several squads that converge on one region share the identical figure — which is the honest limit of attributing to where a squad was sent.
+    def _finish_side(self, ops, squads: Dict[int, SquadRecord], shares: Dict[int, float], sign: float,
+                     unit_states=()) -> None:
+        """Pays every squad of one side the domination of the region its final contract named, plus the opposite sign for the other side exactly as the engagement arena pays outcome and −outcome. A script layer keeps no trajectories and offers no `finish`, so this is a no-op for the self-play baseline; a learnt operational layer routes the terminal back to the operational decision that produced it.
+
+        There are two ways to say what one squad's deployment earned, and which one is in force is a construction argument because they teach different things.
+
+        `region` pays the region's own outcome, so several squads that converged on one region share the identical figure. It is the plainest reading of "you were sent here and here is how here went", and its flaw is that it pays a squad in full for a region its allies had already taken — the free-rider term, which rewards piling on whether or not the pile helped.
+
+        `marginal` pays the difference the squad itself made: the region's domination as it stands, less what the same catchment would have read with that squad's surviving units taken out of it. Several squads on one region then divide what they jointly produced rather than each taking all of it, and a squad that added nothing to a region already won is paid nothing for it. It is the difference reward, and the reason it is the more honest signal is that it is the part of the team's score that this decision actually moved. Its known cost is that a squad wiped out at the horizon has nothing left in the catchment and is paid nothing, however much of the enemy it took with it — the counterfactual it can compute is "had these units not been standing here", not "had this squad never been sent".
+
+        The marginal reading is exactly the change the squad's own units made to this side's score: the other regions' terms are identical with and without it, so the one region's difference is the whole difference. That identity is the reason to prefer it — a squad is paid in the very quantity the arena is measured by, and in no part of it that another squad produced. It is not antisymmetric between the sides, and is not meant to be: both sides can truthfully say a contested disc would have been lost without them, so two opposing squads can both be paid well. A credit is not a score. Neither reading touches the side score the episode is measured by, which is what the self-play zero is a statement about.
         """
         finish = getattr(ops, "finish", None)
         if finish is None:
             return
+        by_region = {contest.region_id: contest for contest in self.contests}
         for squad in squads.values():
             region = squad.contract.target_region if squad.contract is not None else None
             share = shares.get(region, 0.5)
             weight = self.priorities.get(region, 0.0)
             garrison = self.garrison_share.get(region, 0.5)
-            terminal = sign * (weight * (share - 0.5) - self.score_slope * (garrison - 0.5))
+            if self.credit == "marginal" and weight > 0.0 and region in by_region:
+                share = share - self._share_without(unit_states, by_region[region], squad.members)
+            else:
+                share = share - 0.5
+            terminal = sign * (weight * share - self.score_slope * (garrison - 0.5))
             finish(squad, terminal, "horizon")
+
+    def _share_without(self, unit_states, contest: "_Contest", members: Sequence[int]) -> float:
+        """What one contest's catchment would have read with a squad's surviving units taken out of it. An empty disc reads a half, as it does everywhere else, so a squad that was the only thing in a catchment is credited with the whole of taking it."""
+        our_worth, enemy_worth = self._catchment_worths(unit_states, contest.point, without=set(members))
+        total = our_worth + enemy_worth
+        return our_worth / total if total > 0 else 0.5
 
     def close(self) -> None:
         for layer in (self.our_ops, self.their_ops, self.our_tac, self.their_tac):
@@ -570,8 +620,13 @@ class OpsArena(Arena):
         return (point[0] + math.cos(angle) * SQUAD_STAGGER,
                 point[1] + math.sin(angle) * SQUAD_STAGGER)
 
-    def _draw_pairs(self, centre) -> List[_Pair]:
-        """The contest pairs, each an offset drawn about the centre placed as the congruent pair (centre+u, centre−u). A pair is kept only when its two points map to distinct regions, neither region is one an earlier pair already took, and neither point sits within a catchment diameter of a point already placed — so the scored discs are disjoint and every region is contested once."""
+    def _draw_pairs(self, centre, standing: Sequence[Tuple[float, float]] = ()) -> List[_Pair]:
+        """The contest pairs, each an offset drawn about the centre placed as the congruent pair (centre+u, centre−u).
+
+        A pair is kept only when its two points map to distinct regions, neither region is one an earlier pair already took, neither point sits within a catchment diameter of a point already placed, the pair's own two points are that far apart as well, and neither point reaches anything that was already standing on the board.
+
+        The last two are the ones worth naming. A pair's two members are the reflection of each other about the centre, so their separation is twice the offset drawn and can be shorter than the separation demanded of two different pairs; tested only against earlier pairs, a pair could overlap itself, and the disjointness the score is read under would fail on the one pair that is always present. And what is already standing is this side's free base, which the mirrored side has no counterpart for: the engagement arena keeps it out of a fight by siting the fight at maximum clearance from whatever is standing, and this is the same guarantee taken the other way round, by refusing a draw that reaches it. A pair is rejected whole, so the mirror map, the priority invariance and the garrison balance are untouched by either test, and a board where the attempts run out is refused rather than scored lopsided.
+        """
         pairs: List[_Pair] = []
         used: set = set()
         placed: List[Tuple[float, float]] = []
@@ -580,7 +635,8 @@ class OpsArena(Arena):
         while len(pairs) < self.contest_pairs and attempts < MAX_PAIR_ATTEMPTS:
             attempts += 1
             angle = self.random.uniform(0, 2 * math.pi)
-            magnitude = self.random.uniform(CONTEST_MIN, CONTEST_MAX)
+            # Drawn from the radius up rather than from the bare floor, so a pair's own two points — which sit twice the offset apart — always clear the same separation demanded between two different pairs. Rejecting short draws afterwards would do the same thing and throw away one draw in seven on a board where placing pairs at all is already the scarce thing.
+            magnitude = self.random.uniform(max(CONTEST_MIN, self.radius), CONTEST_MAX)
             offset = (math.cos(angle) * magnitude, math.sin(angle) * magnitude)
             attack = (centre[0] + offset[0], centre[1] + offset[1])
             defend = (centre[0] - offset[0], centre[1] - offset[1])
@@ -592,6 +648,9 @@ class OpsArena(Arena):
                 continue
             if any(math.hypot(attack[0] - x, attack[1] - y) < span
                    or math.hypot(defend[0] - x, defend[1] - y) < span for x, y in placed):
+                continue
+            if any(math.hypot(attack[0] - x, attack[1] - y) < self.radius
+                   or math.hypot(defend[0] - x, defend[1] - y) < self.radius for x, y in standing):
                 continue
             used.add(attack_region)
             used.add(defend_region)

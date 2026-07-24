@@ -17,10 +17,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rwintel.control.policy.catalogue import Catalogue, role_of
 from rwintel.control.session import UnitType
+from rwintel.control.policy.contracts import (
+    Doctrine,
+    OperationsOrders,
+    Posture,
+    SquadRecord,
+    TaskContract,
+)
+from rwintel.control.policy.operations import Operations
+from rwintel.control.policy.view import WorldView
 from rwintel.data.regions import Region
 from rwintel.learn.ops_arena import (
     CATCHMENT_RADIUS,
     CONTEST_PAIRS,
+    CREDIT,
+    GARRISON_SCALE,
     HORIZON_MS,
     OUR_SQUADS,
     OURS,
@@ -35,8 +46,10 @@ from rwintel.wire import (
     NO_SQUAD,
     Action,
     Observation,
+    RegionState,
     UnitState,
 )
+from rwintel.wire.action import Stance, Task
 
 #: A catalogue with something in every doctrine's pool, so a draw of any of the three staged doctrines returns a force: an armour tank and an artillery piece the vanguard takes, an anti-air the garrison wants beside its armour, and a hover raider for the raid.
 _TYPES = [
@@ -108,6 +121,8 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena.contest_pairs = pairs
     arena.horizon_ms = HORIZON_MS
     arena.score_slope = 0.0
+    arena.credit = CREDIT
+    arena.garrison_scale = GARRISON_SCALE
     arena.enemy_slot = None
     arena.phase = "opening"
     arena.squads = {}
@@ -310,6 +325,206 @@ def test_an_episode_is_refused_when_the_room_exposes_no_sparring_slot():
     assert arena.statistics.refused
     # No board was submitted, because there was nobody to own half of it.
     assert session.calls == []
+
+
+#: A contract to copy for a squad under test. Only the region it names is read by the terminal; the rest is what any contract carries.
+_CONTRACT = TaskContract(squad=0, task=Task.ATTACK, target_region=0, stance=Stance.AGGRESSIVE,
+                         cost_budget=1000.0, deadline_ms=60000, issued_at_ms=0)
+
+
+def test_the_side_score_is_antisymmetric_across_a_sweep_of_synthetic_boards():
+    """One hand-built board says the arithmetic is right on that board. What the arena's trust rests on is that it is right on every board a run can draw, including the awkward ones: a contest nobody reached, a region carrying no priority, a disc holding only one side, a unit with no maximum health, a board with no contests at all.
+
+    So the same check is swept over two thousand drawn boards and the worst residue is held to floating precision. A sweep is the only form of this claim that can be quoted as coverage; a single board cannot be.
+    """
+    draw = random.Random(20260725)
+    worst = 0.0
+    nontrivial = 0
+    for _ in range(2000):
+        arena = _arena()
+        count = draw.randint(0, 4)
+        arena.contests = [_Contest(region_id=index, point=(draw.uniform(-3000.0, 3000.0),
+                                                          draw.uniform(-3000.0, 3000.0)))
+                          for index in range(count)]
+        # Some regions carry no priority at all and some priorities name no contest, which are both boards a draw can produce.
+        arena.priorities = {index: draw.choice([0.0, draw.uniform(0.3, 1.0)])
+                            for index in range(count + 2)}
+        units = []
+        for unit_id in range(draw.randint(0, 12)):
+            near = draw.choice(arena.contests).point if arena.contests and draw.random() < 0.7 else (0.0, 0.0)
+            maximum = draw.choice([100.0, 0.0])
+            units.append(_unit(unit_id, near[0] + draw.uniform(-600.0, 600.0),
+                               near[1] + draw.uniform(-600.0, 600.0),
+                               type_index=draw.randrange(len(_TYPES)), hostile=draw.randint(0, 1),
+                               health=draw.uniform(0.0, 100.0), max_health=maximum))
+        ours = arena._side_score(units)
+        theirs = arena._side_score([dataclasses.replace(unit, hostile=1 - unit.hostile) for unit in units])
+        worst = max(worst, abs(ours + theirs))
+        if abs(ours) > 1e-6:
+            nontrivial += 1
+    assert worst < 1e-12, "the two sides of a drawn board did not sum to nought"
+    assert nontrivial > 500, "a sweep of boards that all score nought says nothing about antisymmetry"
+
+
+def test_the_drawn_contests_never_overlap_and_never_reach_what_was_standing():
+    """Two invariants the score is read under, both of which failed silently: a pair's two points are the reflection of each other, so their separation is twice the offset drawn and was never tested against the catchment diameter that two different pairs are held to; and nothing kept a contest clear of the free command centre and builder this side is given, which the mirrored side has no counterpart for and which the catchment would have counted whole.
+
+    Swept over many draws rather than one, because both failures are conditional on the draw and a single board says nothing about whether they can happen.
+    """
+    session = _Session(_grid(step=400.0, reach=4000.0))
+    standing = [(600.0, 0.0), (-1500.0, 1500.0)]
+    boards = 0
+    for seed in range(300):
+        arena = _arena(session=session, seed=seed, sites=_CORNERS)
+        pairs = arena._draw_pairs((0.0, 0.0), standing)
+        if len(pairs) < arena.contest_pairs:
+            continue
+        boards += 1
+        points = [point for pair in pairs for point in (pair.attack_point, pair.defend_point)]
+        for index, first in enumerate(points):
+            for second in points[index + 1:]:
+                assert math.hypot(first[0] - second[0], first[1] - second[1]) >= 2 * arena.radius - 1e-9, (
+                    "two scored discs overlap, so a unit would be counted in both")
+            for x, y in standing:
+                assert math.hypot(first[0] - x, first[1] - y) >= arena.radius - 1e-9, (
+                    "a scored disc reaches something that was standing before the board was laid out")
+    assert boards > 50, "the sweep has to place boards to be saying anything about them"
+
+
+class _Paid:
+    """A command layer that only remembers what it was paid, which is all `_finish_side` asks of one."""
+
+    def __init__(self):
+        self.paid = {}
+
+    def finish(self, squad, terminal, reason):
+        self.paid[squad.id] = terminal
+
+
+def _contested(arena, region_id, point, weight):
+    arena.contests.append(_Contest(region_id=region_id, point=point))
+    arena.priorities[region_id] = weight
+    arena.garrison_share[region_id] = 0.5
+
+
+def test_the_two_credit_readings_pay_a_pile_of_squads_differently():
+    """Two squads converge on one region and take it between them; a third is sent to a region it never reaches.
+
+    Under the region reading each squad on the taken region is paid the whole of that region's domination, so being the second squad on a won region is worth exactly as much as being the first — the free-rider term. Under the marginal reading each is paid only what its own surviving units account for, so the two divide what they jointly produced, and the squad with nothing in any catchment is paid nothing either way.
+    """
+    arena = _arena(seed=3)
+    _contested(arena, 4, (0.0, 0.0), 1.0)
+
+    # Two squads of one tank each inside the disc and an enemy tank beside them, so our share of the catchment is two thirds.
+    units = [_unit(1, 0.0, 0.0), _unit(2, 10.0, 0.0), _unit(3, 20.0, 0.0, hostile=1)]
+    shares = {4: 2.0 / 3.0}
+    squads = {
+        1: SquadRecord(id=1, doctrine=Doctrine.VANGUARD, members=[1]),
+        2: SquadRecord(id=2, doctrine=Doctrine.VANGUARD, members=[2]),
+        3: SquadRecord(id=3, doctrine=Doctrine.VANGUARD, members=[]),
+    }
+    for squad in squads.values():
+        squad.contract = dataclasses.replace(_CONTRACT, squad=squad.id, target_region=4)
+
+    arena.credit = "region"
+    region_ops = _Paid()
+    arena._finish_side(region_ops, squads, shares, +1.0, units)
+    assert abs(region_ops.paid[1] - (2.0 / 3.0 - 0.5)) < 1e-9
+    assert region_ops.paid[1] == region_ops.paid[2], "the region reading pays the pile in full, squad by squad"
+
+    arena.credit = "marginal"
+    marginal_ops = _Paid()
+    arena._finish_side(marginal_ops, squads, shares, +1.0, units)
+    # Without either squad the disc reads one tank ours against one hostile, which is a half; each is credited the sixth it added.
+    assert abs(marginal_ops.paid[1] - (2.0 / 3.0 - 0.5)) < 1e-9
+    assert abs(marginal_ops.paid[2] - marginal_ops.paid[1]) < 1e-9
+    # The third squad was sent to the same region and is not on the board at the horizon. The region reading pays it in full for a region it is no longer standing in; the marginal reading pays it nothing, which is this reading's known cost — it can ask what the catchment would read without these units, not what it would read had the squad never been sent.
+    assert abs(region_ops.paid[3] - (2.0 / 3.0 - 0.5)) < 1e-9
+    assert marginal_ops.paid[3] == 0.0
+
+    # A third squad piled onto the same taken region is paid in full by the region reading and almost nothing by the marginal one, which is the whole difference between them.
+    units.append(_unit(4, 30.0, 0.0))
+    squads[3].members = [4]
+    shares = {4: 3.0 / 4.0}
+    piled = _Paid()
+    arena.credit = "region"
+    arena._finish_side(piled, squads, shares, +1.0, units)
+    assert abs(piled.paid[3] - (3.0 / 4.0 - 0.5)) < 1e-9
+    marginal_piled = _Paid()
+    arena.credit = "marginal"
+    arena._finish_side(marginal_piled, squads, shares, +1.0, units)
+    assert 0.0 < marginal_piled.paid[3] < piled.paid[3]
+
+
+def test_the_marginal_credit_is_the_change_the_squad_made_to_the_side_score():
+    """What makes the marginal reading the right terminal is not a symmetry but an identity: what a squad is paid is exactly how much of this side's score its own units account for, region weights and all. Anything else would be paying a squad for something other than the quantity the arena is measured by.
+
+    Two contested regions of different worth, a squad standing in each. The squad's credit has to equal the priority-weighted side score as it stands, less the same score computed with that squad's units off the board.
+    """
+    arena = _arena(seed=4)
+    arena.credit = "marginal"
+    _contested(arena, 4, (0.0, 0.0), 0.8)
+    _contested(arena, 9, (2000.0, 0.0), 0.4)
+
+    units = [_unit(1, 0.0, 0.0), _unit(2, 10.0, 0.0, hostile=1, health=50.0),
+             _unit(3, 2000.0, 0.0, type_index=1), _unit(4, 2010.0, 0.0, hostile=1)]
+    shares = {}
+    for contest in arena.contests:
+        our_worth, enemy_worth = arena._catchment_worths(units, contest.point)
+        shares[contest.region_id] = our_worth / (our_worth + enemy_worth)
+
+    squads = {}
+    for squad_id, member, region in ((1, 1, 4), (2, 3, 9)):
+        squad = SquadRecord(id=squad_id, doctrine=Doctrine.VANGUARD, members=[member])
+        squad.contract = dataclasses.replace(_CONTRACT, squad=squad_id, target_region=region)
+        squads[squad_id] = squad
+
+    paid = _Paid()
+    arena._finish_side(paid, squads, shares, +1.0, units)
+
+    def _weighted(states) -> float:
+        """The side score without its division by the total weight, which is the scale the terminal is paid on."""
+        total = 0.0
+        for contest in arena.contests:
+            our_worth, enemy_worth = arena._catchment_worths(states, contest.point)
+            both = our_worth + enemy_worth
+            share = our_worth / both if both > 0 else 0.5
+            total += arena.priorities[contest.region_id] * (share - 0.5)
+        return total
+
+    standing = _weighted(units)
+    for squad_id, member in ((1, 1), (2, 3)):
+        without = _weighted([unit for unit in units if unit.id != member])
+        assert abs(paid.paid[squad_id] - (standing - without)) < 1e-9
+
+
+def test_the_massed_arm_is_the_ladder_with_only_its_spreading_term_removed():
+    """The arena's massed arm has to differ from the script arm in exactly one thing: the discount a region takes for the strength we already have standing in it. Everything else the ladder weighs — the priority, the march, the resources, the threat — must still be weighed, or the arm would answer a different question from the one it was built to ask.
+
+    Two contested regions, the second worth more to the strategic layer and already holding a squad of ours. With the spreading term the ladder goes to the emptier one; with it at nought the ladder goes to the one it ranks higher, which is what massing on the best region means.
+    """
+    # The gap in priority is deliberately smaller than the discount a squad-and-a-half of our own strength earns the second region, so the two arms are made to disagree by the term under test and by nothing else.
+    priorities = {1: 0.8, 2: 0.9}
+    regions = [
+        RegionState(id=1, resources=0, held_by_us=0, held_by_enemy=0, x=0.0, y=0.0,
+                    our_value=0.0, enemy_value=1000.0, enemy_seen_at_ms=0, distance_from_home=500.0),
+        RegionState(id=2, resources=0, held_by_us=0, held_by_enemy=0, x=100.0, y=0.0,
+                    our_value=4000.0, enemy_value=1000.0, enemy_seen_at_ms=0, distance_from_home=500.0),
+    ]
+    view = WorldView(observation=_observation(), catalogue=_CATALOGUE, regions=regions)
+    orders = OperationsOrders(posture=Posture.ARM, priorities=priorities, offensive=True, loss_allowance=1000.0)
+    squad = SquadRecord(id=1, doctrine=Doctrine.VANGUARD, value=1000.0)
+
+    spread = Operations(None, _CATALOGUE)._pick(view, orders, squad, None)
+    massed = Operations(None, _CATALOGUE, crowding=0.0)._pick(view, orders, squad, None)
+    assert spread is not None and massed is not None
+    assert spread[1].id == 1, "the ladder as written spreads away from the region it already stands in"
+    assert massed[1].id == 2, "with the spreading term at nought it takes the region it ranks highest"
+
+    # The priority is still what decides between two regions neither of which we stand in, so removing the term removed the spreading and nothing else.
+    regions[1] = dataclasses.replace(regions[1], our_value=0.0)
+    assert Operations(None, _CATALOGUE, crowding=0.0)._pick(view, orders, squad, None)[1].id == 2
+    assert Operations(None, _CATALOGUE)._pick(view, orders, squad, None)[1].id == 2
 
 
 if __name__ == "__main__":
