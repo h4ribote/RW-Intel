@@ -29,6 +29,14 @@ from .scoring import OPENING_WEIGHTS, Weights, components, decided, fit_weights,
 #: Differences worth quoting a sample size for. The design's own table, which is what makes a run's report comparable with it.
 REPORTED_DIFFERENCES = (0.05, 0.10, 0.20)
 
+#: The settings that change what a score means. Two episodes drawn under different ones are different quantities and must not be pooled into one arm's mean nor compared across arms as though they were the same. The seed is deliberately not among them: fresh seeds are the whole point of running many episodes, and pooling across them is correct.
+_DISTINGUISHING = ("map", "difficulty", "max_seconds", "opponents", "fog", "credits", "contestants", "arena")
+
+
+def _signature(settings: dict) -> tuple:
+    """What an episode was played under, reduced to the fields that change what its score means. Absent settings — an older journal that carried none — read as an all-nought signature, which pools with others of its kind and stands apart from any that names its settings."""
+    return tuple(settings.get(key) for key in _DISTINGUISHING)
+
 
 @dataclass
 class Played:
@@ -43,12 +51,14 @@ class Played:
     statistics: dict
     #: What anyone outside the chain did to this episode. Carried through the report because a score taken under interference is not the same quantity as one taken without it, and two of them must never be compared as though they were.
     interference: dict = field(default_factory=dict)
+    #: The settings the episode was played under. Carried for the same reason as the interference: a score is only the same quantity as another when it was produced the same way, and the default journal name does not distinguish the map, the difficulty or the cutoff, so a re-reported file can hold episodes of two different settings under one arm. Kept here so the report can see when it does.
+    settings: dict = field(default_factory=dict)
 
     @classmethod
     def of(cls, record) -> "Played":
         return cls(arm=record.arm, winner=record.winner, team=record.team, timeout=record.timeout,
                    standing=record.standing, seconds=record.seconds, statistics=record.statistics,
-                   interference=record.interference)
+                   interference=record.interference, settings=getattr(record, "settings", {}) or {})
 
     @classmethod
     def from_dict(cls, entry: dict) -> "Played":
@@ -56,13 +66,23 @@ class Played:
                    team=int(entry.get("team", -1)), timeout=bool(entry.get("timeout", False)),
                    standing=entry.get("standing", []), seconds=int(entry.get("seconds", 0)),
                    statistics=entry.get("statistics", {}),
-                   interference=entry.get("interference", {}))
+                   interference=entry.get("interference", {}),
+                   settings=entry.get("settings", {}))
 
 
 def report(played: Sequence[Played], weights: Weights) -> None:
     by_arm: Dict[str, List[Played]] = {}
     for episode in played:
         by_arm.setdefault(episode.arm or "script", []).append(episode)
+
+    # Which settings each arm's episodes were drawn under. A re-reported journal can hold two runs' episodes under one arm, because the default file name distinguishes only the arm and whether an intruder was present, not the map, the difficulty or the cutoff; pooling those into one mean, or comparing two arms that were not played the same way, is the one thing a comparison must never do. It is caught rather than prevented here because the file has already been written by the time it is read; the report says loudly that the numbers below mix settings rather than presenting them as though they did not.
+    signatures: Dict[str, set] = {name: {_signature(e.settings) for e in episodes}
+                                  for name, episodes in by_arm.items()}
+    for name, sigs in sorted(signatures.items()):
+        if len(sigs) > 1:
+            logging.warning("arm %s pools episodes played under %d different settings; its mean and scatter mix "
+                            "quantities that are not the same and cannot be trusted — split the journal by settings",
+                            name, len(sigs))
 
     logging.info("%d episode(s) over %d arm(s), %d decided",
                  len(played), len(by_arm), sum(1 for e in played if decided(e)))
@@ -88,6 +108,11 @@ def report(played: Sequence[Played], weights: Weights) -> None:
     names = sorted(summaries)
     for first, second in zip(names, names[1:]):
         comparison = Comparison.of(summaries[first], summaries[second])
+        if not (signatures.get(first, set()) & signatures.get(second, set())):
+            # The two arms share no settings they were both played under, so the difference between them is confounded by whatever changed about the game and not only by the play. This is the cross-settings comparison the interference caveat says must never happen, reached instead through the settings the default journal name does not distinguish.
+            logging.warning("%s and %s were played under different settings; the difference between them is not a "
+                            "comparison of the two arms but of the two settings, and must not be read as one",
+                            first, second)
         logging.info("%s against %s: %+.3f, pooled sd %.3f, needs %d per side, %s",
                      first, second, comparison.difference, comparison.pooled_sd, comparison.needed,
                      "sufficient" if comparison.sufficient else "NOT yet sufficient")

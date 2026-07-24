@@ -232,6 +232,21 @@ def test_a_difference_with_no_measured_scatter_is_unresolved_not_certain():
     assert flat.needed == UNBOUNDED_EPISODES and not flat.sufficient
 
 
+def test_played_carries_the_settings_a_score_was_produced_under():
+    """A score is only the same quantity as another when it was produced the same way. The default journal name distinguishes only the arm and whether an intruder was present, so the settings have to travel with each episode for the report to see when a re-read file has pooled two runs under one arm. The seed is deliberately not among the settings that change what a score means; the map and the difficulty are."""
+    from rwintel.eval.__main__ import Played, _signature
+
+    lake = {"map": "Lake", "difficulty": 1, "max_seconds": 300, "seed": 1}
+    lake_other_seed = {"map": "Lake", "difficulty": 1, "max_seconds": 300, "seed": 2}
+    desert = {"map": "Desert", "difficulty": 1, "max_seconds": 300, "seed": 1}
+    assert Played.from_dict({"arm": "script", "settings": lake}).settings == lake
+    # Fresh seeds are the point of running many episodes, so they pool; a different map or difficulty or cutoff is a different quantity, so it does not.
+    assert _signature(lake) == _signature(lake_other_seed)
+    assert _signature(lake) != _signature(desert)
+    assert _signature({"map": "Lake", "difficulty": 1}) != _signature({"map": "Lake", "difficulty": 2})
+    assert _signature({"map": "Lake", "max_seconds": 300}) != _signature({"map": "Lake", "max_seconds": 900})
+
+
 if __name__ == "__main__":
     for name, function in sorted(globals().items()):
         if name.startswith("test_"):
