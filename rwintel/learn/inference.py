@@ -7,10 +7,11 @@ The window is short on purpose. It is not a queue depth or a throughput knob: th
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, ContextManager, Dict, List, Optional, Sequence
 
 #: How long a request waits for company, in seconds. A few milliseconds against a twenty millisecond period leaves the lag where it was.
 WINDOW = 0.004
@@ -34,10 +35,13 @@ class Batcher:
     """
 
     def __init__(self, evaluate: Callable[[List[object]], Sequence[object]],
-                 window: float = WINDOW, max_batch: int = MAX_BATCH) -> None:
+                 window: float = WINDOW, max_batch: int = MAX_BATCH,
+                 guard: Optional[ContextManager] = None) -> None:
         self.evaluate = evaluate
         self.window = window
         self.max_batch = max_batch
+        #: Held across the forward pass where a training run is writing to the very parameters it reads. The optimiser takes the same lock around one minibatch step, so without this the reader was the only party not taking a lock that exists to be taken by two, and a batch could be answered from a network half of whose weights had been stepped and half of which had not. Nothing downstream can see that: the action and its log probability come from one pass, so the ratio the update needs is still self-consistent, and the run reports nothing unusual. It is left out of the queue handling on purpose, so the window still collects arrivals while a step is in flight. A run with no optimiser hands nothing in and holds nothing.
+        self.guard: ContextManager = guard if guard is not None else contextlib.nullcontext()
         self._lock = threading.Lock()
         self._arrived = threading.Condition(self._lock)
         self._queue: List[_Ticket] = []
@@ -87,7 +91,8 @@ class Batcher:
 
     def _answer(self, batch: List[_Ticket]) -> None:
         try:
-            replies = self.evaluate([ticket.request for ticket in batch])
+            with self.guard:
+                replies = self.evaluate([ticket.request for ticket in batch])
         except BaseException as error:  # a failure has to reach the callers, or every one of them waits for ever
             for ticket in batch:
                 ticket.failed = error

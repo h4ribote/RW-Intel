@@ -40,7 +40,8 @@ def train(arguments) -> int:
     rollout = Rollout(discount=FIGHT_DISCOUNT, trace=FIGHT_TRACE)
     optimiser = Optimiser(net, device=device, two_headed=True, warmup=_warmup(arguments),
                           **_given(entropy_weight=arguments.entropy, learning_rate=arguments.learning_rate))
-    batcher = operational_batcher(net, device=device)
+    # The batcher reads the very parameters this run's optimiser writes, so it is handed the lock the optimiser takes around a minibatch step.
+    batcher = operational_batcher(net, device=device, guard=optimiser.lock)
     trainer = Trainer(rollout, optimiser, **_given(batch=arguments.batch))
     trainer.start()
 

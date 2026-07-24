@@ -268,7 +268,8 @@ def train_tactics(arguments) -> int:
     rollout = Rollout(discount=discount, trace=trace)
     optimiser = Optimiser(net, device=device, warmup=_warmup(arguments),
                           **_given(entropy_weight=arguments.entropy, learning_rate=arguments.learning_rate))
-    batcher = tactical_batcher(net, device=device)
+    # The batcher reads the very parameters this run's optimiser writes, so it is handed the lock the optimiser takes around a minibatch step.
+    batcher = tactical_batcher(net, device=device, guard=optimiser.lock)
     trainer = Trainer(rollout, optimiser, **_given(batch=arguments.batch))
     trainer.start()
 
@@ -616,7 +617,8 @@ def train_operations(arguments) -> int:
     rollout = Rollout()
     optimiser = Optimiser(net, device=device, two_headed=True, warmup=_warmup(arguments),
                           **_given(entropy_weight=arguments.entropy, learning_rate=arguments.learning_rate))
-    batcher = operational_batcher(net, device=device)
+    # The batcher reads the very parameters this run's optimiser writes, so it is handed the lock the optimiser takes around a minibatch step.
+    batcher = operational_batcher(net, device=device, guard=optimiser.lock)
     trainer = Trainer(rollout, optimiser, **_given(batch=arguments.batch))
     trainer.start()
 
