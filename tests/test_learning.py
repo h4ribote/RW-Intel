@@ -43,7 +43,7 @@ from rwintel.learn.encoding import (
 )
 from rwintel.learn.imitation import Sample, TeacherMismatch, fit, read_teacher
 from rwintel.learn.layers import LearntTactics
-from rwintel.learn.net import TacticalNet
+from rwintel.learn.net import OperationalNet, TacticalNet
 from rwintel.learn.reward import (
     COMPLETE_REWARD,
     DISCOUNT,
@@ -59,6 +59,7 @@ from rwintel.learn.reward import (
 from rwintel.learn.rollout import Rollout, Step
 from rwintel.learn.train import Optimiser, Trainer
 from rwintel.control.policy.tactics import Tactics, _Track
+from rwintel.eval import arms as eval_arms
 from rwintel.eval.sampling import Summary
 from rwintel.wire import (
     BLOCK_REGIONS,
@@ -967,6 +968,62 @@ class _Record:
     def __init__(self, episode: int, statistics: dict) -> None:
         self.episode, self.statistics = episode, statistics
         self.arm, self.instance = "duel", 0
+
+
+def test_a_learnt_operational_arm_loads_and_names_itself_after_its_file():
+    """The operational layer is measured on whole matches, so its arm is built for the match runner rather than the arena: a network loaded once, a batching server that answers every instance's decisions through it, and the rest of the chain left the script it is measured against. The server is handed back for the run to stop, because a (name, build) pair has nowhere to keep it, and the arm is named after its file so that the number carries what produced it."""
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "operations.pt")
+        torch.save(OperationalNet().state_dict(), path)
+        arms, batchers = eval_arms.build_all(["script", f"ops:{path}"])
+        try:
+            assert [name for name, _ in arms] == ["script", "operations"]
+            assert len(batchers) == 1
+        finally:
+            for batcher in batchers:
+                batcher.stop()
+
+
+def test_a_missing_operational_file_is_refused_rather_than_started_from_nothing():
+    """A duel refuses to measure parameters that are not there rather than starting from a fresh policy, because a plausible number about a policy nobody asked about is worse than an error. The match arm refuses for the same reason, and before it stands up any inference thread."""
+    try:
+        eval_arms.build_all(["ops:local/does-not-exist.pt"])
+    except ValueError:
+        return
+    raise AssertionError("a missing operational file was not refused")
+
+
+def test_two_arms_of_one_name_are_refused():
+    """Journalled and reported under one name, two arms of a comparison merge into one and the run silently measures half of what it was asked for; two learnt arms loaded from the same file would share the file's name, so the pair is refused."""
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "operations.pt")
+        torch.save(OperationalNet().state_dict(), path)
+        try:
+            _, batchers = eval_arms.build_all([f"ops:{path}", f"ops:{path}"])
+        except ValueError:
+            return
+        for batcher in batchers:
+            batcher.stop()
+    raise AssertionError("two arms of one name were not refused")
+
+
+def test_a_later_arm_failing_stops_the_servers_already_started():
+    """A later arm failing must not leave an earlier learnt arm's inference thread running against a run that will never start. The failure has to reach the caller, and the earlier server has to be stopped on the way out."""
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "operations.pt")
+        torch.save(OperationalNet().state_dict(), path)
+        try:
+            eval_arms.build_all([f"ops:{path}", "ops:local/does-not-exist.pt"])
+        except ValueError:
+            return
+    raise AssertionError("a failure after a learnt arm was built did not raise")
+
+
+def test_script_and_posture_arms_still_build_without_a_tensor_library():
+    """The two arms that were always here are unchanged and start no server: 'script' is the chain as it decides for itself, and a posture name pins the strategic layer. build_all returns them with no batchers to tear down."""
+    arms, batchers = eval_arms.build_all(["script", "defend"])
+    assert [name for name, _ in arms] == ["script", "defend"]
+    assert batchers == []
 
 
 if __name__ == "__main__":

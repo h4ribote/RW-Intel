@@ -2,17 +2,20 @@
 
 An arm is a name and a way of making a policy. The point of naming them is that a number is only worth keeping if what produced it is written down beside it, and "the script policy" stops identifying anything the moment there is more than one way to run it.
 
-What can be varied here is deliberately narrow. A comparison is only meaningful when one thing differs and everything else is held, so an arm is built by taking the chain as it is and pinning one decision, rather than by assembling a different chain. Pinning the posture is the first of those because the interface for it already exists and is not a test fixture: it is the same handle a human uses to take the strategic layer over, which the design calls the layer worth the least to learn and the most to hand across.
+What can be varied here is deliberately narrow. A comparison is only meaningful when one thing differs and everything else is held, so an arm is built by taking the chain as it is and replacing one decision, rather than by assembling a different chain. Pinning the posture is the first of those because the interface for it already exists and is not a test fixture: it is the same handle a human uses to take the strategic layer over, which the design calls the layer worth the least to learn and the most to hand across. Loading a learnt operational layer is the second, and it holds everything else the same in the same way: the chain is the script with exactly one decision taken from a network, so beating the script means that one decision got better and nothing else moved.
 """
 
 from __future__ import annotations
 
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from ..control.policy import ScriptPolicy, script_policy
 from ..control.policy.contracts import Posture
 
 Arm = Tuple[str, Callable]
+
+#: How a learnt-layer arm names the file it loads, as in `ops:local/operations.pt`. The prefix is what tells a path from a posture, and it names the layer because the operational layer is the only one a match measures — the tactical layer is measured on the arena, off any match at all.
+OPERATIONAL_PREFIXES = ("ops", "operations")
 
 
 def pinned(posture: Posture) -> Callable:
@@ -27,17 +30,79 @@ def pinned(posture: Posture) -> Callable:
 
 
 def parse(name: str) -> Arm:
-    """An arm from its written name: `script` for the chain as it decides for itself, or a posture's name for the chain pinned to it."""
+    """An arm from its written name: `script` for the chain as it decides for itself, or a posture's name for the chain pinned to it. A learnt operational arm (`ops:<path>`) is not built here because it loads a network and stands up a batching server, neither of which belongs in a name a control process running only scripts must be able to parse without a tensor library; it is built by `build_all`."""
     if name == "script":
         return name, script_policy
     key = name.upper()
     if key in Posture.__members__:
         return name.lower(), pinned(Posture[key])
-    raise ValueError(f"no arm named {name!r}: expected 'script' or one of {', '.join(p.name.lower() for p in Posture)}")
+    raise ValueError(f"no arm named {name!r}: expected 'script', 'ops:<path>', or one of {', '.join(p.name.lower() for p in Posture)}")
 
 
-def parse_all(names: List[str]) -> List[Arm]:
-    arms = [parse(name) for name in names]
-    if len({name for name, _ in arms}) != len(arms):
-        raise ValueError("two arms of a comparison cannot share a name")
-    return arms
+def _is_operational(name: str) -> bool:
+    prefix, separator, _ = name.partition(":")
+    return bool(separator) and prefix in OPERATIONAL_PREFIXES
+
+
+def operational(name: str, device: Optional[str] = None) -> Tuple[Arm, object]:
+    """A learnt operational layer, loaded from a file, as an arm of a match comparison.
+
+    Everything but the operational decision is the script it is measured against, exactly as a training run holds it, and the layer is handed no rollout, so with nowhere to record a decision it records none: this reads the network, it does not learn it. One network is loaded and one batching server answers every instance's decisions through it, the same arrangement the duel uses for the tactical layer; the server is returned for the run to stop, because a `(name, build)` pair has nowhere to keep it.
+
+    Refused rather than started from nothing when the file is not there, which is what the duel does and for the same reason: a comparison that quietly scored a freshly initialised policy would produce a perfectly plausible number about a policy nobody asked about.
+
+    The intruder the design requires under evaluation is not built in here. It is attached uniformly to every arm by the session from the run's `--intrude`, so building one into this arm alone would disturb the learnt side and not the script it is measured against.
+    """
+    import os
+
+    _, _, path = name.partition(":")
+    path = path.strip()
+    if not path:
+        raise ValueError(f"an operational arm needs a path, as in 'ops:local/operations.pt', not {name!r}")
+    if not os.path.exists(path):
+        raise ValueError(f"there are no parameters at {path} to measure")
+
+    # Imported here rather than at the top of the module so that a control process running only script and posture arms never loads the tensor library, which is the same discipline the deciders keep.
+    import torch
+
+    from ..learn.deciders import NetworkOperations, operational_batcher
+    from ..learn.net import OperationalNet
+    from ..learn.policy import OPERATIONAL, LearningPolicy
+
+    # The games this process is scored beside run on these cores; a library that helps itself to all of them turns every inference into a fight with the simulation it is measuring.
+    torch.set_num_threads(2)
+    where = torch.device(device) if device else torch.device("cpu")
+    net = OperationalNet().to(where)
+    net.load_state_dict(torch.load(path, map_location=where))
+    batcher = operational_batcher(net, device=where)
+
+    def build(session) -> LearningPolicy:
+        # A fresh decider per session because it answers for one instance; the network behind it is shared, which is the whole point of batching the inference across instances. No rollout, so the layer decides and writes nothing down.
+        return LearningPolicy(session, OPERATIONAL, NetworkOperations(net, where, batcher), None, session.instance)
+
+    return (os.path.splitext(os.path.basename(path))[0], build), batcher
+
+
+def build_all(names: List[str], device: Optional[str] = None) -> Tuple[List[Arm], List[object]]:
+    """Every arm of a comparison, and the inference servers any of them started.
+
+    Script and pinned-posture arms need nothing torn down and start no server. A learnt operational arm loads a network once and answers every instance's decisions through one batching server, so the server is returned alongside the arms for the run to stop when it is done. Two arms of a comparison cannot share a name: journalled and reported under one name they would merge into one, and the run would silently measure half of what it was asked for.
+    """
+    arms: List[Arm] = []
+    batchers: List[object] = []
+    try:
+        for name in names:
+            if _is_operational(name):
+                arm, batcher = operational(name, device)
+                arms.append(arm)
+                batchers.append(batcher)
+            else:
+                arms.append(parse(name))
+        if len({name for name, _ in arms}) != len(arms):
+            raise ValueError("two arms of a comparison cannot share a name")
+    except BaseException:
+        # A later arm failing must not leave an earlier learnt arm's inference thread running against a run that will never start.
+        for batcher in batchers:
+            batcher.stop()
+        raise
+    return arms, batchers

@@ -7,13 +7,15 @@ The tests build the pieces directly rather than through a session, because what 
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rwintel.control.intervention import Interface, Intervention, Kind
-from rwintel.control.intruder import Intruder
+from rwintel.control.intruder import Intruder, Log
+from rwintel.control.session import EpisodeSettings, Session
 from rwintel.control.policy.contracts import Doctrine, SQUAD_CAP, SquadRecord, TaskContract
 from rwintel.control.policy.organisation import Organisation
 from rwintel.wire import (
@@ -210,6 +212,53 @@ def test_units_moved_into_a_squad_taint_it_as_surely_as_the_one_they_left():
 
     assert 0 in intruder.log.touched
     assert len(intruder.log.touched) == 2
+
+
+def test_a_finished_episode_records_the_interference_before_the_policy_is_put_down():
+    """The intruder's log lives on the policy's own outside commanders, and the session puts the policy down the moment the match ends. If the record reads the interference after that put-down it reads an empty list every time, and every episode an intruder disturbed is journalled as undisturbed — the one confusion this field exists to prevent, and the tainting a learning run depends on would have nothing in the record to answer to. So the record has to be gathered while the policy is still standing, exactly as the statistics are."""
+
+    class _Stats:
+        def as_dict(self):
+            return {"interventions": 7}
+
+    class _Commander:
+        def __init__(self, log):
+            self.log = log
+
+    class _Policy:
+        def __init__(self, commander):
+            self.statistics = _Stats()
+            self.outside = [commander]
+            self.closed = False
+
+        def close(self):
+            # The put-down the real chain does at episode end; the reference is cleared by the session right after.
+            self.closed = True
+
+    log = Log(events=[{"kind": "contract", "squad": 5}], touched={5})
+    policy = _Policy(_Commander(log))
+
+    session = Session.__new__(Session)
+    session.policy = policy
+    session.outside = list(policy.outside)
+    session.sync = {}
+    session.settings = EpisodeSettings()
+    session.arm = "operations"
+    session.instance = 0
+    session.episode_started_at = 0.0
+    session.records = []
+    session.episodes_wanted = 1
+    session.journal = None
+
+    session.on_episode(json.dumps({
+        "seconds": 300, "winner": -1, "aliveTeams": 2, "timeout": True,
+        "team": 0, "episode": 1, "standing": [],
+    }).encode("utf-8"))
+
+    assert policy.closed and session.policy is None
+    record = session.records[-1]
+    assert record.interference.get("touched") == [5]
+    assert len(record.interference.get("events", [])) == 1
 
 
 if __name__ == "__main__":

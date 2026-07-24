@@ -139,7 +139,12 @@ def main(argv=None) -> int:
     parser.add_argument("--from", dest="source", default=None,
                         help="report a journal written by an earlier run instead of running anything")
     parser.add_argument("--arm", action="append", default=None,
-                        help="an arm of the comparison: 'script', or a posture name to pin the strategic layer to. Repeatable")
+                        help="an arm of the comparison: 'script', a posture name to pin the strategic layer to, "
+                             "or 'ops:<path>' to load a learnt operational layer with the rest of the chain left "
+                             "script. Repeatable")
+    parser.add_argument("--device", default=None,
+                        help="where a learnt arm's network runs. The default is the processor, which at these "
+                             "sizes beats the card")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8642)
     parser.add_argument("--instances", type=int, default=1)
@@ -171,7 +176,12 @@ def main(argv=None) -> int:
         report(played, OPENING_WEIGHTS)
         return 0
 
-    arms = arm_names.parse_all(arguments.arm or ["script"])
+    try:
+        arms, batchers = arm_names.build_all(arguments.arm or ["script"], device=arguments.device)
+    except ValueError as refusal:
+        # A named arm that cannot be built — a posture that is not one, a learnt file that is not there, two arms sharing a name — is refused before any game connects, with the reason rather than a traceback. A comparison that quietly measured the wrong thing is worse than one that never started.
+        logging.error("%s", refusal)
+        return 1
     # The intruder is in the default file name because an interfered-with run and an undisturbed one measure different quantities, and the likeliest way to confuse them is to have written them to the same place.
     run = "-".join(name for name, _ in arms) + ("-intruded" if arguments.intrude else "")
     journal = Journal(arguments.record or default_path(run))
@@ -197,7 +207,13 @@ def main(argv=None) -> int:
         server.stop()
         return 1
     finally:
+        # Stopped whichever way the run ends. A learnt arm's batching server is a background thread holding the network; a run that returned without stopping it would leave it waiting on requests that never come.
+        for batcher in batchers:
+            batcher.stop()
         journal.close()
+
+    for batcher in batchers:
+        logging.info("batched inference averaged %.1f per call", batcher.batch_size)
 
     played = [Played.of(record) for session in sessions for record in session.records]
     if not played:

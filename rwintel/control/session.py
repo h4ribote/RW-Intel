@@ -286,6 +286,8 @@ class Session:
 
         # What the layers did is read off the policy before it is put down, and the policy is told the episode is over before anything is written down. A policy that is collecting decisions has trajectories still open at this point, and an errand that was still running when the match was called did not fail: it stopped being observed, which is a different thing and is scored differently.
         statistics = self.policy.statistics.as_dict() if hasattr(self.policy, "statistics") else {}
+        # The interference is read off the policy's own commanders here, before the policy is put down, for the same reason the statistics are: `_close_policy` sets `self.policy` to None, and `_interference` reads the outside commanders' logs off that policy. Gathered after the put-down it read an empty list every time, so every episode was journalled as undisturbed even when an intruder had been rewriting contracts throughout it — the one confusion this field exists to prevent.
+        interference = self._interference()
         self.sync = dict(payload.get("sync", self.sync))
         self._close_policy()
 
@@ -302,7 +304,7 @@ class Session:
             settings=vars(self.settings).copy(),
             statistics=statistics,
             synchronisation=dict(payload.get("sync", {})),
-            interference=self._interference(),
+            interference=interference,
             wall_seconds=max(0.0, time.time() - self.episode_started_at),
         )
         self.records.append(record)
