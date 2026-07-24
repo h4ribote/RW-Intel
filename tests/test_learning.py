@@ -1019,6 +1019,21 @@ def test_a_later_arm_failing_stops_the_servers_already_started():
     raise AssertionError("a failure after a learnt arm was built did not raise")
 
 
+def test_a_pinned_operational_arm_needs_no_network_and_no_teardown():
+    """The operational analogue of the arena's --pin: the layer pinned to one legal region and task, as a match arm. It loads no network, so build_all returns it with no batcher to stop. The floor it measures is what the region-and-task choice is worth at all: if a constant deployment scores the same as the script's careful one, the choice was not moving the match."""
+    from rwintel.learn.deciders import PinnedRegion
+
+    # The decider itself picks the lowest-numbered legal region and task, whatever board it is shown.
+    choice = PinnedRegion().choose([0.0] * 5, 0, [0, 0, 1, 1, 0, 1], [0, 1, 1])
+    assert choice.action == 2 and choice.second == 1
+    # With nothing legal there is no deployment to make.
+    assert PinnedRegion().choose([0.0], 0, [0, 0], [0, 0]) is None
+
+    arms, batchers = eval_arms.build_all(["script", "ops-pin"])
+    assert [name for name, _ in arms] == ["script", "ops-pin"]
+    assert batchers == []
+
+
 def test_script_and_posture_arms_still_build_without_a_tensor_library():
     """The two arms that were always here are unchanged and start no server: 'script' is the chain as it decides for itself, and a posture name pins the strategic layer. build_all returns them with no batchers to tear down."""
     arms, batchers = eval_arms.build_all(["script", "defend"])

@@ -83,6 +83,21 @@ def operational(name: str, device: Optional[str] = None) -> Tuple[Arm, object]:
     return (os.path.splitext(os.path.basename(path))[0], build), batcher
 
 
+def pinned_operational(name: str = "ops-pin") -> Arm:
+    """The chain with the operational layer pinned to one legal region and task, for the match runner.
+
+    The operational analogue of the arena's `--pin`: a constant deployment against which a match is read, to find whether the region-and-task choice moves the match at all. If the score with every squad sent to the same region on the same task is the same as the script's careful choice, the choice was not what moved the match. No network, so nothing is loaded and nothing has to be torn down, and it needs no path.
+    """
+    from ..learn.deciders import PinnedRegion
+    from ..learn.policy import OPERATIONAL, LearningPolicy
+
+    def build(session) -> LearningPolicy:
+        # No rollout: read from, not learnt from.
+        return LearningPolicy(session, OPERATIONAL, PinnedRegion(), None, session.instance)
+
+    return (name, build)
+
+
 def build_all(names: List[str], device: Optional[str] = None) -> Tuple[List[Arm], List[object]]:
     """Every arm of a comparison, and the inference servers any of them started.
 
@@ -92,7 +107,9 @@ def build_all(names: List[str], device: Optional[str] = None) -> Tuple[List[Arm]
     batchers: List[object] = []
     try:
         for name in names:
-            if _is_operational(name):
+            if name == "ops-pin":
+                arms.append(pinned_operational(name))
+            elif _is_operational(name):
                 arm, batcher = operational(name, device)
                 arms.append(arm)
                 batchers.append(batcher)

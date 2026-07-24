@@ -58,6 +58,22 @@ class PinnedDeparture:
         return Choice(action=self.action)
 
 
+class PinnedRegion:
+    """Answers with a fixed legal region and task, whatever board it is shown.
+
+    The operational analogue of `PinnedDeparture`, and it exists for the same reason: what a match's score can be moved by the operational layer at all is bounded by what the region-and-task choice is worth, and the way to find that bound is to take the choice away. A layer that sends every squad to the same region on the same task is making no choice at all; if the match scores the same with it as with the script that chooses carefully, then the choice was not moving the match. It picks the lowest-numbered legal region and task rather than a fixed number, because which regions exist depends on the map, and an out-of-mask region would be no deployment at all. No network and no tensor library, like the departure it mirrors.
+    """
+
+    def choose(self, state: Sequence[float], slot: int, region_mask: Sequence[float],
+               task_mask: Sequence[float]) -> Optional[Choice]:
+        region = next((index for index, value in enumerate(region_mask) if value > 0), -1)
+        task = next((index for index, value in enumerate(task_mask) if value > 0), -1)
+        if region < 0 or task < 0:
+            return None
+        # No log probability and no value: this is not a distribution, and nothing is ever learnt from what it chose.
+        return Choice(action=region, second=task)
+
+
 class NetworkOperations:
     def __init__(self, net, device=None, batcher: Optional[Batcher] = None, greedy: bool = False) -> None:
         self.net = net

@@ -140,8 +140,8 @@ def main(argv=None) -> int:
                         help="report a journal written by an earlier run instead of running anything")
     parser.add_argument("--arm", action="append", default=None,
                         help="an arm of the comparison: 'script', a posture name to pin the strategic layer to, "
-                             "or 'ops:<path>' to load a learnt operational layer with the rest of the chain left "
-                             "script. Repeatable")
+                             "'ops:<path>' to load a learnt operational layer with the rest of the chain left "
+                             "script, or 'ops-pin' to pin that layer to one legal region and task. Repeatable")
     parser.add_argument("--device", default=None,
                         help="where a learnt arm's network runs. The default is the processor, which at these "
                              "sizes beats the card")
