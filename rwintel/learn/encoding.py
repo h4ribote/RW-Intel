@@ -1,6 +1,8 @@
 """Turning a period's board into numbers, and saying what a layer is allowed to answer.
 
-Each layer gets its own cut, at its own abstraction, because that is how the design divides them: the tactical layer sees around one squad, the operational layer sees the regions and the squads and nothing below them. Two rules govern everything here. Every feature is a ratio or a length divided by a stated scale, so that nothing depends on how rich the match has become or how large the map is — a policy trained on one map has to be readable on another, and a raw credit total or a raw world coordinate would make that false. And every block is a fixed width with a validity flag, never a packed list, so that a slot means the same thing from one decision to the next; a packed list renumbers everything the moment a squad dies.
+Each layer gets its own cut, at its own abstraction, because that is how the design divides them: the tactical layer sees around one squad, the operational layer sees the regions and the squads and nothing below them. Three rules govern everything here. Every feature is a ratio or a length divided by a stated scale, so that nothing depends on how rich the match has become or how large the map is — a policy trained on one map has to be readable on another, and a raw credit total or a raw world coordinate would make that false. Every block is a fixed width with a validity flag, never a packed list, so that a slot means the same thing from one decision to the next; a packed list renumbers everything the moment a squad dies.
+
+And no feature carries the map's own frame: a direction is always measured between two things standing on the board and never against the world's axes. A policy whose answer depends on which way round the board happens to be numbered is under-specified — it spends half its training experience learning the same thing twice in a different frame — and where one process drives both sides of a board laid out as a point reflection it is not even exchangeable between them, since the two sides then read exactly opposite directions for congruent situations and the same layer becomes two different fighters. The rule is stated here because it cannot be enforced by a scale or a width: it is a property of what a feature is made of, and the only guard on it is the pair of tests that encode a mirrored board from both sides and require the same answer.
 
 The action spaces are exactly the ones the script layers already emit, which is what makes a learnt layer a replacement rather than a parallel system: the departures for the tactical layer, and one region and one task for the operational layer. The tactical departures were five and are now seven, the two added ones being a withdrawal that commits the whole way out and a concentration that goes onto the longest-ranged enemy rather than the weakest — kinds of move the script already made, with a parameter a rule used to fix handed to the layer. Neither space is a free choice — a squad may only be sent where a region exists and only given a task its doctrine allows — so both come with a mask, and the mask is computed here from the same tables the script reads rather than being learnt as a soft preference. The tactical action count follows the departure enum, so widening the enum widens the head and the mask with it.
 """
@@ -79,7 +81,7 @@ TACTICAL_FEATURES: Tuple[str, ...] = (
     *tuple(f"status_{status.name.lower()}" for status in STATUSES),
     *tuple(f"task_{task.name.lower()}" for task in TASKS),
     *tuple(f"stance_{stance.name.lower()}" for stance in STANCES),
-    "target_distance", "target_dx", "target_dy", "target_ours", "target_theirs",
+    "target_distance", "target_ahead", "target_abeam", "target_ours", "target_theirs",
     "enemies_near", "enemy_weight",
     *tuple(f"enemy_{role.name.lower()}" for role in ROLES),
     *tuple(f"ours_{role.name.lower()}" for role in ROLES),
@@ -110,13 +112,11 @@ def tactical_state(squad: SquadRecord, members: Sequence[Sighting], threats: Seq
     squad_value = sum(m.value for m in members)
     threat_value = sum(t.value for t in threats)
 
-    dx = dy = 0.0
+    ahead = abeam = 0.0
     distance = 0.0
     if target is not None and members:
-        dx, dy = target.x - squad.x, target.y - squad.y
-        distance = math.hypot(dx, dy)
-        if distance > 1.0:
-            dx, dy = dx / distance, dy / distance
+        distance = math.hypot(target.x - squad.x, target.y - squad.y)
+        ahead, abeam = _bearing(squad, target, threats)
 
     reaches = [m.kind.range for m in members if m.kind is not None and m.kind.armed]
     enemy_reaches = [t.kind.range for t in threats if t.kind is not None and t.kind.armed]
@@ -142,8 +142,9 @@ def tactical_state(squad: SquadRecord, members: Sequence[Sighting], threats: Seq
     features.extend(_one_hot(contract.stance if contract is not None else Stance.AGGRESSIVE, STANCES))
     features.extend([
         _clip(distance / DISTANCE_SCALE),
-        _clip(dx, -1.0, 1.0),
-        _clip(dy, -1.0, 1.0),
+        # Redundant on a cosine and a sine, and kept as the same insurance every other slot carries against a float creeping past the range the suite enforces.
+        _clip(ahead, -1.0, 1.0),
+        _clip(abeam, -1.0, 1.0),
         _share(target.our_value, target.enemy_value) if target is not None else 0.5,
         _clip(target.enemy_value / (squad_value + 1.0)) if target is not None else 0.0,
         _clip(len(threats) / SQUAD_SIZE_SCALE),
@@ -164,6 +165,29 @@ def tactical_state(squad: SquadRecord, members: Sequence[Sighting], threats: Seq
         1.0,
     ])
     return [_finite(value) for value in features]
+
+
+def _bearing(squad: SquadRecord, target: Optional[RegionState],
+             threats: Sequence[Sighting]) -> Tuple[float, float]:
+    """Where the errand points, measured against where the fight is rather than against the map's compass: the cosine and the sine of the angle from the direction of what is shooting at the squad to the direction of the region it was sent to.
+
+    Both are read from the squad's own centre and both are products of two vectors that live on the board, so a board turned, moved or turned end for end gives the same pair. The absolute direction this replaces describes the same situation in the map's frame, so a network reading it answers one fight two ways depending on which way round the board happens to be numbered; and where one process drives both sides of a board laid out as a point reflection, the two sides read exactly opposite directions for congruent situations and the layer stops being one layer.
+
+    The lateral term is kept signed rather than folded to its magnitude. A point reflection is a half turn and so preserves which hand is which, which means the sign survives the mirror and carries something: it says which way round the target lies from the fight, and a squad that can go round one way and not the other is in a different position from one that cannot.
+
+    Both are nought where there is nothing shooting or nowhere to be sent, because the angle between a vector and nothing is not a number. Nothing is lost by that: the vector already says which case it is, since the flag for being engaged is nought exactly when there are no threats. Two consequences are behaviour and not tidying, and are written down here rather than found later. A squad whose threats surround it, so that their centre falls on its own centre, reads the same nought pair while still reading as engaged. And a squad marching with nothing shooting at it now carries no direction at all, where before it carried one — which is the frame-dependent part and exactly what is being given up.
+    """
+    if target is None or not threats:
+        return 0.0, 0.0
+    tx, ty = target.x - squad.x, target.y - squad.y
+    fx = sum(threat.unit.x for threat in threats) / len(threats) - squad.x
+    fy = sum(threat.unit.y for threat in threats) / len(threats) - squad.y
+    reach, fight = math.hypot(tx, ty), math.hypot(fx, fy)
+    # A world unit is far below anything either quantity means, so a separation under one is standing on the spot and its direction is noise rather than a bearing.
+    if reach <= 1.0 or fight <= 1.0:
+        return 0.0, 0.0
+    tx, ty, fx, fy = tx / reach, ty / reach, fx / fight, fy / fight
+    return fx * tx + fy * ty, fx * ty - fy * tx
 
 
 def _role_shares(sightings: Sequence[Sighting]) -> List[float]:
@@ -201,6 +225,16 @@ GLOBAL_SIZE = len(GLOBAL_FEATURES)
 REGION_SIZE = len(REGION_FEATURES)
 SQUAD_SIZE = len(SQUAD_FEATURES)
 OPERATIONAL_SIZE = GLOBAL_SIZE + REGION_SLOTS * REGION_SIZE + SQUAD_SLOTS * SQUAD_SIZE
+
+#: What the operational state is made of, as one list, which is the form a set of parameters and a teacher file are stamped with so that neither can be read back under a feature list it was not written under.
+#:
+#: The three blocks are named once each rather than expanded over their slots, with the slot counts alongside. Everything the stamp has to catch changes this list — a renaming, a reordering, an addition or a removal in any block, and a change to how many slots a block has — while the expansion would be four hundred and thirty-odd names saying the same thing in a file that is read by a machine and printed to a person.
+OPERATIONAL_FEATURES: Tuple[str, ...] = (
+    *(f"global.{name}" for name in GLOBAL_FEATURES),
+    *(f"region.{name}" for name in REGION_FEATURES),
+    *(f"squad.{name}" for name in SQUAD_FEATURES),
+    f"slots.{REGION_SLOTS}.{SQUAD_SLOTS}",
+)
 
 #: One decision is a region and a task, which is the pair the contract carries and the pair the script layer picks. Kept factorised rather than flattened into 144 because the two are chosen for different reasons — where is worth going, and what to do when you arrive — and because a mask over a product space is far sparser than the product of two masks.
 OPERATIONAL_REGIONS = REGION_SLOTS

@@ -145,7 +145,7 @@ python -m rwintel.control --instances 2 --paired --opponents 0 --map Lake --max-
 .\tools\windows\Start-RwPairedMatch.ps1 -Speed 10
 ```
 
-学習の実行である。`python -m rwintel.learn` は最初の語で実行の種類を選び、`tactics` `operations` `collect` `clone` `duel` の五つがある。戦術層は試合を回さず交戦アリーナの中で学習させ、作戦層は通常のスキルミッシュで乱入者を入れて回す。`collect` は決定器を渡さずに走らせて、スクリプトの決定を教師データとして書き出す。
+学習の実行である。`python -m rwintel.learn` は最初の語で実行の種類を選び、`tactics` `operations` `collect` `clone` `duel` `avow` の六つがある。戦術層は試合を回さず交戦アリーナの中で学習させ、作戦層は通常のスキルミッシュで乱入者を入れて回す。`collect` は決定器を渡さずに走らせて、スクリプトの決定を教師データとして書き出す。`avow` はゲームに触れず、特徴の並びを名乗っていないパラメータの一式に、どの符号化に当てたものかという人間の言い分を理由の文ごと書き込む——刻印を持たない古いファイルを使う唯一の道であり、以後どの読み込み口も「これは当てはめの記録ではなく人の言葉である」と毎回言う。
 
 ```powershell
 python -m rwintel.learn tactics --instances 4 --save local\tactics.pt

@@ -446,6 +446,30 @@ def test_a_scored_episode_says_which_discs_it_had_to_take_and_which_to_hold():
     assert record["shares"] == {4: 1.0, 9: 0.0}
 
 
+def test_a_scored_episode_says_how_far_each_side_ended_from_its_contests():
+    """Whether the staged squads reached the scored ground at all, recorded for BOTH sides, because one side's figures cannot say what they were meant to.
+
+    The board is a point reflection, but the ground under it is not: this side stages from a site the map was searched for and the other from that site's reflection, which is wherever the reflection lands, with a march nothing can make congruent. The arena's answer to that has always been the script arm's self-play zero — and that bounds the asymmetry only under the script, since a fighter strong enough to exploit a shorter march would turn it into a score no arm comparison could tell from an operational difference. With both sides written down, a run can be asked whether the two deployments arrived alike instead of being trusted to have.
+
+    Here they plainly did not: our squad ended inside the catchment and theirs a long way outside it, which is what a non-congruent march looks like in the record.
+    """
+    arena = _arena(seed=11)
+    _contested(arena, 4, (0.0, 0.0), 1.0)
+    arena.our_ops = arena.their_ops = None
+    arena.squads = {0: SquadRecord(id=0, doctrine=Doctrine.VANGUARD, members=[1])}
+    arena.enemy = {1: SquadRecord(id=1, doctrine=Doctrine.VANGUARD, members=[2])}
+
+    arena._score(_observation(units=[_unit(1, 100.0, 0.0), _unit(2, 3000.0, 0.0, hostile=1)]))
+    record = arena.statistics.as_dict()
+    assert (record["our_alive"], record["our_in_catchment"], record["our_reach"]) == (1, 1, 100.0)
+    assert (record["their_alive"], record["their_in_catchment"], record["their_reach"]) == (1, 0, 3000.0)
+
+    # A side with nothing left on the board reads minus one rather than nought, which is outside the range of a distance and so cannot be read as having arrived.
+    arena.enemy = {1: SquadRecord(id=1, doctrine=Doctrine.VANGUARD, members=[])}
+    arena._score(_observation(units=[_unit(1, 100.0, 0.0)]))
+    assert arena.statistics.as_dict()["their_reach"] == -1.0
+
+
 def test_a_terminal_is_read_from_where_its_disc_started_and_not_from_the_neutral_half():
     """An errand is worth what it changed, and what it changed cannot be read without knowing where the ground started.
 

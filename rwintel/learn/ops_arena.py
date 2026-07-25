@@ -144,9 +144,14 @@ class OpsStatistics:
     #: Which tactical layer did the fighting beneath both sides: the handwritten ladder, or trained parameters frozen under the arena and named by their content. It belongs with the draw settings above and meets their test word for word — it never reaches the episode settings, and two runs made under different ones are two different arenas. It is a stronger case than the garrison scale rather than a weaker one, because the fighting under an operational choice is the whole of what turns a deployment into a share of a disc: a different fighter moves the disc tallies, the rate at which a garrison holds its own ground through the horizon, the reach a squad ends at, and therefore the horizon and the catchment radius that were both tuned to where an assaulting squad halts.
     tactics: str = SCRIPT_TACTICS
     #: Diagnostics that say whether the staged squads — the thing whose deployment the arena exists to measure — actually reached and contested the catchments, or whether the score was decided by the pre-placed garrisons alone. If the squads never register in a catchment the self-play zero is trivially met by the mirror garrisons and the arena resolves nothing.
+    #:
+    #: Recorded for both sides and not only this one, because the mirror is a reflection of the board and not of the ground: this side stages from a site the map was searched for, the other from that site's reflection, which is wherever the reflection lands, with a march the reflection cannot make congruent. The arena's answer to that has always been the script arm's self-play zero, and that zero bounds the asymmetry only under the script — a fighter strong enough to exploit a shorter march would convert it into a score that no arm comparison could tell from an operational difference. The two sides' figures side by side are what says whether both deployments reached their contests alike, which is the evidence that was missing when a frozen fighter first made the two sides read a board differently.
     our_alive: int = 0
     our_in_catchment: int = 0
     our_reach: float = 0.0
+    their_alive: int = 0
+    their_in_catchment: int = 0
+    their_reach: float = 0.0
     #: How many of this side's horizon payments actually landed on a decision, read back off the layer's own count of the errands it closed exactly as the engagement arena reads its own, rather than off the number of times the horizon offered one — which is one per staged squad by construction and says nothing. A payment lands only where the layer had a decision of that squad's still waiting or a step of it still in the buffer, so the figure is at most the staged squad count and equals it whenever every squad had a decision recorded at all. It is nought for a run that keeps no trajectories, which is the truth for it: nothing was recorded for a payment to reach.
     #:
     #: This used to be far below the staged count for a reason that has been removed. A squad's trajectory was cut every time a fresh contract replaced its errand, and a cut trajectory cannot take a terminal, so a layer that re-drew its region every period landed almost none of them. Now that every operational period is paid the movement of the squad's own scored figure there is no errand boundary left to cut at, the trajectory runs the whole episode, and the horizon is simply the last of a series of payments.
@@ -163,6 +168,8 @@ class OpsStatistics:
                 "priorities": {int(r): round(w, 4) for r, w in self.priorities.items()},
                 "refused": self.refused, "our_alive": self.our_alive,
                 "our_in_catchment": self.our_in_catchment, "our_reach": round(self.our_reach, 1),
+                "their_alive": self.their_alive, "their_in_catchment": self.their_in_catchment,
+                "their_reach": round(self.their_reach, 1),
                 "board": self.board, "horizon_ms": self.horizon_ms, "radius": round(self.radius, 1),
                 "squads": self.squads, "pairs": self.pairs, "garrison": round(self.garrison, 1),
                 "tactics": self.tactics,
@@ -188,7 +195,9 @@ class OpsArena(Arena):
         #
         # One tactical factory serves BOTH sides, which is deliberate and not a shortcut. A trained tactical layer frozen under the arena therefore fights for the enemy exactly as it fights for us, which is the least a mirror can require: were only one side to fight with it the two sides would plainly stop being exchangeable, the script arm's pooled self-play mean would no longer have to be nought, and the arena would lose the only instrument that says whether the board leans. It is also what the learning order means by an operational layer trained against a frozen tactical layer — the whole environment's fighting is that layer, not one side's.
         #
-        # It is the least a mirror requires and it is NOT enough on its own, which matters and must not be read the other way. The board is a point reflection about a centre, but the other side's view is built by turning the ownership flags over and not by reflecting the coordinates, so the two sides are handed the same function applied to inputs that are congruent in what they mean and not in where they are. A handwritten ladder reading distances and strengths comes out the same either way; a network need not, and nothing here can promise it does. So a frozen tactical layer makes the run a different instrument in the strict sense: the script arm's self-play zero has to be measured again under it before any arm measured beside it is believed, exactly as it had to be measured for the map and the catchment.
+        # It is the least a mirror requires, and what it is enough for differs between the two cuts. The board is a point reflection about a centre, but the other side's view is built by turning the ownership flags over and not by reflecting the coordinates, so the two sides are handed the same function applied to inputs that are congruent in what they mean and not in where they are. A handwritten ladder reading distances and strengths comes out the same either way. So now does a learnt TACTICAL layer, because no tactical feature is measured against the map's axes any more — the direction a squad's errand points is measured from what is shooting at it, and a half turn leaves that alone — and the encoding suite pins it by reading one mirrored board from both sides. The OPERATIONAL vector is not congruent yet: its region and squad rows are laid out by the map's own numbering and by the global squad slot, so congruent ground sits at different offsets for the two sides, and its contact record cannot be turned over at all because the wire's region row carries no counterpart to say when we ourselves were last seen. A learnt operational layer is therefore what still reads a frame here.
+        #
+        # A frozen tactical layer makes the run a different instrument in the strict sense whichever way that falls: the script arm's self-play zero has to be measured again under it before any arm measured beside it is believed, exactly as it had to be measured for the map and the catchment. That holds all the more since the tactical features changed — parameters fitted before the change read two slots whose meaning has moved, so they have to be refitted and everything measured under them measured again.
         #
         # Two layer objects rather than one, off whatever single network the factory closes over. A tactical layer keeps per-side state — what each of its squads has destroyed, and the board and moment it last saw — and the two sides are handed different boards, this side's view and the other side's inverted and rehomed one, so one shared object would fold the two sides' bookkeeping together and the mirror would stop being a mirror.
         self.our_ops = operations(session, self.catalogue) if operations else Operations(session, self.catalogue)
@@ -512,11 +521,24 @@ class OpsArena(Arena):
         self.statistics.held = {region: self.garrison_share.get(region, 0.5) for region in shares}
         self.statistics.priorities = {region: self.priorities.get(region, 0.0) for region in shares}
 
-        # Diagnose whether the staged squads reached the catchments at all, or the mirror garrisons decided the score by themselves. A member is any unit still on the board belonging to one of this side's staged squads.
-        members = {m for squad in self.squads.values() for m in squad.members}
-        by_id = {unit.id: unit for unit in units}
+        # Diagnose whether the staged squads reached the catchments at all, or the mirror garrisons decided the score by themselves. Both sides, because the question the mirror leaves open is whether the two sides reached their contests alike: this side stages from a validated site while the other stages from that site's reflection, which is an arbitrary point on ground nothing checked, with a march the reflection cannot make congruent. One side's figures alone cannot say whether that told, and a stronger fighter on both sides is exactly what would convert such a difference into a score.
+        (self.statistics.our_alive, self.statistics.our_in_catchment,
+         self.statistics.our_reach) = self._reached(self.squads, units)
+        (self.statistics.their_alive, self.statistics.their_in_catchment,
+         self.statistics.their_reach) = self._reached(self.enemy, units)
+
+        self._finish_side(self.our_ops, self.squads, shares, +1.0, units)
+        self._finish_side(self.their_ops, self.enemy, shares, -1.0, units)
+        self._tally()
+
+    def _reached(self, squads: Dict[int, SquadRecord], unit_states) -> Tuple[int, int, float]:
+        """How much of one side's staged strength is still on the board, how much of it ended inside a contest's catchment, and how close the nearest of it came to any contest.
+
+        A member is any unit still on the board belonging to one of that side's staged squads; the reach is the nearest approach of the whole side, quoted as a distance, and is minus one where the side has nothing left to measure — a figure outside the range of a distance, so a reader cannot mistake it for having arrived. Written for either side from the same rule, because a diagnosis of whether a deployment reached its ground only means anything beside what the other deployment did on ground laid out to be its reflection.
+        """
+        members = {m for squad in squads.values() for m in squad.members}
+        by_id = {unit.id: unit for unit in unit_states}
         alive = [by_id[m] for m in members if m in by_id]
-        self.statistics.our_alive = len(alive)
         radius2 = self.radius * self.radius
         in_catchment = 0
         reach = float("inf")
@@ -527,12 +549,7 @@ class OpsArena(Arena):
                 if d2 <= radius2:
                     in_catchment += 1
                     break
-        self.statistics.our_in_catchment = in_catchment
-        self.statistics.our_reach = math.sqrt(reach) if reach != float("inf") else -1.0
-
-        self._finish_side(self.our_ops, self.squads, shares, +1.0, units)
-        self._finish_side(self.their_ops, self.enemy, shares, -1.0, units)
-        self._tally()
+        return len(alive), in_catchment, math.sqrt(reach) if reach != float("inf") else -1.0
 
     def _tally(self) -> None:
         """Writes down how many of this side's horizon payments actually landed on a decision, taken from the layer's own count of the errands it closed exactly as the engagement arena's tally is.

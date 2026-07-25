@@ -5,8 +5,11 @@
     python -m rwintel.learn collect    --layer tactics --instances 4 --record local/teacher.jsonl
     python -m rwintel.learn clone      --layer tactics --teacher local/teacher.jsonl --save local/tactics-bc.pt
     python -m rwintel.learn duel       --load local/tactics.pt --instances 8 --max-seconds 600
+    python -m rwintel.learn avow       --layer operations --load local/operations.pt --because "why you know"
 
-Start this first and then the game instances, as with every other runner here. The cloning run is the exception: it reads a file and touches no game at all.
+Start this first and then the game instances, as with every other runner here. The cloning run and the avowal are the exceptions: they read a file and touch no game at all.
+
+The avowal is not part of the order of work below and is run only where a set of parameters cannot say for itself what it was fitted to. Every set written here states the feature list it was fitted to, and every loader refuses one that does not, because nothing else in a file can tell parameters fitted to an older meaning of a slot from ones fitted to this meaning. Parameters recorded before that list was written down state none and are refused with the rest — which is honest, and which throws away work that is perfectly good whenever the layer's encoding has not in fact moved. Avowing is how a person says that into the file itself, where every later reader finds it and every loader says out loud that the list beside those parameters is somebody's word and not a fit's record.
 
 The four make one order of work. The collecting run turns the handwritten layer into a file of decisions, the cloning run fits a network to them, the training run improves that network against the arena while warming its value head first, and the duelling run measures what came out against the handwritten layer it started from. None of the four is required by the others — a policy can be trained from noise and measured without ever having been cloned — but skipping the first two spends the early part of a training run rediscovering a rule ladder that was already written down.
 
@@ -177,20 +180,31 @@ def _stalls(arguments) -> list:
 
 
 def _load(net, path: Optional[str], device) -> None:
+    """Parameters to carry on from, where there are any. A path that names nothing yet is a run starting from a fresh policy, which is the ordinary way a first run begins; a path that names a file fitted to a different feature list is not tolerated the same way, because carrying on from it would train a policy that reads the board wrongly and report the run as a continuation of the one before."""
     if not path:
         return
     import os
 
     import torch
 
+    from .net import EncodingRefused, load_encoded
+
     if not os.path.exists(path):
         log.info("no parameters at %s yet, starting from a fresh policy", path)
         return
-    net.load_state_dict(torch.load(path, map_location=device))
+    state = torch.load(path, map_location=device)
+    try:
+        avowal = load_encoded(net, state)
+    except EncodingRefused as refused:
+        raise SystemExit("the parameters at %s cannot be carried on from: %s" % (path, refused))
     log.info("loaded parameters from %s", path)
+    if avowal:
+        # Said every time rather than once when the file was avowed, because what is being carried on from is then a policy accepted on somebody's word about which features it was fitted to, and a run's log is where a later reader looks to find out what it was made of.
+        log.warning("the feature list at %s is a person's word and not a fit's record: %s", path, avowal)
 
 
 def _save(net, path: Optional[str]) -> None:
+    """Parameters written out with the feature list they were fitted to inside them, which the network carries as a buffer so that saving is the ordinary call and the two can never be separated."""
     if not path:
         return
     import os
@@ -202,6 +216,42 @@ def _save(net, path: Optional[str]) -> None:
         os.makedirs(directory, exist_ok=True)
     torch.save(net.state_dict(), path)
     log.info("saved parameters to %s", path)
+
+
+def avow(arguments) -> int:
+    """Writes into a set of parameters the feature list a person swears it was fitted to, so that parameters recorded before the list existed can be read again.
+
+    Every loader here refuses a file that states no feature list, because nothing in such a file says which encoding produced it, and that refusal is right: the failure it prevents is a network reading two slots as something they no longer are while reporting perfectly ordinary numbers for doing so. But parameters recorded before the list was written down are not thereby wrong, and where a layer's encoding has not moved since they were fitted, a person knows something true that the file does not state. This is where they state it, into the file, and it is the only way: nothing else here opens a state dictionary to add anything to it.
+
+    The layer is named rather than guessed at, and every file named is held to it. What a set of parameters can prove about itself is the width it reads, which says which layer it belongs to and says nothing at all about what the numbers in those slots mean — so naming the layer turns that width into a real refusal, and a run over a directory of files under one layer's name refuses the other layer's files one by one instead of stamping them. That is the accident worth being safe against: the two encodings do not move together, so a tactical file avowed under today's tactical list would afterwards load in silence and be measured under its own trained name, reporting a number about a misreading of the board.
+
+    The file is rewritten beside itself and moved into place, so that a failure part way through leaves the parameters as they were. There is only one copy of most of these and several cost a training run to make again.
+    """
+    import os
+
+    import torch
+
+    from .net import EncodingRefused, OperationalNet, TacticalNet, avowed
+
+    paths = [path.strip() for path in str(arguments.load or "").split(",") if path.strip()]
+    if not paths:
+        raise SystemExit("say which parameters to avow, as in --load local/operations.pt")
+    words = str(arguments.because or "").strip()
+    net = TacticalNet() if arguments.layer == TACTICAL else OperationalNet()
+    for path in paths:
+        if not os.path.exists(path):
+            raise SystemExit("there are no parameters at %s to avow" % path)
+        try:
+            state = avowed(torch.load(path, map_location="cpu"), net, words)
+        except EncodingRefused as refused:
+            raise SystemExit("the parameters at %s cannot be avowed as the %s layer's: %s"
+                             % (path, arguments.layer, refused))
+        beside = path + ".avowing"
+        torch.save(state, beside)
+        os.replace(beside, path)
+        log.info("the parameters at %s now state the %s feature list on your word: %s",
+                 path, arguments.layer, words)
+    return 0
 
 
 def _episode(arguments, arena: bool) -> EpisodeSettings:
@@ -677,24 +727,30 @@ def collect(arguments) -> int:
     rollout.cut_all()
     steps = rollout.drain(keep_tainted=True)
     log.info("collected %d decision(s)", len(steps))
-    _write_steps(steps, arguments.record or "local/teacher.jsonl")
+    _write_steps(steps, arguments.record or "local/teacher.jsonl", arguments.layer)
     return 0
 
 
-def _write_steps(steps, path: Optional[str]) -> None:
-    """One decision per line, in the form anything fitting to them reads.
+def _write_steps(steps, path: Optional[str], layer: str) -> None:
+    """The feature list the decisions were written under, and then one decision per line, in the form anything fitting to them reads.
 
-    What was legal is written down beside what was chosen, as flags rather than as weights. Without it a decision is not reconstructible: the operational layer picks a region out of the few that exist on the board it saw, and a reader that could not tell which those were would be fitting a distribution over twenty-four regions of which most were never on offer. A file that predates this carries none, and a reader is expected to take that as everything having been allowed, which is what the tactical layer's mask always is anyway.
+    The list comes first because a teacher file records an encoding as much as it records a policy, and the decisions themselves cannot say which one: a state of the right length written under an older feature list fits without complaint and yields a network reading two slots as something they are no longer. Stated once at the head rather than on every line, because it is a fact about the file and not about the decision — and the file is opened with truncation here, so the way anybody makes a larger teacher is by joining two of these end to end, which leaves the second run's head in the middle where the reader checks it again and passes over it.
+
+    What was legal is written down beside what was chosen, as flags rather than as weights. Without it a decision is not reconstructible: the operational layer picks a region out of the few that exist on the board it saw, and a reader that could not tell which those were would be fitting a distribution over twenty-four regions of which most were never on offer.
     """
     if not path or not steps:
         return
     import json
     import os
 
+    from .imitation import feature_names
+
     directory = os.path.dirname(os.path.abspath(path))
     if directory:
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as out:
+        out.write(json.dumps({"layer": layer, "encoding": list(feature_names(layer))},
+                             separators=(",", ":")) + "\n")
         for step in steps:
             out.write(json.dumps({"state": [round(v, 5) for v in step.state], "action": step.action,
                                   "second": step.second, "squad": step.squad, "at_ms": step.at_ms,
@@ -740,9 +796,12 @@ def main(argv=None) -> int:
             stream.reconfigure(errors="replace")
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("what", choices=["tactics", "operations", "collect", "clone", "duel"])
-    parser.add_argument("--layer", default=TACTICAL, choices=[TACTICAL, OPERATIONAL],
-                        help="which layer to collect or to clone")
+    parser.add_argument("what", choices=["tactics", "operations", "collect", "clone", "duel", "avow"])
+    parser.add_argument("--layer", default=None, choices=[TACTICAL, OPERATIONAL],
+                        help="which layer to collect, to clone or to avow. Collecting and cloning default to "
+                             "the tactical layer; avowing has no default and must be told, because the width "
+                             "a file reads is the only thing that can refuse one layer's parameters offered as "
+                             "another's, and it can only do that once a layer has been named")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8642)
     parser.add_argument("--instances", type=int, default=1)
@@ -834,6 +893,11 @@ def main(argv=None) -> int:
                              "baseline is taken by default because how far the arena leans is a property of "
                              "the seed, so a policy's score is only readable beside the lean of the very "
                              "seed it was measured under")
+    parser.add_argument("--because", default=None,
+                        help="why a person believes a set of parameters was fitted to the feature list now in "
+                             "force, written into the file beside that list when avowing. Required there, and "
+                             "kept, because it is the only evidence the file will ever carry for a claim "
+                             "nothing in it can check")
     parser.add_argument("--record", default=None, help="where decisions or episodes are written")
     parser.add_argument("--record-episodes", default=None)
     parser.add_argument("--verbose", action="store_true")
@@ -843,7 +907,15 @@ def main(argv=None) -> int:
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
     if arguments.max_seconds <= 0:
         arguments.max_seconds = ARENA_SECONDS if arguments.what != "operations" else 300
+    if arguments.what == "avow" and arguments.layer is None:
+        # No default here, where every other command has one. An avowal writes one layer's feature list into a file on a person's word, and a default would let the wrong layer's list be written by saying nothing at all — which is the one accident this command has to be safe against, since a file avowed under the wrong list afterwards loads in silence.
+        parser.error("say which layer's parameters are being avowed, with --layer %s or --layer %s"
+                     % (TACTICAL, OPERATIONAL))
+    if arguments.layer is None:
+        arguments.layer = TACTICAL
 
+    if arguments.what == "avow":
+        return avow(arguments)
     if arguments.what == "tactics":
         return train_tactics(arguments)
     if arguments.what == "operations":

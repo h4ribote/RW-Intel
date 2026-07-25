@@ -11,6 +11,8 @@ Nothing here launches a game. The arena is exercised only where it can be: the m
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import math
 import os
@@ -37,8 +39,11 @@ from rwintel.learn.arena import (
 )
 from rwintel.learn.deciders import Choice, NetworkTactics
 from rwintel.learn.encoding import (
+    GLOBAL_SIZE,
+    OPERATIONAL_FEATURES,
     OPERATIONAL_SIZE,
     REGION_FEATURES,
+    REGION_SIZE,
     SQUAD_FEATURES,
     TACTICAL_ACTIONS,
     TACTICAL_FEATURES,
@@ -51,8 +56,17 @@ from rwintel.learn.encoding import (
 )
 from rwintel.learn.imitation import Sample, TeacherMismatch, fit, read_teacher
 from rwintel.learn.layers import LearntOperations, LearntTactics
-from rwintel.learn.net import OperationalNet, TacticalNet
-from rwintel.learn.ops_arena import SCRIPT_TACTICS
+from rwintel.learn.net import (
+    AVOWAL_KEY,
+    ENCODING_KEY,
+    EncodingRefused,
+    OperationalNet,
+    TacticalNet,
+    avowed,
+    encoding_avowal,
+    encoding_stamp,
+)
+from rwintel.learn.ops_arena import SCRIPT_TACTICS, OpsArena
 from rwintel.learn.ops_run import frozen_tactics
 from rwintel.learn.reward import (
     COMPLETE_REWARD,
@@ -551,6 +565,150 @@ def test_the_board_read_from_the_other_side_exchanges_the_sides_and_nothing_else
     # Nothing is copied, so the two views are of the very same units and the observation is untouched.
     assert ours.ours[0].unit is theirs.enemies[0].unit
     assert [unit.hostile for unit in observation.unit_states] == [0, 1]
+
+
+#: The point a constructed board is reflected about, as the arenas reflect their own draws about the mean of the places an engagement may be built on. Any centre does; this one is round.
+MIRROR_CENTRE = (500.0, 500.0)
+
+
+def _reflected(x, y):
+    """A point taken through the same half turn the arenas take their mirror force through: both coordinates negated about the centre."""
+    return (2 * MIRROR_CENTRE[0] - x, 2 * MIRROR_CENTRE[1] - y)
+
+
+def _mirrored_board():
+    """One board laid out as a point reflection about a centre, read once from each side, which is the situation the constructed arenas put a layer in.
+
+    Four groups of units and two regions, in exactly reflected pairs: our squad and its reflection, which is the enemy's squad; the enemy garrison our squad is walking into and its reflection, which is our own garrison standing where the enemy's squad is walking; the region our squad was sent to and its reflection, which is the region the enemy's squad was sent to. Every reflected unit is of the SAME TYPE as the unit it reflects, since what makes the two sides exchangeable is one force mirrored and not two different forces facing each other, and a difference of type would show up as a difference of worth, of role and of weapon reach in a dozen slots that have nothing to do with the geometry.
+
+    Deliberately chiral: the squad's members, the enemies shooting at it and the region it was sent to are nowhere near collinear, so a bearing measured across the fight has a large lateral part. On a collinear board that part is nought on both sides and a test of it would pass whichever way round its sign was written.
+
+    The fog record is set the way a match sets it and NOT symmetrically: hostiles are standing in the region our squad is attacking, so the enemy has been seen there, and nothing has been seen where our own garrison stands. Setting it recent on both members of a pair is the one setting under which the region row's contact flag cannot disagree between the sides, which would hide a defect this board exists to state.
+
+    The two regions are likewise given DIFFERENT distances from home, which is what a real map gives them: the wire measures every region's distance from this process's own base, so a region and its reflection are near and far from it respectively. Giving a mirrored pair the same distance is the one setting under which the row's distance cannot disagree between the sides either, and it would hide the second of the two defects below in the same way.
+    """
+    members = [(1, 200.0, 300.0, 0), (2, 232.0, 312.0, 0), (3, 214.0, 348.0, 1)]
+    threats = [(9, 300.0, 480.0, 0), (10, 340.0, 520.0, 1)]
+
+    units = []
+    for unit_id, x, y, kind in members:
+        units.append(_unit(unit_id, x, y, type_index=kind))
+        units.append(_unit(unit_id + 100, *_reflected(x, y), type_index=kind, hostile=1))
+    for unit_id, x, y, kind in threats:
+        units.append(_unit(unit_id, x, y, type_index=kind, hostile=1))
+        units.append(_unit(unit_id + 100, *_reflected(x, y), type_index=kind))
+
+    target = (760.0, 250.0)
+    ours_region = _region(1, target[0], target[1], ours=200.0, theirs=900.0, distance=640.0)
+    theirs_region = _region(2, *_reflected(*target), ours=900.0, theirs=200.0, distance=1480.0)
+    theirs_region.held_by_us, theirs_region.held_by_enemy = 0, 1
+    ours_region.enemy_seen_at_ms, theirs_region.enemy_seen_at_ms = 29000, 0
+
+    observation = _observation(units, [ours_region, theirs_region])
+    ours = build_view(observation, _CATALOGUE, None)
+    theirs = build_view(observation, _CATALOGUE, None, invert=True)
+
+    centre = (sum(m[1] for m in members) / len(members), sum(m[2] for m in members) / len(members))
+    their_centre = _reflected(*centre)
+    our_squad = _squad(id=0, members=[m[0] for m in members], x=centre[0], y=centre[1])
+    their_squad = _squad(id=1, members=[m[0] + 100 for m in members],
+                         x=their_centre[0], y=their_centre[1])
+    their_squad.contract.target_region = 2
+    return observation, ours, theirs, our_squad, their_squad
+
+
+def _squad_fight(view, squad):
+    """One squad's fight as the tactical layer cuts it out of the board: the members of the squad that are on it, and what is near enough to be shooting at them. The same rule on both sides, so the cut is congruent whenever the board is."""
+    members = [s for s in view.ours if s.unit.id in squad.members]
+    return members, view.enemies_near(squad.x, squad.y, 400.0)
+
+
+def test_the_tactical_state_of_a_mirrored_board_reads_the_same_from_both_sides():
+    """The property one process driving both sides of a constructed board depends on, stated at the encoding: a squad and its exact reflection must read as the same fight.
+
+    They face congruent situations at reflected positions, and the inverted view turns the ownership over without touching a coordinate — which is right, because the coordinates on the wire are the world's and not the seat's, and a process seated at the other slot would be handed exactly these. So the congruence has to be in what the features are made of: a feature measured against the map's own axes reads one thing for a squad and the opposite for its reflection, and a network fed the two answers one fight two different ways depending on which way round the board happens to be numbered. Half its training experience then goes on learning the same thing twice in a different frame, and where one process drives both sides the two sides are not exchangeable at all.
+
+    Compared within a tolerance rather than exactly because the reflected coordinates are exact while the threats' centre is accumulated over the same offsets in a different order: the two vectors agree here to 1.1e-16, which is the last bit of a double and not a difference in what was computed. The names are zipped onto the values so that a failure says which feature moved rather than that two lists differ.
+    """
+    _, ours, theirs, our_squad, their_squad = _mirrored_board()
+    our_members, our_threats = _squad_fight(ours, our_squad)
+    their_members, their_threats = _squad_fight(theirs, their_squad)
+    assert [s.unit.id for s in our_members] == [1, 2, 3] and [s.unit.id for s in our_threats] == [9, 10]
+    assert [s.unit.id for s in their_members] == [101, 102, 103]
+    assert [s.unit.id for s in their_threats] == [109, 110]
+
+    mine = tactical_state(our_squad, our_members, our_threats, 350.0, 200.0, ours, 30000)
+    yours = tactical_state(their_squad, their_members, their_threats, 350.0, 200.0, theirs, 30000)
+    apart = [(name, a, b) for name, a, b in zip(TACTICAL_FEATURES, mine, yours) if abs(a - b) > 1e-9]
+    assert not apart, "these features read differently from the two sides of one mirrored board: " + ", ".join(
+        f"{name} {a:+.6f} against {b:+.6f}" for name, a, b in apart)
+
+
+def test_a_network_answers_both_sides_of_a_mirrored_board_the_same_way():
+    """The same property in the terms that decide whether the arena measures anything: not that the features are tidy, but that the layer answers one situation the same way whichever seat it is in.
+
+    This is what a handwritten ladder gives for nothing and a network does not. The ladder reads distances and strengths and is indifferent to which way round the board is numbered; a network reads whatever it was handed, so a feature carrying the map's frame makes it a different fighter on the two sides of a board that is one force mirrored. Where a trained tactical layer is frozen beneath both sides of the operations arena, that difference is the arena's own lean, and every arm measured on it is measured against a board that is not exchangeable between the sides.
+    """
+    _, ours, theirs, our_squad, their_squad = _mirrored_board()
+    mine = tactical_state(our_squad, *_squad_fight(ours, our_squad), 350.0, 200.0, ours, 30000)
+    yours = tactical_state(their_squad, *_squad_fight(theirs, their_squad), 350.0, 200.0, theirs, 30000)
+
+    torch.manual_seed(4321)
+    net = TacticalNet()
+    with torch.no_grad():
+        logits, value = net(torch.tensor([mine, yours], dtype=torch.float32))
+    assert torch.allclose(logits[0], logits[1], atol=1e-6), (
+        "the same fight read from the two sides is answered differently, by up to %.3e"
+        % float((logits[0] - logits[1]).abs().max()))
+    assert torch.allclose(value[0], value[1], atol=1e-6), (
+        "the same fight read from the two sides is valued differently: %.6f against %.6f"
+        % (float(value[0]), float(value[1])))
+
+
+def test_the_operational_region_rows_are_the_same_ground_read_from_either_side():
+    """What holds of the operational cut and what does not, written down so the part that does not cannot rot into folklore.
+
+    The VALUES of a region row are congruent between the two sides with TWO exceptions, and neither is a rounding. They are not the same kind of defect and they do not have the same remedy, which is the whole reason for naming both.
+
+    `distance` is the wire's record of how far a region is from home, and the game measures it from THIS process's base for every region on the board. `build(invert=True)` turns the ownership and the force totals over and leaves that measurement pointing where it pointed, so the inverted side reads our marches as its own and finds the ground it is standing beside on the far side of the map. That one IS repaired, though not here and not by the view builder, which cannot: only the arena knows where each side stages from. The operations arena rewrites every region's distance from the side's own staging region as it builds the other side's view, and the second half of this test applies exactly that rewrite and shows the two sides' rows agreeing afterwards.
+
+    `seen_recently` is the exception NOTHING repairs. It reads the wire's record of when the enemy was last run into in that region, and `build(invert=True)` does not exchange it and cannot, because the region row carries no counterpart field — there is no record of when WE were last seen. The inverted side therefore reads this process's own fog record as its own contact record, and in a constructed arena that leans the same way every period: hostiles stand continuously in the regions this process is attacking and never in the ones it garrisons, so the mirror side is told the enemy is standing on the ground it holds and nowhere near the ground it is attacking. No reordering of the rows repairs that — the field travels with its row — so it needs a field on the wire, or an inverted view that rebuilds the record, or an arena that rebuilds it per side as it already rebuilds the distance from home.
+
+    The row INDEXING is not congruent either, and that is a third defect with a third remedy: the encoder lays the regions out by the map's own numbering and the squads by their global slot, so congruent ground sits at different offsets for the two sides. Hence the whole vectors differ even where every value in them is a pair. A learnt operational layer therefore still reads a frame. When somebody makes the ordering egocentric this test is what will fail, which is exactly when they should be made to come back and read the paragraphs above.
+    """
+    _, ours, theirs, our_squad, their_squad = _mirrored_board()
+    mine = operational_state(ours, None, [our_squad], 30000)
+    yours = operational_state(theirs, None, [their_squad], 30000)
+
+    def row(state, slot):
+        start = GLOBAL_SIZE + slot * REGION_SIZE
+        return state[start:start + REGION_SIZE]
+
+    def differ(ours_view, theirs_view, ours_slot=1, theirs_slot=2):
+        """One mirrored pair of region rows read from the two sides: every feature of the pair, and the names of the ones that disagree."""
+        left = row(operational_state(ours_view, None, [our_squad], 30000), ours_slot)
+        right = row(operational_state(theirs_view, None, [their_squad], 30000), theirs_slot)
+        pairs = dict(zip(REGION_FEATURES, zip(left, right)))
+        return pairs, [name for name, (a, b) in pairs.items() if abs(a - b) > 1e-9]
+
+    pairs, apart = differ(ours, theirs)
+    assert apart == ["distance", "seen_recently"], (
+        "the region rows of one mirrored pair differ in %s, where the distance from home and the contact "
+        "record are the two that should" % apart)
+    assert pairs["seen_recently"] == (1.0, 0.0)
+    assert pairs["distance"][0] < pairs["distance"][1], (
+        "the inverted side should be reading our own distance from home, which on this board is the longer one")
+    assert mine != yours, "the region and squad rows are indexed by the map's numbering, so they cannot agree"
+
+    # Now the arena's own repair, which is the only one of the two that exists: each side's regions measured again from the region that side stages out of, which here is the mirrored pair of regions themselves. Called off the class because it reads nothing from an arena but the view it is handed, and building a whole arena to prove that would obscure it.
+    rehome = OpsArena.__new__(OpsArena)._rehome
+    ours, theirs = rehome(ours, 1), rehome(theirs, 2)
+    pairs, apart = differ(ours, theirs)
+    assert apart == ["seen_recently"], (
+        "once each side measures from its own staging region only the contact record should still differ, "
+        "and these do: %s" % apart)
+    # Both ways round, so that what has been shown is congruent rows and not two noughts: our row for the region we stage from against their row for the one they stage from, and our row for theirs against their row for ours.
+    assert differ(ours, theirs, ours_slot=2, theirs_slot=1)[1] == ["seen_recently"]
 
 
 def test_the_two_sides_spawn_orders_are_interleaved_so_neither_leads():
@@ -1265,17 +1423,106 @@ def test_a_teacher_whose_choice_follows_from_its_board_is_learnt_almost_exactly(
     assert cloning.training.entropy > 0.0
 
 
+def _teacher(folder, *rows, name="teacher.jsonl"):
+    """A teacher file made of the rows given, in the form the collecting run writes one: a JSON object per line, the feature list at the head and a decision on every line after it."""
+    path = os.path.join(folder, name)
+    with open(path, "w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+    return path
+
+
 def test_a_teacher_written_by_a_different_feature_list_is_refused_rather_than_fitted():
-    """Nothing in a written decision says which version of the feature list produced it, so the length of the state is the only evidence there is that the features have been renumbered since. A file that is wrong in that way fits without complaint and yields a network reading every feature one place from where it now is, which is why this ends the run instead of skipping the row: the rest of the file cannot be trusted either."""
+    """A teacher file records an encoding as much as it records a policy, and the numbers in it cannot say which one, so it states its feature list at its head and that is what is checked before a decision is taken from it.
+
+    Three refusals, and the middle one is why the list is written down at all: a file whose features were renamed has rows of exactly the right length, so nothing about their shape would ever have caught it, and a fit to it yields a network reading two slots as something they no longer are while reporting a perfectly ordinary accuracy. A file stating no list is refused as well, since it was collected before the list was recorded and the only alternative to refusing it is to assume the answer. The length of a row is still checked, as the backstop against a truncated file, and it is named to the line, because the first thing anyone does with a file that has been refused is go and look at it.
+    """
     assert "decision 0" in _refusal(TeacherMismatch, fit, [Sample(state=[0.0] * (TACTICAL_SIZE - 1), action=0)])
 
+    stated = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES)}
+    decision = {"state": [0.0] * TACTICAL_SIZE, "action": 0}
     with tempfile.TemporaryDirectory() as folder:
-        path = os.path.join(folder, "teacher.jsonl")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps({"state": [0.0] * TACTICAL_SIZE, "action": 0}) + "\n")
-            handle.write(json.dumps({"state": [0.0] * (TACTICAL_SIZE + 1), "action": 0}) + "\n")
-        # Named to the line, because the first thing anyone does with a file that has been refused is go and look at it.
-        assert "line 2" in _refusal(TeacherMismatch, read_teacher, path)
+        refusal = _refusal(TeacherMismatch, read_teacher, _teacher(folder, decision))
+        assert "line 1" in refusal and "does not state the feature list" in refusal
+
+        renamed = dict(stated, encoding=["target_dx" if name == "target_ahead" else name
+                                         for name in TACTICAL_FEATURES])
+        refusal = _refusal(TeacherMismatch, read_teacher, _teacher(folder, renamed, decision))
+        assert "'target_dx'" in refusal and "'target_ahead'" in refusal
+
+        short = {"state": [0.0] * (TACTICAL_SIZE + 1), "action": 0}
+        assert "line 3" in _refusal(TeacherMismatch, read_teacher, _teacher(folder, stated, decision, short))
+        # And the file the collecting run actually writes is read back whole.
+        assert len(read_teacher(_teacher(folder, stated, decision, decision))) == 2
+
+
+def test_an_operational_teacher_is_refused_by_the_block_that_moved_and_not_by_a_slot_of_its_state():
+    """The operational feature list does not name the state slot by slot and a refusal must not talk as though it did.
+
+    Its state is a handful of aggregates, then one fixed block repeated over twenty-four region slots, then another over eight squad slots — four hundred numbers, described by forty-odd names because each block is named once with the slot counts alongside. So the index in a refusal is an index into the blocks and the length in one is a count of blocks, and reporting either as features would send somebody looking through a four-hundred-wide vector for a forty-fifth slot that decides nothing. The tactical list is the other case and the plain word is exact there, since it names one number of the state apiece; both are checked here so that neither wording can be changed to the other's without this failing.
+    """
+    moved = "region.distance"
+    assert moved in OPERATIONAL_FEATURES, "the block this test renames has itself been renamed"
+    decision = {"state": [0.0] * OPERATIONAL_SIZE, "action": 0, "second": 0}
+    head = {"layer": "operations", "encoding": list(OPERATIONAL_FEATURES)}
+
+    with tempfile.TemporaryDirectory() as folder:
+        renamed = dict(head, encoding=["region.range" if name == moved else name
+                                       for name in OPERATIONAL_FEATURES])
+        refusal = _refusal(TeacherMismatch, read_teacher,
+                           _teacher(folder, renamed, decision), "operations")
+        index = OPERATIONAL_FEATURES.index(moved)
+        assert f"block {index}" in refusal and "'region.range'" in refusal and f"'{moved}'" in refusal
+        assert f"feature {index}" not in refusal, (
+            "a block of the operational list was reported as a feature of its state: " + refusal)
+
+        # The last entry of the operational list is the slot counts, so a list without it agrees name for name and differs only in length, which is the other branch of the refusal.
+        shorter = dict(head, encoding=list(OPERATIONAL_FEATURES[:-1]))
+        refusal = _refusal(TeacherMismatch, read_teacher,
+                           _teacher(folder, shorter, decision), "operations")
+        said = refusal.split(" line 1: ", 1)[-1]
+        assert f"of {len(OPERATIONAL_FEATURES) - 1} blocks" in said
+        assert str(OPERATIONAL_SIZE) not in said, (
+            "the width of the state was quoted as though it were the length of the list: " + said)
+
+        # And the tactical list, whose names are one per number, is quoted as features.
+        head = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES)}
+        renamed = dict(head, encoding=["target_dx" if name == "target_ahead" else name
+                                       for name in TACTICAL_FEATURES])
+        refusal = _refusal(TeacherMismatch, read_teacher,
+                           _teacher(folder, renamed, {"state": [0.0] * TACTICAL_SIZE, "action": 0}))
+        assert f"feature {TACTICAL_FEATURES.index('target_ahead')}" in refusal
+
+
+def test_two_collecting_runs_joined_into_one_teacher_are_read_and_re_checked_at_the_join():
+    """The only way a teacher file gets bigger is by joining two of them, since the collecting run opens its file with truncation and cannot append. A joined file therefore carries the second run's head in the middle of it, and what happens at that line decides whether joining is a thing anybody can do.
+
+    Three things happen there. The join reads back whole, which is what it did before a file stated anything and has to go on doing. The second head is CHECKED rather than waved through, because it is the only line in the file that says whether the two halves were collected under the same encoding — a join across an encoding change is two different readings of the board in one file, and fitting to it produces a network that is wrong about half of what it saw. And a line that is neither a decision nor a head is refused by name and line like everything else malformed here, rather than surfacing as a missing key from somewhere inside the reader with nothing said about which file it came from.
+    """
+    head = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES)}
+    decision = {"state": [0.0] * TACTICAL_SIZE, "action": 0}
+    with tempfile.TemporaryDirectory() as folder:
+        joined = _teacher(folder, head, decision, decision, head, decision, decision)
+        assert len(read_teacher(joined)) == 4, "a teacher joined from two collecting runs lost decisions"
+
+        renamed = dict(head, encoding=["target_dx" if name == "target_ahead" else name
+                                       for name in TACTICAL_FEATURES])
+        refusal = _refusal(TeacherMismatch, read_teacher,
+                           _teacher(folder, head, decision, renamed, decision))
+        assert "line 3" in refusal and "'target_dx'" in refusal, (
+            "a join across an encoding change was not caught at the line that states the second encoding")
+
+        # A line that is neither, which is what the head of another layer's teacher looks like from here.
+        refusal = _refusal(TeacherMismatch, read_teacher,
+                           _teacher(folder, head, decision, {"layer": "tactics", "count": 2}))
+        assert "line 3" in refusal and "teacher.jsonl" in refusal and "'state'" in refusal
+
+        # And a run killed while it was writing, whose last line stops in the middle.
+        path = _teacher(folder, head, decision)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write('{"state": [0.0, 0.0')
+        refusal = _refusal(TeacherMismatch, read_teacher, path)
+        assert "line 3" in refusal and "half finished" in refusal
 
 
 def _decisions(seed, count=16):
@@ -1751,6 +1998,140 @@ def test_another_layers_parameters_handed_to_the_arena_are_refused_by_name():
             assert path in message and str(found) in message and str(TACTICAL_SIZE) in message
             return
         raise AssertionError("an operational network was accepted as a tactical one")
+
+
+def test_parameters_fitted_to_a_different_feature_list_are_refused_by_the_feature_that_moved():
+    """The failure no width can catch, and the one that matters most where a layer is frozen: the features were renamed rather than renumbered, so every shape in the file still fits and the network would read two slots as something they are no longer.
+
+    The file therefore carries the feature list it was fitted to among its parameters, as a buffer, so that it is saved and loaded by the ordinary means and cannot be copied away from them. Two files are refused here: one fitted to a list in which a feature has a different name, which is named in the refusal so a person is told what moved rather than that something did; and one carrying no list at all, which is every set of parameters written before the list was recorded and which cannot be shown to read the features now in force.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "stale.pt")
+        state = TacticalNet().state_dict()
+        state[ENCODING_KEY] = encoding_stamp(
+            ["target_dx" if name == "target_ahead" else name for name in TACTICAL_FEATURES])
+        torch.save(state, path)
+        refusal = _refusal(SystemExit, frozen_tactics, path)
+        assert path in refusal and "'target_dx'" in refusal and "'target_ahead'" in refusal
+
+        older = os.path.join(directory, "unstamped.pt")
+        state = TacticalNet().state_dict()
+        del state[ENCODING_KEY]
+        torch.save(state, older)
+        refusal = _refusal(SystemExit, frozen_tactics, older)
+        assert older in refusal and "no feature list" in refusal
+
+        # And an operational file is refused the same way by the match runner that measures one.
+        operational = os.path.join(directory, "operations.pt")
+        state = OperationalNet().state_dict()
+        del state[ENCODING_KEY]
+        torch.save(state, operational)
+        assert "no feature list" in _refusal(ValueError, eval_arms.build_all, [f"ops:{operational}"])
+        # The refusal is also where the way out is named, because a person holding parameters that cost a training run to make will otherwise conclude from it that they have to make them again.
+        assert "avow" in _refusal(ValueError, eval_arms.build_all, [f"ops:{operational}"])
+
+
+def _unstamped(net, path):
+    """A set of parameters as everything recorded before the feature list was recorded looks: the right shapes, and nothing in the file saying which encoding fitted them."""
+    state = net.state_dict()
+    del state[ENCODING_KEY]
+    torch.save(state, path)
+    return path
+
+
+def test_parameters_recorded_before_the_feature_list_are_read_again_once_a_person_avows_them():
+    """The way back for a set of parameters recorded before a file stated anything about its own encoding, which is every set this project made before the list was first written down and several of which cost a training run apiece.
+
+    Refusing them is right and refusing them for good is not. Such a file cannot PROVE what it was fitted to — that is the whole point of writing the list down — but a person who knows the layer's encoding has not moved since they were fitted knows something true that the file does not say, and throwing that work away because nothing in the file can say it is a worse answer than letting the person say it. So they say it into the file: the list they swear it was fitted to, and the words for why, both written where they are saved and copied with the parameters and cannot be mislaid.
+
+    What every loader does afterwards is load it and say out loud that the list beside those parameters is somebody's word and not a fit's record, which is the difference between a number measured on a claim and a number measured on a file that could prove what it was.
+    """
+    words = "the operational encoding did not move when the list was first recorded"
+    with tempfile.TemporaryDirectory() as directory:
+        path = _unstamped(OperationalNet(), os.path.join(directory, "operations.pt"))
+        assert "no feature list" in _refusal(ValueError, eval_arms.build_all, [f"ops:{path}"])
+
+        recorded = torch.load(path, map_location="cpu")
+        torch.save(avowed(recorded, OperationalNet(), words), path)
+        arms, batchers = eval_arms.build_all([f"ops:{path}"])
+        try:
+            assert [name for name, _ in arms] == ["operations"]
+        finally:
+            for batcher in batchers:
+                batcher.stop()
+
+        # The words are in the file and stay there, so that every later reader of it, and not only the run that was standing there when it was avowed, is told the list is a claim.
+        after = torch.load(path, map_location="cpu")
+        assert encoding_avowal(after) == words
+        # And the avowal is a statement ABOUT the parameters: it adds the list and the words, and moves not one number of what was recorded.
+        assert sorted(set(after) - set(recorded)) == sorted([ENCODING_KEY, AVOWAL_KEY])
+        assert all(torch.equal(after[name], value) for name, value in recorded.items())
+
+        # The same route under the arena, where a tactical layer is frozen beneath both sides of every board.
+        tactics = _unstamped(TacticalNet(), os.path.join(directory, "tactics.pt"))
+        assert "no feature list" in _refusal(SystemExit, frozen_tactics, tactics)
+        torch.save(avowed(torch.load(tactics, map_location="cpu"), TacticalNet(), words), tactics)
+        frozen = frozen_tactics(tactics)
+        try:
+            assert frozen.build is not None
+        finally:
+            frozen.batcher.stop()
+
+
+def test_an_avowal_cannot_be_made_over_a_stated_list_or_for_a_layer_the_file_is_not():
+    """What the way back is not allowed to be, which matters more than what it is: it must not become a way of waving any file through.
+
+    A file that already states a list cannot be avowed at all, and that is what keeps the refusal of a file fitted to a DIFFERENT list absolute. If an avowal could write over a list, then every refusal in this suite would last exactly as long as it took somebody to run one, and the list would be a thing you clear rather than a thing that decides.
+
+    A file whose first layer does not read this layer's width cannot be avowed as this layer's. That is the whole of what a width proves — which layer's parameters these are, and nothing whatever about what the numbers in their slots mean — and it is what stops one layer's name pointed at a heap of recorded files from stamping the other layer's with a list they were never fitted to. It matters here because the two encodings do not move together: the tactical list changed when the fight-relative bearing replaced the target offsets and the operational list did not, so a tactical file avowed under today's tactical list would afterwards load in silence and be measured under its own trained name.
+
+    And a person has to write down why. The sentence is the only evidence the file will ever carry for a claim nothing in it can check, so an avowal without one is not a claim, it is a shrug.
+    """
+    words = "the encoding did not move"
+    with tempfile.TemporaryDirectory() as directory:
+        state = torch.load(_unstamped(TacticalNet(), os.path.join(directory, "tactics.pt")),
+                           map_location="cpu")
+
+        refusal = _refusal(EncodingRefused, avowed, state, OperationalNet(), words)
+        assert "another layer's parameters" in refusal and str(TACTICAL_SIZE) in refusal
+
+        assert "reason" in _refusal(EncodingRefused, avowed, state, TacticalNet(), "   ")
+
+        stale = TacticalNet().state_dict()
+        stale[ENCODING_KEY] = encoding_stamp(
+            ["target_dx" if name == "target_ahead" else name for name in TACTICAL_FEATURES])
+        refusal = _refusal(EncodingRefused, avowed, stale, TacticalNet(), words)
+        assert "already states the feature list" in refusal
+        # Nor twice, which is the same refusal reached from the other side: a file that has been avowed states a list like any other and is protected by it like any other.
+        once = avowed(state, TacticalNet(), words)
+        assert "already states the feature list" in _refusal(EncodingRefused, avowed, once, TacticalNet(), words)
+
+
+def test_avowing_will_not_guess_which_layer_a_file_belongs_to():
+    """The command that writes an avowal has no default layer, where every other command here has one.
+
+    The width of a file refuses one layer's parameters offered as another's, and it can only do that once a layer has been named. A default would let the wrong layer's list be written by saying nothing at all — which is the accident worth being safe against, since a file avowed under the wrong list afterwards loads in silence and is measured under the name of whatever it was trained to be.
+    """
+    from rwintel.learn.__main__ import main
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = _unstamped(OperationalNet(), os.path.join(directory, "operations.pt"))
+        # The parser refuses with a status and prints what it wanted, which is where the words are.
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said):
+            refused = _refusal(SystemExit, main, ["avow", "--load", path, "--because", "it did not move"])
+        assert refused and "--layer" in said.getvalue()
+        assert ENCODING_KEY not in torch.load(path, map_location="cpu"), (
+            "a file was avowed by a command that had not been told which layer it belonged to")
+
+        # Named, and named as the layer it is not: the width refuses it file by file, which is what a run over a directory of recorded parameters meets.
+        tactics = _unstamped(TacticalNet(), os.path.join(directory, "tactics.pt"))
+        refused = _refusal(SystemExit, main,
+                           ["avow", "--layer", "operations", "--load", f"{path},{tactics}",
+                            "--because", "the operational encoding did not move"])
+        assert tactics in refused and "another layer's parameters" in refused
+        # And the operational file named beside it was avowed before the refusal, since each is judged on its own.
+        assert ENCODING_KEY in torch.load(path, map_location="cpu")
 
 
 def test_the_tactical_width_is_read_off_the_file_rather_than_asked_for_as_a_flag():

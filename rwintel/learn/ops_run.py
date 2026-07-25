@@ -42,7 +42,14 @@ from .deciders import (
 from .encoding import TACTICAL_SIZE
 from .inference import Batcher
 from .layers import LearntOperations, LearntTactics
-from .net import OperationalNet, TacticalNet
+from .net import (
+    INPUT_WEIGHT,
+    EncodingRefused,
+    OperationalNet,
+    TacticalNet,
+    load_encoded,
+    reads,
+)
 from .ops_arena import CATCHMENT_RADIUS, GARRISON_SCALE, HORIZON_MS, SCRIPT_TACTICS, OpsArena
 
 log = logging.getLogger(__name__)
@@ -90,11 +97,11 @@ def frozen_tactics(path: Optional[str], device_name: Optional[str] = None) -> Fr
 
     Both sides, because the arena builds its two tactical layers from the one factory it is handed and there is deliberately no way to hand it two. Putting a trained fighter on one side only would plainly stop the two sides being exchangeable, and the script arm's pooled self-play mean — the arena's one check on whether the board leans — would no longer have to be nought. It is also what the project's learning order means when it says the operational layer is trained against a frozen tactical layer: the frozen layer is the whole environment's fighting, not our own side's.
 
-    The same layer on both sides is the least a mirror requires and it is not a guarantee. The other side's view turns the ownership flags over without reflecting the coordinates, so the two sides are given one function on inputs congruent in meaning and not in place; a handwritten ladder reading distances and strengths is indifferent to that and a network need not be. A run made under frozen tactical parameters is therefore a different instrument in the strict sense — it pairs only with runs made under the same parameters, which the journal records so the comparison can refuse rather than be trusted, and its script arm has to re-pass the self-play zero before any arm measured beside it is believed.
+    The same layer on both sides is the least a mirror requires. The other side's view turns the ownership flags over without reflecting the coordinates, so the two sides are given one function on inputs congruent in meaning and not in place — and what makes that safe is that no tactical feature is measured against the map's axes any more: the direction a squad's errand points is measured from what is shooting at it, which a half turn of the board leaves alone. A learnt tactical layer therefore answers a squad and its exact reflection alike, and the encoding suite pins it by reading one mirrored board from both sides. A run made under frozen tactical parameters is a different instrument all the same — it pairs only with runs made under the same parameters, which the journal records so the comparison can refuse rather than be trusted, and its script arm has to re-pass the self-play zero before any arm measured beside it is believed.
 
     One network and one batching server for the run, and a fresh layer object per side per episode. One network is the point of batching at all: every request from both sides of every instance then meets in the same window, where two networks would halve the batch per call and buy nothing. The layer objects cannot be shared, because a tactical layer keeps per-side state — what each of its squads has destroyed, and the board it last saw — and the two sides are handed different boards.
 
-    Read at its likeliest departure rather than drawn from, on both the batcher and the decider, since one of them answers when there is a batcher and the other when there is not. Drawing is the exploration a run needs of the layer it is training, and this layer is not being trained; it would also add a second source of difference between the sides on top of the one the coordinates already carry, and a deterministic layer at least leaves the self-play zero something it can repeat.
+    Read at its likeliest departure rather than drawn from, on both the batcher and the decider, since one of them answers when there is a batcher and the other when there is not. Drawing is the exploration a run needs of the layer it is training, and this layer is not being trained; a deterministic layer also leaves the self-play zero something it can repeat, where one drawing its departures would put a fresh difference between the two sides into every board.
     """
     if not path:
         return FrozenTactics()
@@ -103,16 +110,22 @@ def frozen_tactics(path: Optional[str], device_name: Optional[str] = None) -> Fr
         raise SystemExit("no tactical parameters at %s, so there is nothing to freeze under the arena" % path)
     device = _device(device_name)
     state = torch.load(path, map_location=device)
-    # An operational network's file has a `body.0.weight` too, so the test that catches parameters of the wrong layer handed to this option is the width of the input the first layer reads. A file that carries no first layer at all fails the same test and is refused the same way; the strict load below is the backstop for everything subtler than a different layer.
-    weight = state.get("body.0.weight") if isinstance(state, dict) else None
-    features = int(weight.shape[1]) if weight is not None and weight.dim() == 2 else None
+    # An operational network's file has a first layer too, so the test that catches parameters of the wrong layer handed to this option is the width of the input that layer reads. A file that carries no first layer at all fails the same test and is refused the same way; the strict load below is the backstop for everything subtler than a different layer.
+    features = reads(state)
     if features != TACTICAL_SIZE:
         raise SystemExit("the parameters at %s are not a tactical layer's: their first layer reads %s feature(s) "
                          "where a tactical layer reads %d, which is what another layer's parameters look like here"
                          % (path, "none" if features is None else features, TACTICAL_SIZE))
     # The width is read off the file rather than asked for as a flag. The first layer is one linear map from the tactical features to the width, so the file states its own width, and a flag that had to be kept in step with a file would only ever fail a load that was going to succeed. The duel needs a width because it can also build a fresh network; here there is never a fresh network.
-    net = TacticalNet(width=int(weight.shape[0])).to(device)
-    net.load_state_dict(state)
+    net = TacticalNet(width=int(state[INPUT_WEIGHT].shape[0])).to(device)
+    # And the width having matched says only that the file is a tactical layer's, not that its features mean what they now mean. This is the one place it matters most: the layer frozen here fights for both sides of every board and is never trained, so parameters fitted to an older reading of a slot would fight the whole run on a misreading and nothing downstream could tell — the run would simply be journalled as having been made under trained parameters.
+    try:
+        avowal = load_encoded(net, state)
+    except EncodingRefused as refused:
+        raise SystemExit("the parameters at %s cannot be frozen under the arena: %s" % (path, refused))
+    if avowal:
+        # The instrument beneath the whole run, accepted on somebody's word about what it was fitted to, is worth saying at every run rather than only where the word was written. The name below is a digest of the file, so avowing one changes its name and no run made before the avowal can be confused with one made after it.
+        log.warning("the feature list at %s is a person's word and not a fit's record: %s", path, avowal)
     batcher = tactical_batcher(net, device=device, greedy=True)
     name = _digest(path)
 
@@ -206,14 +219,20 @@ def diagnose(sessions, arm: str, radius: float) -> None:
     An arm can score well without its squads ever entering a catchment, and the figure alone cannot tell that apart from an arm that fought for the ground and won it — the two look identical in the pooled mean. The distinction is the whole difference between measuring a deployment and measuring an abstention, and the arena already writes down what settles it: how far the nearest surviving squad member ended from a contest, and how many of them ended inside one.
 
     This is the check that was in hand and not pointed at the pinned arm. That arm sends every squad to the lowest-numbered legal region, which is a fixed region id with nothing to do with where the contests were drawn, so its squads finished outside every scored disc in most episodes and what looked like concentration beating a spread was an arm that had left the scored board. An arm whose median reach is outside the catchment is not deploying onto the contests, whatever its score says, and the run says so rather than leaving it to be noticed.
+
+    The other side's figures are reported beside this side's for a different question: whether the two deployments reached their contests alike at all. The board is a point reflection, but the ground under it is not — this side stages from a site the map was searched for and the other from that site's reflection, which is wherever it lands — and the script arm's self-play zero bounds what that asymmetry is worth only under the script. A pair of medians a catchment apart is a physical difference between the sides large enough to decide discs, and it would show up in an arm comparison as an operational difference with nothing to tell the two apart.
     """
-    reaches = sorted(float(record.statistics.get("our_reach", -1.0))
-                     for session in sessions for record in session.records
+    def figures(field: str):
+        reaches = sorted(float(record.statistics.get(field + "_reach", -1.0))
+                         for session in sessions for record in session.records
+                         if record.arm == arm and record.statistics.get("scored")
+                         and float(record.statistics.get(field + "_reach", -1.0)) >= 0.0)
+        absent = sum(1 for session in sessions for record in session.records
                      if record.arm == arm and record.statistics.get("scored")
-                     and float(record.statistics.get("our_reach", -1.0)) >= 0.0)
-    absent = sum(1 for session in sessions for record in session.records
-                 if record.arm == arm and record.statistics.get("scored")
-                 and not record.statistics.get("our_in_catchment"))
+                     and not record.statistics.get(field + "_in_catchment"))
+        return reaches, absent
+
+    reaches, absent = figures("our")
     scored = sum(1 for session in sessions for record in session.records
                  if record.arm == arm and record.statistics.get("scored"))
     if not reaches or not scored:
@@ -226,6 +245,15 @@ def diagnose(sessions, arm: str, radius: float) -> None:
         log.warning("this arm's squads ended outside the catchment in the median episode, so its score is not a "
                     "measure of how it deployed onto the contests but of what happened on ground it never reached: "
                     "read it as a floor for abandoning the scored board, not as a deployment")
+    theirs, their_absent = figures("their")
+    if theirs:
+        their_median = theirs[len(theirs) // 2]
+        log.info("the other side of the same boards ended a median %.0f world units out, and was inside no catchment "
+                 "in %d of %d", their_median, their_absent, scored)
+        if abs(median - their_median) > radius:
+            log.warning("the two sides ended a whole catchment apart in how far they were from their contests, so "
+                        "the mirror is not congruent in the ground it lays under the two deployments and part of "
+                        "this arm's score is that difference rather than its choices")
     _discs(sessions, arm)
     signal(sessions, arm)
 

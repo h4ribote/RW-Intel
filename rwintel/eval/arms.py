@@ -7,10 +7,13 @@ What can be varied here is deliberately narrow. A comparison is only meaningful 
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, List, Optional, Tuple
 
 from ..control.policy import ScriptPolicy, script_policy
 from ..control.policy.contracts import Posture
+
+log = logging.getLogger(__name__)
 
 Arm = Tuple[str, Callable]
 
@@ -66,14 +69,22 @@ def operational(name: str, device: Optional[str] = None) -> Tuple[Arm, object]:
     import torch
 
     from ..learn.deciders import NetworkOperations, operational_batcher
-    from ..learn.net import OperationalNet
+    from ..learn.net import EncodingRefused, OperationalNet, load_encoded
     from ..learn.policy import OPERATIONAL, LearningPolicy
 
     # The games this process is scored beside run on these cores; a library that helps itself to all of them turns every inference into a fight with the simulation it is measuring.
     torch.set_num_threads(2)
     where = torch.device(device) if device else torch.device("cpu")
     net = OperationalNet().to(where)
-    net.load_state_dict(torch.load(path, map_location=where))
+    state = torch.load(path, map_location=where)
+    # Refused for the same reason a missing file is: a number about parameters that read the board differently from the way they were fitted to read it is a plausible number about nothing, and the shapes all match, so nothing later in the run would notice.
+    try:
+        avowal = load_encoded(net, state)
+    except EncodingRefused as refused:
+        raise ValueError(f"the parameters at {path} cannot be measured: {refused}")
+    if avowal:
+        # Said out loud beside the arm it is about, because a number is only worth keeping if what produced it is written down beside it, and what produced this one is parameters whose feature list nothing in the file could prove.
+        log.warning("the feature list at %s is a person's word and not a fit's record: %s", path, avowal)
     batcher = operational_batcher(net, device=where)
 
     def build(session) -> LearningPolicy:

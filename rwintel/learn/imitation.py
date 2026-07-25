@@ -6,7 +6,7 @@ Two details are the whole difficulty of doing it properly.
 
 The first is that the teacher is deterministic. The script answers the same board the same way every time, so a fit allowed to be confident is nearly one-hot within a few epochs, and a policy that reaches reinforcement learning with no entropy left has stopped producing the evidence that would ever argue it out of an opinion. Smoothing the labels is the cure and it is not optional here. The mass held back is shared out over the actions that were legal rather than over the whole row, because most of the twenty-four regions do not exist on a given board and their logits are floored to a large negative number: asking the network to put a fiftieth of the label on one of them asks it to raise a logit that the mask floors again on the next pass, and the loss goes somewhere no learning rate survives.
 
-The second is that a teacher file records an encoding as much as it records a policy. Nothing in a written line says which version of the feature list produced it, so a file written before a feature was added loads without complaint, fits without complaint, and yields a network reading every feature one place to the left of where it now is. A row whose state is the wrong length therefore ends the run rather than being skipped: skipping it would mean fitting to the rest of a file that cannot be trusted either.
+The second is that a teacher file records an encoding as much as it records a policy. A written decision is a row of numbers, and nothing in the numbers says what they were made of, so a file written before a feature was added or renamed would fit without complaint and yield a network reading every feature one place from where it now is — or, worse, in the right place and meaning something else. The file therefore states the feature list it was written under at its head, and a file whose list differs, or which states none at all because it was collected before the list was recorded, ends the run. It states one at its head and nowhere else only for as long as it is one collecting run: the writer opens with truncation and cannot append, so the way a teacher is made larger is by joining two files end to end, and a joined file carries the second run's head in its middle. Every stated list is therefore checked wherever it appears and then passed over, which is what makes a join across an encoding change a refusal instead of a fit. The length of a row is checked too and is the backstop rather than the guard: it catches a truncated file and it cannot catch a renaming, which moves nothing. Either way the run ends rather than the row being skipped, since skipping it would mean fitting to the rest of a file that cannot be trusted either.
 
 The value head is deliberately left out of this. A teacher carries actions and no returns — the script's decision has no estimate of what the errand was worth attached to it — so there is nothing here to fit a critic against, and it is warmed up at the start of the reinforcement run instead.
 """
@@ -24,10 +24,12 @@ from torch import nn
 
 from ..wire import Deviation, Task
 from .encoding import (
+    OPERATIONAL_FEATURES,
     OPERATIONAL_REGIONS,
     OPERATIONAL_SIZE,
     OPERATIONAL_TASKS,
     TACTICAL_ACTIONS,
+    TACTICAL_FEATURES,
     TACTICAL_SIZE,
 )
 from .net import OperationalNet, TacticalNet, entropy, one_hot_slot
@@ -57,7 +59,7 @@ VALIDATION_SHARE = 0.1
 class TeacherMismatch(ValueError):
     """A teacher file that does not describe the encoding now in force.
 
-    Raised rather than worked around. There is no version stamp on a written decision, so a state vector of the wrong length is the only evidence available that the features were renumbered since the file was collected, and a fit that quietly dropped the offending rows would be fitting the rest of a file that is wrong in the same way.
+    Raised rather than worked around. A fit that quietly dropped the offending rows would be fitting the rest of a file that is wrong in the same way, and a fit that took a file's word for it because the rows are the right length would be trusting the one piece of evidence that cannot see a feature being renamed.
     """
 
 
@@ -132,31 +134,62 @@ def widths(layer: str) -> Tuple[int, int, int]:
     raise ValueError(f"no layer named {layer!r}: expected {TACTICAL!r} or {OPERATIONAL!r}")
 
 
+def feature_names(layer: str) -> Tuple[str, ...]:
+    """What one layer's state is made of, in order, which is what a teacher file states at its head and is checked against when it is read back.
+
+    One name per number of the state for the tactical layer, whose fifty-odd features are fifty-odd separate quantities. NOT one name per number for the operational layer: its state is a handful of aggregates followed by a fixed block repeated over twenty-four region slots and another repeated over eight squad slots, so its list names the aggregates, then each block once, then the slot counts — a few dozen names describing a four-hundred-wide state. Anything that reports the length of this list has to say which of the two it is reporting, or it misdescribes an operational file by an order of magnitude; `feature_entry` is what says it.
+    """
+    if layer == TACTICAL:
+        return TACTICAL_FEATURES
+    if layer == OPERATIONAL:
+        return OPERATIONAL_FEATURES
+    raise ValueError(f"no layer named {layer!r}: expected {TACTICAL!r} or {OPERATIONAL!r}")
+
+
+def feature_entry(layer: str) -> str:
+    """What one name in a layer's feature list stands for, for a refusal that has to quote how many there are or which of them moved.
+
+    The tactical list names one number of the state apiece, so its entries are features and calling them that is exact. The operational list names blocks that the state is built by repeating, so its entries are not features and quoting them as though they were would tell somebody staring at a four-hundred-wide state that their file has forty-five of them.
+    """
+    if layer == TACTICAL:
+        return "feature"
+    if layer == OPERATIONAL:
+        return "block"
+    raise ValueError(f"no layer named {layer!r}: expected {TACTICAL!r} or {OPERATIONAL!r}")
+
+
 def read_teacher(path: str, layer: str = TACTICAL, keep_tainted: bool = False) -> List[Sample]:
     """Every decision in a file written by the collecting run, one JSON object per line, checked against the encoding now in force as it is read.
+
+    The file states its own feature list at its head and that is checked before a single decision is taken from it, because it is the only thing in the file that can tell a state written under an older list from one written under this one. The lengths agree either way when a feature has merely been renamed or replaced, so the check that follows on every row is a backstop and not the guard.
+
+    Every later line that states a list is checked in the same way and then passed over. A teacher file can only be made larger by joining two collecting runs end to end — the writer opens with truncation and has no way of appending — so a file of two runs carries the second one's head in the middle of it, and that head is the only thing that says whether the two halves were collected under the same encoding. Checked, so that a join across an encoding change is refused rather than fitted; passed over, because it is a statement about the file and not a decision to learn from.
 
     Decisions about a squad somebody outside the command chain took over are dropped unless they are asked for. What the script did with a squad while a person was moving it is not what the script does, and a fit that learnt those would be learning the person.
     """
     samples: List[Sample] = []
     tainted = 0
+    heads = 0
     with open(path, encoding="utf-8") as handle:
         for number, line in enumerate(handle, start=1):
             line = line.strip()
             if not line:
                 continue
-            row = json.loads(line)
+            where = f"{path} line {number}"
+            row = _row(line, where)
+            if "encoding" in row or not heads:
+                _stated_encoding(row, layer, where)
+                heads += 1
+                continue
             if row.get("tainted") and not keep_tainted:
                 tainted += 1
                 continue
-            sample = Sample(state=[float(value) for value in row["state"]],
-                            action=int(row["action"]), second=int(row.get("second", -1)),
-                            mask=tuple(row.get("mask") or ()),
-                            second_mask=tuple(row.get("second_mask") or ()),
-                            squad=int(row.get("squad", 0)))
-            _check(sample, layer, f"{path} line {number}")
+            sample = _sample(row, where)
+            _check(sample, layer, where)
             samples.append(sample)
-    log.info("read %d decision(s) from %s for the %s layer, %d dropped as interfered with",
-             len(samples), path, layer, tainted)
+    log.info("read %d decision(s) from %s for the %s layer, %d dropped as interfered with%s",
+             len(samples), path, layer, tainted,
+             f", across {heads} collecting runs joined end to end" if heads > 1 else "")
     return samples
 
 
@@ -273,6 +306,72 @@ class _Tensors:
                         slots=None if self.slots is None else self.slots[index],
                         seconds=None if self.seconds is None else self.seconds[index],
                         second_masks=None if self.second_masks is None else self.second_masks[index])
+
+
+def _stated_encoding(row: dict, layer: str, where: str) -> None:
+    """Holds a line that states a feature list to be stating the one now in force.
+
+    A file whose head states none is refused rather than assumed to match. It was written before the list was recorded, so the only evidence available about its features is their number — which is exactly the evidence that cannot tell a renamed feature from the one it replaced, and a fit made on that assumption produces a network that reads the board wrongly and reports a perfectly ordinary accuracy for doing so.
+
+    What a refusal quotes is entries of the stated list, and the word for them is the layer's own. The tactical list names one number of the state apiece; the operational list names blocks that the state is built by repeating, so its numbering is a numbering of blocks and its length is a count of blocks, and reporting either as a count of features would misdescribe a four-hundred-wide state as a forty-five-wide one.
+    """
+    stated = row.get("encoding")
+    if not isinstance(stated, list):
+        raise TeacherMismatch(
+            f"{where}: this file does not state the feature list it was written under, so nothing in it says "
+            f"whether its states mean what the {layer} encoding now means; it was collected before the list was "
+            f"recorded and has to be collected again")
+    named = row.get("layer")
+    if named is not None and named != layer:
+        raise TeacherMismatch(f"{where}: this is a {named} teacher, and it is being read for the {layer} layer")
+    expected = feature_names(layer)
+    if tuple(stated) == expected:
+        return
+    entry = feature_entry(layer)
+    for index, (before, after) in enumerate(zip(stated, expected)):
+        if before != after:
+            raise TeacherMismatch(
+                f"{where}: this teacher was written by a different feature list — its {entry} {index} is "
+                f"{before!r} where the {layer} encoding now reads {after!r} — so fitting to it would produce a "
+                f"network reading what that {entry} covers as something it no longer is")
+    raise TeacherMismatch(
+        f"{where}: this teacher was written by a feature list of {len(stated)} {entry}s where the {layer} "
+        f"encoding now has {len(expected)}, so fitting to it would produce a network reading every feature in "
+        f"the wrong place")
+
+
+def _row(line: str, where: str) -> dict:
+    """One line of a teacher file as the object it is meant to be, refused by name and line where it is not one.
+
+    A collecting run killed while it was writing leaves its last line half finished, and a half finished line is not a thing anybody should have to recognise from a JSON decoder's own complaint about a column of a string it cannot name a file for. Everything malformed in this file is refused in the one way and says which line it was on.
+    """
+    try:
+        row = json.loads(line)
+    except ValueError as broken:
+        raise TeacherMismatch(f"{where}: this line is not the JSON object every line of a teacher file is "
+                              f"({broken}); a collecting run that was killed while writing leaves its last "
+                              f"line half finished") from broken
+    if not isinstance(row, dict):
+        raise TeacherMismatch(f"{where}: this line is a {type(row).__name__} where every line of a teacher "
+                              f"file is an object")
+    return row
+
+
+def _sample(row: dict, where: str) -> Sample:
+    """One written decision in the form the fitting takes, refused by name and line where the line is not a decision at all.
+
+    The two fields it cannot do without are named rather than left to fail on their absence. A line missing them is not a decision, and the likeliest reason for one is that it is a head — a statement of the feature list, which a file carries at its start and again wherever two collecting runs were joined — that something has taken for a decision. Refused as everything else malformed in this file is refused, since a bare missing-key error names neither the file, nor the line, nor what it was expecting.
+    """
+    for field in ("state", "action"):
+        if field not in row:
+            raise TeacherMismatch(f"{where}: this line states no {field!r}, so it is not one of the teacher's "
+                                  f"decisions; a line that is a feature list rather than a decision states "
+                                  f"'encoding' and is read as the head of a collecting run")
+    return Sample(state=[float(value) for value in row["state"]],
+                  action=int(row["action"]), second=int(row.get("second", -1)),
+                  mask=tuple(row.get("mask") or ()),
+                  second_mask=tuple(row.get("second_mask") or ()),
+                  squad=int(row.get("squad", 0)))
 
 
 def _check(sample: Sample, layer: str, where: str) -> None:
