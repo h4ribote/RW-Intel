@@ -6,6 +6,8 @@ Start this first and then the game instances, as with every other runner here. T
 
 The reward is the per-squad `OperationalReward` shaping plus the terminal `OpsArena._finish_side` hands to `LearntOperations.finish` at the horizon. An arena contest is one bounded errand, so it is discounted at nothing (FIGHT_DISCOUNT / FIGHT_TRACE), and the advantage of an operational decision becomes how much better the contest went from there than the critic expected.
 
+What that sentence hides, and what a run has to be read against, is how far the terminal reaches. An errand is bounded by its contract: a squad handed a new one has its trajectory cut, and a cut trajectory is never paid a terminal at all — its last decision is bootstrapped from its own value estimate and the rest are taught by the shaping and the critic. The learnt layer re-draws its region every period, so unless it decides to stay it is cutting its own errand every period, and the horizon pays the last one of each squad and no other. The run therefore reports what it collected as well as what it scored: the buffer's census, per update, says how many of a batch's decisions lay in an errand that was ever paid a terminal, and the runner's signal line says how long an errand ran.
+
 Measure what comes out with `rwintel.learn.ops_run` against the pinned and script arms on fresh, unused seeds — the arena is the instrument, and the discipline of separating the seed a candidate was chosen on from the seed it is confirmed on holds here as everywhere.
 """
 
@@ -23,7 +25,7 @@ from .layers import LearntOperations
 from .net import OperationalNet
 from .ops_arena import (CATCHMENT_RADIUS, CREDIT, CREDITS, GARRISON_SCALE, HORIZON_MS,
                         OPENING_BASELINE, OpsArena)
-from .ops_run import _arena_seed, pool, report
+from .ops_run import _arena_seed, pool, report, signal
 from .rollout import FIGHT_DISCOUNT, FIGHT_TRACE, Rollout
 from .train import Trainer
 from .train import Optimiser
@@ -78,6 +80,8 @@ def train(arguments) -> int:
         log.info("last update: %s", report_.as_dict())
     # The learnt side's own domination over the horizon, as a run of it — not a duel, which ops_run does against the pin and the script. A rising figure over a run is the layer learning to dominate; the honest comparison is the separate paired duel, which has to be given a base seed this run did not use — both runners build a board from the same seed arithmetic, so a duel at the training seed replays the very boards the policy was fitted on.
     report(pool(sessions), "learnt")
+    # And how much of what the run collected the one payment could have reached, which is the question a rising return cannot answer: a decision in an errand that was replaced before the horizon is paid its shaping and bootstrapped from the critic, and nothing about the shape of the returns says how many of those the run was made of.
+    signal(sessions)
     return 0
 
 

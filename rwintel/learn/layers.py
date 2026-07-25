@@ -82,12 +82,12 @@ class LearntTactics(Tactics):
                 # Whatever was carried belonged to the errand being cut, whose potentials are measured against different ground; it cannot be paid into the errand that replaces it.
                 self.owed.pop(squad.id, None)
                 # A contract is the unit of work and so the unit of pay, so a squad handed a different one has begun a different errand and the decisions of the two must not share a trajectory: advantage estimation would otherwise run what the new errand earned backwards into decisions taken for the old. Cut rather than closed, because the errand that was replaced did not fail — it stopped being observed, and its last decision is bootstrapped from its own value estimate as any other unobserved ending is. What that decision is paid is nothing, since the potentials of two contracts are measured against different ground and different allowances and a difference between them is not a shaping term.
-                self.rollout.cut((self.instance, squad.id))
+                self.rollout.cut((self.instance, squad.id), reason="renewed")
         for squad_id in [key for key in self.pending if key not in present]:
             # A squad that has left the board between periods cannot be paid from anything, so its last decision is cut off rather than scored, and anything carried for it goes with the errand.
             self.pending.pop(squad_id, None)
             self.owed.pop(squad_id, None)
-            self.rollout.cut((self.instance, squad_id))
+            self.rollout.cut((self.instance, squad_id), reason="left")
             self.reward.forget(squad_id)
 
     def finish(self, squad: SquadRecord, terminal: float, reason: str) -> None:
@@ -105,7 +105,7 @@ class LearntTactics(Tactics):
             self.pending.pop(squad.id, None)
             self.owed.pop(squad.id, None)
             if self.rollout is not None:
-                self.rollout.cut((self.instance, squad.id))
+                self.rollout.cut((self.instance, squad.id), reason="spent")
             self.reward.forget(squad.id)
             return
         payment = terminal + (0.0 - self.reward.close(squad.id)) + self.owed.pop(squad.id, 0.0)
@@ -152,7 +152,7 @@ class LearntTactics(Tactics):
         # Every errand open here is cut rather than ended, so whatever was carried for it is carried no further.
         self.owed.clear()
         # This instance's errands only. One buffer serves every instance of a run, and an episode ending here says nothing about the fight another instance is in the middle of.
-        self.rollout.cut_all(owner=self.instance)
+        self.rollout.cut_all(owner=self.instance, reason="episode")
 
     def close(self) -> None:
         """Ends every open errand and releases this episode's trajectories to the trainer. The tactical arena has no intruder, so there is nothing to taint between the flush and the seal; the two are one call here and split only where an intruder sits above the layer."""
@@ -211,12 +211,14 @@ class LearntOperations(Operations):
                 self.owed[squad.id] = self.owed.get(squad.id, 0.0) + outcome.reward
             if outcome.renewed:
                 # Whatever was carried belonged to the errand being cut, whose potential was measured against different ground.
+                #
+                # What this costs is worth writing down where the cut is made, because it is not visible from anything a run reports. A renewal pays nought by construction, so the decision this lands on is written a reward of nought and then bootstrapped from its own value estimate; at a discount and a trace of one that leaves it an advantage of exactly nought, and every earlier decision of the cut errand anchored by nothing but the difference between two of the critic's own estimates, since a terminal only ever arrives through finish and a cut errand never reaches one. Where contracts are re-issued nearly every period — which is what a learnt layer does, its `_settled` returning the fresh draw rather than holding the errand — that is nearly the whole of the batch. The buffer's census counts the share so a run says it rather than having it inferred.
                 self.owed.pop(squad.id, None)
-                self.rollout.cut((self.instance, squad.id))
+                self.rollout.cut((self.instance, squad.id), reason="renewed")
         for squad_id in [key for key in self.pending if key not in present]:
             self.pending.pop(squad_id, None)
             self.owed.pop(squad_id, None)
-            self.rollout.cut((self.instance, squad_id))
+            self.rollout.cut((self.instance, squad_id), reason="left")
             self.reward.forget(squad_id)
 
     def finish(self, squad: SquadRecord, terminal: float, reason: str) -> None:
@@ -228,7 +230,7 @@ class LearntOperations(Operations):
             self.pending.pop(squad.id, None)
             self.owed.pop(squad.id, None)
             if self.rollout is not None:
-                self.rollout.cut((self.instance, squad.id))
+                self.rollout.cut((self.instance, squad.id), reason="spent")
             self.reward.forget(squad.id)
             return
         payment = terminal + (0.0 - self.reward.close(squad.id)) + self.owed.pop(squad.id, 0.0)
@@ -290,7 +292,7 @@ class LearntOperations(Operations):
         self.pending.clear()
         # Every errand open here is cut rather than ended, so whatever was carried for it is carried no further.
         self.owed.clear()
-        self.rollout.cut_all(owner=self.instance)
+        self.rollout.cut_all(owner=self.instance, reason="episode")
         self.reward.reset()
 
     def close(self) -> None:

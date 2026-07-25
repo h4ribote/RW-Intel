@@ -27,6 +27,8 @@ from rwintel.control.policy.contracts import (
 from rwintel.control.policy.operations import Concentrated, Operations
 from rwintel.control.policy.view import WorldView
 from rwintel.data.regions import Region
+from rwintel.learn.layers import LearntOperations
+from rwintel.learn.rollout import Rollout, Step
 from rwintel.learn.ops_arena import (
     CATCHMENT_RADIUS,
     CONTEST_PAIRS,
@@ -145,6 +147,7 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena.known = set()
     arena._wanted = {}
     arena._period = 0
+    arena._issued = {}
     arena._sandbox_sent = True
     arena.centre = (0.0, 0.0)
     arena._our_pt = None
@@ -393,13 +396,18 @@ def test_the_drawn_contests_never_overlap_and_never_reach_what_was_standing():
 
 
 class _Paid:
-    """A command layer that only remembers what it was paid, which is all `_finish_side` asks of one."""
+    """A command layer that only remembers what it was paid, which is all `_finish_side` asks of one.
+
+    It carries the count of closed errands a real learnt layer carries, because the arena reads its terminal count back off the layer rather than counting its own offers: what the arena knows is how many payments it held out, and only the layer knows how many of them reached a decision. Here every payment reaches one, which is the case of a layer with a decision of that squad still waiting.
+    """
 
     def __init__(self):
         self.paid = {}
+        self.terminals = {}
 
     def finish(self, squad, terminal, reason):
         self.paid[squad.id] = terminal
+        self.terminals[reason] = self.terminals.get(reason, 0) + 1
 
 
 def _contested(arena, region_id, point, weight):
@@ -469,12 +477,6 @@ def test_a_terminal_is_read_from_where_its_disc_started_and_not_from_the_neutral
     neutral = paid({4: 1.0, 9: 1.0}, baseline=0.0)
     assert abs(neutral[1] - 0.8 * 0.5) < 1e-9
     assert abs(neutral[2] - 0.5 * 0.5) < 1e-9
-
-    # The episode writes down how many terminals this side actually paid, because a policy cannot be taught by a signal that never reached it and the count is the only thing that says whether it did. The enemy's payments are the mirror's business and are not counted here.
-    assert arena.statistics.terminals == 2
-    arena.statistics.terminals = 0
-    paid({4: 1.0, 9: 1.0}, sign=-1.0)
-    assert arena.statistics.terminals == 0
 
 
 def test_the_two_credit_readings_pay_a_pile_of_squads_differently():
@@ -566,6 +568,130 @@ def test_the_marginal_credit_is_the_change_the_squad_made_to_the_side_score():
     for squad_id, member in ((1, 1), (2, 3)):
         without = _weighted([unit for unit in units if unit.id != member])
         assert abs(paid.paid[squad_id] - (standing - without)) < 1e-9
+
+
+def test_the_terminal_count_is_the_payments_that_landed_and_not_the_offers_made():
+    """A count of how many times the horizon offered a payment is one per staged squad by construction and says nothing at all. What has to be counted is how many of those offers reached a decision, because a payment that reaches no decision teaches nothing and is exactly what happens to a squad whose errand was replaced before the board was scored: its trajectory was cut when the new contract arrived, and there is nothing left for the terminal to be added to.
+
+    So the arena reads the figure back off the layer's own count of closed errands, the way the engagement arena reads its own, rather than counting its own offers. Here two squads are offered a payment and one takes it. The old count would have said two, and a run whose terminals never reach a decision would have looked exactly like a run whose terminals all did.
+    """
+    arena = _arena(seed=5)
+    _contested(arena, 4, (0.0, 0.0), 1.0)
+    arena.garrison_share = {4: 0.0}
+
+    rollout = Rollout()
+    layer = LearntOperations(None, None, None, rollout=rollout, instance=0)
+    arena.our_ops = layer
+    squads = {}
+    for slot in (1, 2):
+        squad = SquadRecord(id=slot, doctrine=Doctrine.VANGUARD, members=[slot])
+        squad.contract = dataclasses.replace(_CONTRACT, squad=slot, target_region=4)
+        squads[slot] = squad
+    # The first squad still has a decision waiting to be paid; the second had its errand replaced earlier in the episode, so its trajectory was cut and it has nothing outstanding.
+    layer.pending[1] = Step(state=[0.0], action=0, mask=[1.0], value=0.4, squad=1)
+    rollout.add((0, 2), Step(state=[0.0], action=0, mask=[1.0], value=0.4, squad=2))
+    rollout.cut((0, 2), reason="renewed")
+
+    arena._finish_side(layer, squads, {4: 1.0}, +1.0, [_unit(1, 0.0, 0.0), _unit(2, 10.0, 0.0)])
+    arena._tally()
+
+    assert len(squads) == 2, "both squads have to be offered a payment or the count is not being told apart from the offers"
+    assert arena.statistics.terminals == 1
+    assert layer.terminals["horizon"] == 1
+    # A layer that keeps no trajectories at all — every arm of the measuring runner — lands none of them, and nought is the truth for it rather than a fault.
+    arena.our_ops = LearntOperations(None, None, None, rollout=None, instance=-1)
+    arena._finish_side(arena.our_ops, squads, {4: 1.0}, +1.0, [_unit(1, 0.0, 0.0)])
+    arena._tally()
+    assert arena.statistics.terminals == 0
+
+
+def test_an_episode_counts_the_decisions_its_squads_took_and_the_errands_they_were_split_into():
+    """The arena pays one terminal per squad, at the horizon, to the errand that squad was on when the board was scored. So how much of an episode that payment can reach is decided by something the record did not contain: how long an errand ran.
+
+    Two episodes that score identically can be completely different instruments. One in which four contracts stood from the staging point to the horizon pays every decision taken; one in which the contracts were re-drawn every period pays four decisions out of hundreds, because a squad handed a new contract has its trajectory cut and a cut trajectory is never paid a terminal at all. Nothing else in the record separates them, so the periods and the errands are counted here, off the contracts the layers wrote onto the squad records — which costs the same and means the same for a handwritten ladder, a pinned deployment and a network alike.
+    """
+    arena = _arena(seed=13)
+    first = SquadRecord(id=1, doctrine=Doctrine.VANGUARD, members=[1])
+    second = SquadRecord(id=2, doctrine=Doctrine.VANGUARD, members=[2])
+    arena.squads = {1: first, 2: second}
+    first.contract = dataclasses.replace(_CONTRACT, squad=1, target_region=4, issued_at_ms=1000)
+
+    # Two periods in which the first squad held one contract and the second held none at all.
+    arena._survey()
+    arena._survey()
+    assert (arena.statistics.periods, arena.statistics.errands) == (2, 1)
+
+    # A fresh contract for the first squad is a second errand; the same contract standing is not.
+    first.contract = dataclasses.replace(first.contract, target_region=9, issued_at_ms=2000)
+    second.contract = dataclasses.replace(_CONTRACT, squad=2, target_region=4, issued_at_ms=2000)
+    arena._survey()
+    arena._survey()
+    assert (arena.statistics.periods, arena.statistics.errands) == (6, 3)
+    assert arena.statistics.as_dict()["errands"] == 3
+
+    # A squad re-tasked every period turns every decision into its own errand, which is the case the count exists to make visible: the ratio, and not the score, is what says whether the terminal reached anything.
+    for issued in (3000, 4000, 5000):
+        first.contract = dataclasses.replace(first.contract, issued_at_ms=issued)
+        second.contract = dataclasses.replace(second.contract, issued_at_ms=issued)
+        arena._survey()
+    assert (arena.statistics.periods, arena.statistics.errands) == (12, 9)
+
+
+def test_the_terminal_is_what_the_ground_came_to_against_where_it_opened_and_not_the_path_it_took():
+    """What the arena pays a squad is a statement about two boards — the one its disc opened on and the one it was scored on — and about no board in between. That is what makes the measured rates quotable: a concentrated assault pays about four tenths of a priority and a redundant defence about nothing because those are statements about `priority * (final share − the share the disc opened at)`.
+
+    A dense credit paid every period is the obvious cure for a terminal that reaches one decision in a hundred, and there are two ways to write one that look identical until a squad is re-tasked. Paying each period the movement of the disc the squad's standing contract names — the path the squad walked, region by region — does not sum to the terminal: it re-sets its origin at every change of contract, so a squad banks what its allies won on one disc and then steps onto a disc it cannot lose and keeps both. Paying instead the movement of the squad's own scored figure, each board read under the contract in force at that board and against the disc's own opening, is a difference of one quantity and telescopes to the terminal exactly, after any number of re-taskings.
+
+    Measured here on the arena's own reading rather than argued. A squad is contracted to an enemy-held disc while its allies carry it two thirds of the way, then re-tasked onto a disc of its own that never moves. The horizon pays it nothing, because the ground it was on when the board was scored ended exactly where it opened. The path ledger pays it two thirds of a priority for ground it walked away from; the endpoint ledger pays it nought, which is the terminal.
+    """
+    arena = _arena(seed=17)
+    _contested(arena, 4, (0.0, 0.0), 1.0)        # the enemy's garrison opened here, so this disc reads nought
+    _contested(arena, 9, (2000.0, 0.0), 1.0)     # ours opened here, so this one reads whole
+    arena.garrison_share = {4: 0.0, 9: 1.0}
+    arena.credit = "region"
+
+    # Three boards: the opening, one on which allies have taken two thirds of the enemy's disc, and the horizon on which they hold all of it. The squad's own disc never moves.
+    opening = [_unit(1, 0.0, 0.0, hostile=1), _unit(2, 2000.0, 0.0)]
+    middle = [_unit(1, 0.0, 0.0, hostile=1), _unit(2, 2000.0, 0.0),
+              _unit(10, 20.0, 0.0), _unit(11, 40.0, 0.0)]
+    horizon = [_unit(2, 2000.0, 0.0), _unit(10, 20.0, 0.0), _unit(11, 40.0, 0.0)]
+
+    def reading(units, region):
+        contest = next(c for c in arena.contests if c.region_id == region)
+        our_worth, enemy_worth = arena._catchment_worths(units, contest.point)
+        total = our_worth + enemy_worth
+        return our_worth / total if total > 0 else 0.5
+
+    def figure(units, region):
+        """The squad's own scored figure on one board: what the disc its contract names has moved from the ownership that disc opened at, weighted by what the strategic layer said the region was worth."""
+        return arena.priorities[region] * (reading(units, region) - arena.garrison_share[region])
+
+    assert abs(reading(opening, 4)) < 1e-9 and abs(reading(middle, 4) - 2.0 / 3.0) < 1e-9
+    assert abs(reading(horizon, 4) - 1.0) < 1e-9 and abs(reading(horizon, 9) - 1.0) < 1e-9
+
+    # The contract in force over each period: the enemy's disc first, this side's own disc after the re-tasking.
+    path = [(opening, 4, middle, 4), (middle, 4, horizon, 9)]
+    walked = sum(arena.priorities[now_region] * (reading(now, now_region) - reading(before, now_region))
+                 for before, before_region, now, now_region in path)
+    telescoped = sum(figure(now, now_region) - figure(before, before_region)
+                     for before, before_region, now, now_region in path)
+
+    squad = SquadRecord(id=1, doctrine=Doctrine.VANGUARD, members=[10, 11])
+    squad.contract = dataclasses.replace(_CONTRACT, squad=1, target_region=9)
+    ledger = _Paid()
+    arena._finish_side(ledger, {1: squad}, {4: reading(horizon, 4), 9: reading(horizon, 9)}, +1.0, horizon)
+    terminal = ledger.paid[1]
+
+    assert abs(terminal) < 1e-9, "the disc this squad held at the horizon ended where it opened"
+    assert abs(telescoped - terminal) < 1e-9, "the endpoint ledger did not sum to the terminal"
+    assert abs(walked - 2.0 / 3.0) < 1e-9 and abs(walked - terminal) > 0.6, (
+        "the path ledger paid the squad for a disc it was re-tasked away from")
+
+    # The other way a dense credit stops telescoping, and it needs no re-tasking at all: under the marginal reading a board's reading depends on which of the squad's units were standing in the disc, so an earlier board re-read with the members the squad has now is not the reading that board gave when it was current. Anything paying differences of readings has to hold the membership of the board it holds, or a squad that loses a tank is paid for the loss twice over.
+    contest = next(c for c in arena.contests if c.region_id == 4)
+    whole = reading(middle, 4) - arena._share_without(middle, contest, [10, 11])
+    survivor = reading(middle, 4) - arena._share_without(middle, contest, [10])
+    assert abs(whole - 2.0 / 3.0) < 1e-9 and abs(survivor - 1.0 / 6.0) < 1e-9
 
 
 def test_the_concentrating_arm_sends_every_squad_at_the_one_region_most_wanted():

@@ -227,12 +227,20 @@ class Trainer(threading.Thread):
             steps = self.rollout.drain(sealed_only=True)
             if not steps:
                 continue
+            # Taken before the update, which normalises the batch in place: after that the exact cancellations the census counts are gone, centred and scaled into ordinary-looking numbers.
+            census = self.rollout.census
             report = self.optimiser.update(steps)
             self.reports.append(report)
             log.info("update %d over %d step(s): policy %+.4f value %.4f entropy %.3f return %+.3f reward %+.4f clipped %.2f%s",
                      report.updates, report.steps, report.policy_loss, report.value_loss,
                      report.entropy, report.mean_return, report.mean_reward, report.clipped,
                      "   (warming the value head, the policy is held still)" if report.warming else "")
+            # What the batch was made of, which none of the figures above can say. A batch whose decisions mostly sit in trajectories nothing terminal ever reached is a batch trained on the critic's opinion of itself, and it reports a moving return and a falling value loss while it does it.
+            log.info("        of those, %d decision(s) lay in an errand that was paid a terminal and %d carried an "
+                     "advantage of exactly nought before normalisation, over %d finished trajectory(ies) and %s cut, "
+                     "leaving %d distinct advantage(s)",
+                     census.paid_steps, census.zero_advantage, census.finished,
+                     dict(sorted(census.cut.items())) or 0, census.distinct)
             if self.on_update is not None:
                 self.on_update(report)
 

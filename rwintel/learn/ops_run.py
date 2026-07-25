@@ -143,6 +143,7 @@ def diagnose(sessions, arm: str, radius: float) -> None:
                     "measure of how it deployed onto the contests but of what happened on ground it never reached: "
                     "read it as a floor for abandoning the scored board, not as a deployment")
     _discs(sessions, arm)
+    signal(sessions, arm)
 
 
 #: How far a final share must sit from an even split before the disc is called won or lost rather than neither. A disc both sides emptied reads exactly a half and is no more a defeat than a victory, and a disc decided by a handful of health is not the kind of outcome a deployment should be credited with either.
@@ -174,6 +175,30 @@ def _discs(sessions, arm: str) -> None:
              "lose, it kept %d of %d and lost %d",
              tally.get("take/won", 0), tally.get("take", 0), tally.get("take/neither", 0),
              tally.get("hold/won", 0), tally.get("hold", 0), tally.get("hold/lost", 0))
+
+
+def signal(sessions, arm: Optional[str] = None) -> None:
+    """How far this arm's one payment could reach the decisions it is supposed to teach.
+
+    The arena pays a squad once, at the horizon, and pays it to the errand the squad was on when the board was scored. So what a run has to be able to say is how long an errand was: an episode in which a squad held one contract from the staging point to the horizon is an episode in which the payment reaches every decision taken about it, and an episode in which the contract was re-drawn every period is one in which the payment reaches the last decision and no other, however many hundred were taken. Those two episodes report the same score, the same shares and the same disc tallies, and nothing else here tells them apart.
+
+    The three figures are the decisions the squads were given, the errands those decisions were divided into, and how many payments actually landed on a decision. The last is nought for every arm of this runner and that is not a fault: no arm here is handed a rollout, so no decision is recorded and there is nothing for a payment to land on. It is reported all the same, because it is the figure a training run has to be read by and a measuring run is where the ratio it has to be compared against is taken.
+    """
+    periods = errands = terminals = staged = 0
+    for session in sessions:
+        for record in session.records:
+            if (arm is not None and record.arm != arm) or not record.statistics.get("scored"):
+                continue
+            periods += int(record.statistics.get("periods", 0))
+            errands += int(record.statistics.get("errands", 0))
+            terminals += int(record.statistics.get("terminals", 0))
+            staged += int(record.statistics.get("squads", 0))
+    if not periods or not errands:
+        return
+    # Each squad's last errand is the only one the horizon pays, so the share of the decisions a payment can reach is the share of the errands that are somebody's last one — the squads staged, against every errand they were given.
+    log.info("this arm's squads took %d operational decision(s) over %d errand(s), so an errand ran %.1f decision(s) "
+             "and the payment made at the horizon reaches about %.1f%% of them; %d payment(s) landed on a decision",
+             periods, errands, periods / errands, 100.0 * min(staged, errands) / errands, terminals)
 
 
 def measure(arguments) -> Dict[str, Summary]:

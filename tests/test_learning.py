@@ -64,7 +64,7 @@ from rwintel.learn.reward import (
     TacticalReward,
     WIPED_REWARD,
 )
-from rwintel.learn.rollout import Rollout, Step
+from rwintel.learn.rollout import FIGHT_DISCOUNT, FIGHT_TRACE, Rollout, Step, normalise
 from rwintel.learn.train import Optimiser, Trainer
 from rwintel.control.policy.tactics import Tactics, _Track
 from rwintel.eval import arms as eval_arms
@@ -462,6 +462,71 @@ def test_a_layers_flush_leaves_its_work_unsealed_and_only_its_close_seals_it():
     assert rollout.drain(sealed_only=True) == []
     layer.close()
     assert len(rollout.drain(sealed_only=True)) == 1
+
+
+def test_a_decision_in_a_cut_errand_is_anchored_by_the_critic_alone_and_its_last_one_by_nothing():
+    """The signature to watch for in any layer, and the one worth having a test for whatever else is being measured: what a batch of decisions that nothing terminal ever reached actually teaches.
+
+    An errand that is cut — because a new contract replaced it, or the squad left the board, or the episode closed around it — is bootstrapped from its last decision's own value estimate. At a discount and a trace of one that makes the last decision's advantage exactly its own reward, and a period that pays nothing makes it identically nought; every earlier decision of that errand comes out at the sum of the rewards after it plus the difference between two of the critic's own estimates, which contains no terminal at all. The critic's own regression target on those steps is its own later estimate, so a run of them fits nothing and drifts, and the mean return drifts with it.
+
+    Both halves are pinned here because the two are easy to confuse and the difference decides what a run's numbers mean. With a critic that answers the same everywhere — a fresh value head, or one replayed at nought — every decision of every cut errand is exactly nought and normalising turns the whole mass into one identical nonzero number pushed onto whatever the policy happened to draw. With a critic that has fitted anything at all, only the last decision of each cut errand is exactly nought and the rest carry real differences. A count of exact noughts is therefore a measurement of the critic as much as of the buffer, and quoting one without the other says more than it knows.
+    """
+    def batch(values):
+        rollout = Rollout(discount=FIGHT_DISCOUNT, trace=FIGHT_TRACE)
+        for squad in range(4):
+            for value in values:
+                rollout.add((0, squad), Step(state=[0.0], action=0, mask=[1.0], value=value,
+                                             reward=0.0, squad=squad))
+            # Every period of these errands paid nothing, which is what a period that renews a contract pays.
+            rollout.cut((0, squad), reason="renewed")
+        # And one errand that ran to the horizon and was paid there, as the arena pays the last errand of each squad.
+        rollout.add((0, 9), Step(state=[0.0], action=0, mask=[1.0], value=values[0], reward=0.5,
+                                 done=True, squad=9))
+        return rollout, rollout.drain()
+
+    flat, steps = batch([0.3, 0.3, 0.3, 0.3, 0.3])
+    cut = [step for step in steps if step.squad != 9]
+    assert len(cut) == 20 and all(step.advantage == 0.0 for step in cut)
+    assert flat.census.zero_advantage == 20 and flat.census.distinct == 2
+    assert flat.census.paid_steps == 1 and flat.census.cut == {"renewed": 4}
+    normalise(steps)
+    spread = {step.advantage for step in cut}
+    assert len(spread) == 1 and abs(spread.pop()) > 0.1, (
+        "a batch of identical noughts comes out of normalisation as one identical nonzero push on whatever was drawn")
+
+    # The same buffer under a critic that has fitted something: only the last decision of each cut errand is exactly nought, and every other one carries what the critic's estimate moved between there and the end of what was observed.
+    values = [0.1, 0.25, 0.4, 0.55, 0.7]
+    fitted, steps = batch(values)
+    cut = [step for step in steps if step.squad != 9]
+    assert fitted.census.zero_advantage == 4
+    assert fitted.census.distinct == len(values) + 1
+    for index, step in enumerate(cut):
+        assert abs(step.advantage - (values[-1] - values[index % len(values)])) < 1e-9
+
+
+def test_a_drained_batch_says_how_much_of_itself_a_payment_ever_reached():
+    """The census exists because none of the figures an update reports can say this. A batch mostly made of errands nothing ever paid reports a policy loss, a value loss, an entropy and a mean return exactly like a batch that was paid throughout, and the mean return of the unpaid part is the critic's own estimate at the point observation stopped — so a run of them looks like a return climbing.
+
+    Counted over the batch as the optimiser will see it, so decisions dropped for having been interfered with are not in it: what is wanted is the make-up of the gradient, not of the buffer.
+    """
+    rollout = Rollout()
+    for index in range(3):
+        rollout.add((0, 1), Step(state=[0.0], action=0, mask=[1.0], reward=0.1, squad=1,
+                                 done=index == 2))
+    for index in range(4):
+        rollout.add((0, 2), Step(state=[0.0], action=0, mask=[1.0], reward=0.0, squad=2))
+    rollout.cut((0, 2), reason="renewed")
+    for index in range(2):
+        rollout.add((0, 3), Step(state=[0.0], action=0, mask=[1.0], reward=0.0, squad=3))
+    rollout.cut((0, 3), reason="left")
+    rollout.taint(0, [3])
+
+    steps = rollout.drain()
+    census = rollout.census
+    assert len(steps) == 7, "the tainted decisions are dropped from the batch"
+    assert census.steps == 7 and census.paid_steps == 3
+    assert census.finished == 1 and census.cut == {"renewed": 1, "left": 1}
+    assert census.as_dict()["cut"] == {"renewed": 1, "left": 1}
 
 
 # ---- driving both sides of a fight ---------------------------------------------------------
@@ -916,6 +981,53 @@ def test_a_wiped_operational_squad_takes_its_terminal_on_the_last_step_it_left_b
     # Nothing moved under this errand, so its shaping is nought either way and the return is the terminal alone.
     assert abs(step.reward - 0.6) < 1e-9
     assert layer.terminals["wiped"] == 1
+
+
+def test_an_operational_errand_replaced_by_a_new_contract_takes_no_terminal_and_keeps_its_shaping():
+    """Where the operational signal goes when a layer re-draws its region every period, on the real reward and the real buffer rather than by argument.
+
+    Two things are true at once here and each is half of the diagnosis. The shaping of a replaced errand is not cancelled — `close` is only reached from `finish`, and a renewal never reaches `finish` — so what those decisions were paid is the whole movement of the potential over the errand, in the region block's own quantity. And no terminal ever arrives for them: a terminal only comes from outside, at the horizon, and by then this trajectory has been cut and is no longer the squad's. So the errand is paid something, and it is paid nothing of what the arena is scored on.
+
+    The period that does the replacing is paid exactly nought, by construction, and it is the last step of the trajectory. At the discount and trace a whole bounded contest is run at, that leaves its advantage exactly nought and the rest of the errand anchored by the critic's own estimates. The layer re-draws its region every period on the constructed arena, so unless the policy decides to stay, this is what happens to the errand every period and the horizon pays the last one alone.
+    """
+    class _Orders:
+        priorities = {1: 1.0, 2: 1.0}
+
+    rollout = Rollout(discount=FIGHT_DISCOUNT, trace=FIGHT_TRACE)
+    layer = LearntOperations(None, None, None, rollout=rollout, instance=0, discount=1.0)
+    squad = _squad(id=0)
+    orders = _Orders()
+
+    def board(ours, theirs):
+        return _view([], [_region(1, ours=ours, theirs=theirs), _region(2, ours=500.0, theirs=500.0)])
+
+    # Opens at 1.0 * (share(100, 900) - a half) = -0.4, a region we are being beaten in.
+    layer.reward.step(squad, board(100.0, 900.0), orders)
+    assert abs(layer.reward.missions[squad.id].opening - -0.4) < 1e-9
+
+    # Two periods in which the region comes our way, each paying its own shaping term to the decision that was waiting.
+    for value, (ours, theirs) in ((0.2, (500.0, 500.0)), (0.6, (900.0, 100.0))):
+        layer.pending[squad.id] = Step(state=[0.0], action=0, mask=[1.0], value=value, squad=squad.id)
+        layer._settle(board(ours, theirs), orders, [squad])
+
+    # And a third in which the layer sends the squad somewhere else, which is what a policy that re-draws every period does whenever it changes its mind.
+    layer.pending[squad.id] = Step(state=[0.0], action=0, mask=[1.0], value=0.3, squad=squad.id)
+    squad.contract = TaskContract(squad=squad.id, task=Task.ATTACK, target_region=2,
+                                  stance=Stance.AGGRESSIVE, cost_budget=1000.0,
+                                  deadline_ms=90000, issued_at_ms=24000)
+    layer._settle(board(900.0, 100.0), orders, [squad])
+
+    trajectory, = rollout.done
+    assert not trajectory.finished and trajectory.reason == "renewed"
+    assert [round(step.reward, 9) for step in trajectory.steps] == [0.4, 0.4, 0.0]
+    # The errand returned the whole movement of its potential and not nought, which is what an errand ended by a re-tasking is often taken to return; and it returned nothing of the terminal, which is the half that matters.
+    assert abs(sum(step.reward for step in trajectory.steps) - 0.8) < 1e-9
+    assert not layer.terminals
+
+    steps = rollout.drain()
+    assert [round(step.advantage, 9) for step in steps] == [0.9, 0.1, 0.0]
+    assert rollout.census.paid_steps == 0 and rollout.census.cut == {"renewed": 1}
+    assert rollout.census.zero_advantage == 1
 
 
 def test_a_layer_built_with_a_discount_pays_its_shaping_at_that_discount():

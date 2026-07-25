@@ -142,8 +142,11 @@ class OpsStatistics:
     our_alive: int = 0
     our_in_catchment: int = 0
     our_reach: float = 0.0
-    #: How many terminals this side actually paid at the horizon. The learnt layer counts the errands it closed and for what reason, so that a run can be asked whether its terminals are firing at all rather than having it guessed at from the shape of the returns, and on this arena the terminal arrives only from outside — one payment per staged squad that still holds a contract when the board is scored. A run whose figure is short of the squads staged has squads that were never paid, and a policy cannot be taught by a signal that does not reach it; the engagement arena writes the same count for the same reason.
+    #: How many of this side's horizon payments actually landed on a decision, read back off the layer's own count of the errands it closed exactly as the engagement arena reads its own. Not the number of times the horizon offered a payment, which is one per staged squad by construction and says nothing: a payment lands only where the layer had a decision of that squad's still waiting or a step of it still in the buffer, so a squad whose trajectory was cut before the horizon — because a new contract replaced its errand — is offered a terminal and takes none. The difference between the two figures is the whole question of whether the signal reached the policy, and counting the offers hid it. A run that keeps no trajectories at all records nought here, which is the truth for it: nothing was recorded for a payment to reach.
     terminals: int = 0
+    #: How far that one terminal has to reach. `periods` is the operational decisions this side's squads were given over the episode, one per squad per operational frame it held a contract; `errands` is how many distinct contracts those decisions were divided into. Their ratio is the length of an errand in decisions, and since the terminal is paid to the last errand of a squad and to no other, it is also how much of the episode's decision mass any payment from outside can reach. Written down per episode and per arm because the figure differs by arm — the handwritten ladder holds a squad on the errand it is running while a learnt layer re-draws every period — so it cannot be quoted once for the arena and has to be measured on the boards the comparison is made on.
+    periods: int = 0
+    errands: int = 0
 
     def as_dict(self) -> dict:
         return {"scored": self.scored, "side_score": round(self.side_score, 6),
@@ -155,7 +158,7 @@ class OpsStatistics:
                 "our_in_catchment": self.our_in_catchment, "our_reach": round(self.our_reach, 1),
                 "board": self.board, "horizon_ms": self.horizon_ms, "radius": round(self.radius, 1),
                 "squads": self.squads, "pairs": self.pairs, "garrison": round(self.garrison, 1),
-                "terminals": self.terminals}
+                "terminals": self.terminals, "periods": self.periods, "errands": self.errands}
 
 
 class OpsArena(Arena):
@@ -208,6 +211,8 @@ class OpsArena(Arena):
         self._their_pt: Optional[Tuple[float, float]] = None
         self._wanted: Dict[int, Dict[int, int]] = {}
         self._period = 0
+        #: When each of this side's squads was last handed a contract, so that a fresh one can be told from the same one standing. A contract carries the moment it was issued and the operational layer only writes a new one when something about it changed, so a change in this figure is exactly one errand ending and another beginning.
+        self._issued: Dict[int, int] = {}
         self._sandbox_sent = False
         # The draw's settings are written into the statistics at construction rather than at scoring, so that an episode which never reaches its horizon still says under what instrument it was run.
         self.statistics = OpsStatistics(board=seed, horizon_ms=horizon_ms, radius=catchment_radius,
@@ -444,7 +449,26 @@ class OpsArena(Arena):
                 self.our_reports = out
             else:
                 self.their_reports = out
+        if operational and self.orders is not None:
+            # After both sides have decided, so that a period is counted against the contract that period's decision produced and the last decision before the horizon is counted at all.
+            self._survey()
         self._period += 1
+
+    def _survey(self) -> None:
+        """Counts one operational period for each of this side's squads that holds a contract, and one errand each time a squad is handed a fresh one.
+
+        This is what says how far the arena's one payment reaches. A terminal is paid at the horizon to the last errand of each squad and to no other, so an episode in which four squads were re-tasked every period is an episode in which four decisions out of hundreds were paid anything from outside, and one in which four contracts stood from the staging point to the horizon is an episode in which every decision was. Nothing else in the record distinguishes those two, and they are not distinguished by the layer either: both report the same score, the same shares and the same terminals.
+
+        Read off the contracts the layers wrote onto the squad records rather than off any layer's own bookkeeping, so that it costs the same and means the same for every arm — the handwritten ladder, the pinned deployment, the concentrating arm and a learnt network alike — and so that an arm which keeps no trajectories is still measured. This side only: the statistics belong to the process's own side and the enemy's periods are the mirror's business.
+        """
+        for squad in self.squads.values():
+            contract = squad.contract
+            if contract is None:
+                continue
+            self.statistics.periods += 1
+            if self._issued.get(squad.id) != contract.issued_at_ms:
+                self._issued[squad.id] = contract.issued_at_ms
+                self.statistics.errands += 1
 
     # ---- scoring and per-decision terminal ---------------------------------------------
 
@@ -484,6 +508,16 @@ class OpsArena(Arena):
 
         self._finish_side(self.our_ops, self.squads, shares, +1.0, units)
         self._finish_side(self.their_ops, self.enemy, shares, -1.0, units)
+        self._tally()
+
+    def _tally(self) -> None:
+        """Writes down how many of this side's horizon payments actually landed on a decision, taken from the layer's own count of the errands it closed exactly as the engagement arena's tally is.
+
+        Recomputed from the layer rather than counted here, and that is the whole point of it. What this arena can count for itself is how many times it offered a payment, which is one per staged squad holding a contract and is therefore a constant that says nothing; only the layer knows whether the payment reached a decision, because only the layer knows whether that squad still had a trajectory to pay it into. A squad whose errand was replaced before the horizon has had its trajectory cut, and the terminal offered to it lands on nothing. A layer that keeps no trajectories — every arm of the measuring runner — lands none of them, and nought is then the honest figure rather than a fault.
+
+        This side only: the statistics belong to the process's own side, and the enemy's terminals are the mirror's business.
+        """
+        self.statistics.terminals = sum(int(count) for count in getattr(self.our_ops, "terminals", {}).values())
 
     def _side_score(self, unit_states) -> float:
         """The reported and validated side score: the priority-weighted mean domination over every contested region.
@@ -542,7 +576,6 @@ class OpsArena(Arena):
         finish = getattr(ops, "finish", None)
         if finish is None:
             return
-        paid = 0
         by_region = {contest.region_id: contest for contest in self.contests}
         for squad in squads.values():
             region = squad.contract.target_region if squad.contract is not None else None
@@ -556,10 +589,6 @@ class OpsArena(Arena):
             else:
                 moved = share - opening
             finish(squad, sign * weight * moved, "horizon")
-            paid += 1
-        # Only this side's payments are counted: the statistics belong to the process's own side, and the enemy's terminals are the mirror's business.
-        if sign > 0.0:
-            self.statistics.terminals = paid
 
     def _share_without(self, unit_states, contest: "_Contest", members: Sequence[int]) -> float:
         """What one contest's catchment would have read with a squad's surviving units taken out of it. An empty disc reads a half, as it does everywhere else, so a squad that was the only thing in a catchment is credited with the whole of taking it."""

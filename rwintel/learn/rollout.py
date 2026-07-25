@@ -64,10 +64,51 @@ class Trajectory:
     steps: List[Step] = field(default_factory=list)
     #: True when the last step ended the errand rather than the collection being cut off.
     finished: bool = False
+    #: Why a trajectory that did not finish was cut, so that a batch can be asked where its decisions went instead of having it read off the code. The layers name four places a cut is made: a new contract replaced the errand, the squad left the board, the episode closed around it, and its errand had already taken its terminal so the decisions after it belong to no errand at all. A trajectory that finished carries none, and a cut made by a caller that named no reason is recorded as unobserved. Nothing reads this to decide anything; it exists because the share of a batch no terminal ever reached is the first thing to ask of a layer that will not learn, and it was not a figure this buffer could produce.
+    reason: str = ""
     #: The value of the state after the last step, used to bootstrap a trajectory that was cut off.
     tail_value: float = 0.0
     #: True once the episode this trajectory finished in has closed and its interference has been marked, which is the point past which the trainer may drain it. A trajectory that finished in the middle of an episode is added to the finished set the moment it ends, several periods before the episode closes and the intruder's touched set is complete; drained in that gap it would carry an interfered-with decision into the update untainted, because the tainting has not run yet. Held undrainable until sealed, it cannot.
     sealed: bool = False
+
+
+@dataclass
+class Census:
+    """What one drained batch was made of, in the figures that say whether anything paid from outside reached the decisions in it.
+
+    A trajectory that was cut is one no terminal ever reached. Its last decision is bootstrapped from its own value estimate, so at a discount and a trace of one that decision's advantage is exactly its own reward, and every earlier decision in it is anchored by nothing but the difference between two of the critic's own estimates — while the critic's regression target on those same steps is its own later estimate. A batch mostly made of cut trajectories is therefore mostly trained on the critic's opinion of itself, and its mean return is that opinion drifting rather than the layer learning. None of that can be told from the losses, the entropy or the return, which is why the shares are counted here and reported with every update instead of being argued from the code.
+
+    The counts are of the batch as it will be handed to the optimiser, so decisions dropped for having been interfered with are not in them.
+    """
+
+    steps: int = 0
+    #: Decisions lying in a trajectory that ended on a terminal, which are the only ones anything paid from outside can reach. The rest are taught by the shaping and the critic alone.
+    paid_steps: int = 0
+    #: Trajectories that ended on a terminal, and the ones that were cut, counted by what cut them.
+    finished: int = 0
+    cut: Dict[str, int] = field(default_factory=dict)
+    #: Decisions whose advantage is exactly nought before the batch is normalised. Exactly rather than nearly, because the number worth watching is produced by an exact cancellation and not by a small quantity: the last step of a cut trajectory has `reward + value − value`, which is its own reward, and a period that pays nothing makes that identically nought. A batch in which this is a large share is a batch where that share of the sampled actions carries no information about itself at all, and after normalisation they all carry one identical nonzero number instead, which reinforces whatever the policy currently draws.
+    zero_advantage: int = 0
+    #: How many different advantages the batch holds. A batch of many decisions and a handful of distinct advantages is the same fault seen from the other side, and it is the one figure that separates a critic which has fitted something from one which has not.
+    distinct: int = 0
+
+    @classmethod
+    def of(cls, trajectories: Sequence[Trajectory], steps: Sequence[Step]) -> "Census":
+        kept = {id(step) for step in steps}
+        census = cls(steps=len(steps))
+        for trajectory in trajectories:
+            if trajectory.finished:
+                census.finished += 1
+                census.paid_steps += sum(1 for step in trajectory.steps if id(step) in kept)
+            else:
+                census.cut[trajectory.reason] = census.cut.get(trajectory.reason, 0) + 1
+        census.zero_advantage = sum(1 for step in steps if step.advantage == 0.0)
+        census.distinct = len({step.advantage for step in steps})
+        return census
+
+    def as_dict(self) -> dict:
+        return {"steps": self.steps, "paid_steps": self.paid_steps, "finished": self.finished,
+                "cut": dict(self.cut), "zero_advantage": self.zero_advantage, "distinct": self.distinct}
 
 
 class Rollout:
@@ -78,6 +119,8 @@ class Rollout:
         self.trace = trace
         self.live: Dict[object, Trajectory] = {}
         self.done: List[Trajectory] = []
+        #: What the last drain took, kept so that whoever spends a batch can report how it was made up. Overwritten by each drain rather than accumulated, because the question it answers is about one update.
+        self.census = Census()
 
     def __len__(self) -> int:
         return sum(len(t.steps) for t in self.done) + sum(len(t.steps) for t in self.live.values())
@@ -107,18 +150,23 @@ class Rollout:
         del self.live[key]
         return True
 
-    def cut(self, key: object, tail_value: Optional[float] = None) -> None:
+    def cut(self, key: object, tail_value: Optional[float] = None,
+            reason: str = "unobserved") -> None:
         """Ends a trajectory that has not finished on its own — the match was called, or the squad passed out of this layer's hands. Its last step is bootstrapped rather than treated as terminal, because the errand did not fail, it merely stopped being observed.
 
         With no estimate offered, the last step's own value stands in for the one after it. That is an approximation and a much better one than nought: nought asserts that the errand was worth nothing from the moment observation stopped, which would teach a policy that having a match called on it is a failure, and matches are called on a fixed clock that no policy can affect.
+
+        The reason is written down and never read back by anything that decides: what it is for is the census, where a batch has to be able to say how much of itself no terminal ever reached and what took the rest away.
         """
         trajectory = self.live.pop(key, None)
         if trajectory is None or not trajectory.steps:
             return
         trajectory.tail_value = trajectory.steps[-1].value if tail_value is None else tail_value
+        trajectory.reason = reason
         self.done.append(trajectory)
 
-    def cut_all(self, tail_value: Optional[float] = None, owner: object = None) -> None:
+    def cut_all(self, tail_value: Optional[float] = None, owner: object = None,
+                reason: str = "unobserved") -> None:
         """Ends every trajectory still open, or every one belonging to one owner.
 
         The owner matters because one buffer serves every instance of a run: a trajectory is keyed by the instance it was collected on and the squad it is about, so cutting the whole buffer when one instance finishes an episode reaches into eleven other instances and cuts the fight each of them is in the middle of. Those fights then end with a bootstrap where they were about to be paid their score, which is the one payment the arena exists to make. With a dozen instances each finishing an episode every half minute and a fight lasting about twenty seconds, that was most of them.
@@ -127,7 +175,7 @@ class Rollout:
         """
         for key in list(self.live):
             if owner is None or (isinstance(key, tuple) and key and key[0] == owner):
-                self.cut(key, tail_value)
+                self.cut(key, tail_value, reason)
 
     def taint(self, owner: object, squads: Iterable[int]) -> None:
         """Marks every decision this owner's instance took about these squads, in trajectories still open and in trajectories already finished, as one somebody else interfered with.
@@ -170,9 +218,10 @@ class Rollout:
         for trajectory in ready:
             self._finish(trajectory)
             out.extend(trajectory.steps)
-        if keep_tainted:
-            return out
-        return [step for step in out if not step.tainted]
+        kept = out if keep_tainted else [step for step in out if not step.tainted]
+        # Taken after the advantages are filled in and before anything normalises them, which is the only moment the exact cancellations are visible: normalising centres and scales the batch, so a mass of identical noughts comes out as a mass of one identical nonzero number and cannot be told from a batch that learnt something.
+        self.census = Census.of(ready, kept)
+        return kept
 
     def _finish(self, trajectory: Trajectory) -> None:
         """Generalised advantage estimation over one trajectory, backwards. The bootstrap after the final step is nought for an errand that ended and the value estimate for one that was cut off, which is the whole of the difference between the two cases."""
