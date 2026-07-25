@@ -178,4 +178,4 @@ tools/macos/learn-run.sh --count 8 --speed 10 -- \
 - **最初の 30 秒程度は実行時コンパイルの影響で値が変動する。** フレームレートが 77 から 226 まで上昇する例を観測した。集計には初期のサンプルを含めない。
 - **同一の設定でも試合そのものは再現しない。** これは環境の作り方ではなくゲームの性質である。[../game/05-match-control.md](../game/05-match-control.md) を参照する。
 
-実測値は [03-throughput.md](03-throughput.md) にある。
+実測値は [../record/02-throughput.md](../record/02-throughput.md) にある。

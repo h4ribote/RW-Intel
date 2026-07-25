@@ -1,6 +1,6 @@
 """The frame format spoken between the in-process agent and the control process.
 
-The layout is fixed in `docs/project/05-interface.md`. Anything changed here has to be changed in `agent/Wire.java` as well, and the protocol version has to be raised so a mismatched pair refuses to talk rather than misreading each other.
+The layout is fixed in `docs/system/02-interface.md`. Anything changed here has to be changed in `agent/Wire.java` as well, and the protocol version has to be raised so a mismatched pair refuses to talk rather than misreading each other.
 """
 
 from .frames import (

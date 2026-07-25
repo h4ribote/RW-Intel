@@ -1,6 +1,6 @@
 """Pins the scoring and the sample sizing to the figures the evaluation design was written around.
 
-The sizing tests are against the tables in `docs/project/07-evaluation.md` rather than against a rederivation, because the point of those tables is that the budget of a whole comparison is read off them. If an edit here changes what a difference costs to demonstrate, that is a change of plan and it should show up as a broken test.
+The sizing tests are against the tables in `docs/system/05-evaluation.md` rather than against a rederivation, because the point of those tables is that the budget of a whole comparison is read off them. If an edit here changes what a difference costs to demonstrate, that is a change of plan and it should show up as a broken test.
 
 The scoring tests use a stand-in episode rather than the real `EpisodeRecord`, so that they exercise the shape of the standing the game emits and nothing else. Scoring takes an episode as data, not as an object of a particular class, and the test holds it to that.
 """

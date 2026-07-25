@@ -1,6 +1,6 @@
 """Holds the two halves of the wire format to the same layout.
 
-The Java side writes these blocks by hand, so a field added on one side and forgotten on the other would not fail to compile; it would decode into the wrong fields and produce a plausible looking observation. Pinning the block sizes here makes that a test failure instead. The sizes are also stated in `docs/project/05-interface.md`.
+The Java side writes these blocks by hand, so a field added on one side and forgotten on the other would not fail to compile; it would decode into the wrong fields and produce a plausible looking observation. Pinning the block sizes here makes that a test failure instead. The sizes are also stated in `docs/system/02-interface.md`.
 
 The decode test builds a body with struct.pack rather than going through an encoder, because there is no Python encoder for observations: the only writer is the Java agent, so a round trip against our own decoder would prove nothing about the layout. Hand packed bytes are the closest stand-in for what the agent actually sends.
 """

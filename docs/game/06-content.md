@@ -118,7 +118,7 @@ spawn: resolved 'mammothTank' to com.corrodinggames.rts.game.units.custom.l repo
 | 同 最大 | 400 ワールド単位 |
 | 戦車の射程 | 130 ワールド単位 |
 
-領域の大きさを決めるときの尺度になる([../project/05-interface.md](../project/05-interface.md))。
+領域の大きさを決めるときの尺度になる([../system/02-interface.md](../system/02-interface.md))。
 
 ### 価格と戦闘力の関係
 
@@ -131,7 +131,7 @@ spawn: resolved 'mammothTank' to com.corrodinggames.rts.game.units.custom.l repo
 | 価格 と 毎秒ダメージ | 0.47 |
 | 価格 と 射程 | 0.43 |
 
-**価格は耐久をよく代理する。** この事実を軍事価値の定義に使う判断は [../project/06-script-policy.md](../project/06-script-policy.md) にある。
+**価格は耐久をよく代理する。** この事実を軍事価値の定義に使う判断は [../system/03-script-policy.md](../system/03-script-policy.md) にある。
 
 ## マップ
 

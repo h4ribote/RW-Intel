@@ -12,7 +12,7 @@ Rusted Warfare を機械学習でプレイするシステム。生産、アッ�
 
 **環境ではなく学習信号の側にも、黙って信号を失っていた点が三つと、採点そのものの穴が一つ見つかり、四つとも直した。** アリーナの用務は交戦 1 件ぶん・平均 113 決定なのに割引 0.99 と GAE の trace 0.95 で刈られており、終端が届いていたのは交戦の最後の 3 秒半だけだったこと。一つのインスタンスがエピソードを終えるたびに、他の 11 インスタンスが戦っている最中の交戦の軌跡までまとめて切られていたこと。交戦の開始ポテンシャルが前の交戦の撃破を数えたまま取られていたこと。そして、交戦のおよそ 4 分の 3 はどちらも全滅しないまま終わるのに、生き残りを値段まるごとで数える採点ではその全部が両側ちょうど 0 点だったことである。**アリーナの用務は割り引かなくなり、採点は「撃破で採る」と「残り体力で割り引いて採る」の二通りになって、どちらの読みでも必ず両方を報告する。****ただし、四つのどれかが成績を動かしたという測定はまだ無い。** 直した根拠は、コードが文書の書いていることと違うことをしていたという一点である。
 
-決定した方式は、ゲーム本体のプロセスに `-javaagent` で入り込み、エンジンの内部状態を直接読んでコマンドを直接発行するというものである。ネットワークプロトコルを解析して独自クライアントを作る案は、マルチプレイが決定論的ロックステップであり状態が一切通信されないため、シミュレーションの完全な再実装を伴うことになり退けた。判断の詳細は [docs/project/01-approach.md](docs/project/01-approach.md) にある。
+決定した方式は、ゲーム本体のプロセスに `-javaagent` で入り込み、エンジンの内部状態を直接読んでコマンドを直接発行するというものである。ネットワークプロトコルを解析して独自クライアントを作る案は、マルチプレイが決定論的ロックステップであり状態が一切通信されないため、シミュレーションの完全な再実装を伴うことになり退けた。判断の詳細は [docs/record/01-approach.md](docs/record/01-approach.md) にある。
 
 プロセス内から次を行えることを実行時に確認済みである。
 
@@ -61,14 +61,15 @@ Rusted Warfare を機械学習でプレイするシステム。生産、アッ�
 
 ## 文書
 
-内容は二つに分かれている。詳細な目次は [docs/README.md](docs/README.md) にある。
+内容は三つに分かれている。詳細な目次は [docs/README.md](docs/README.md) にある。
 
 | 区分 | 内容 |
 | --- | --- |
 | [docs/game/](docs/game/) | Rusted Warfare の仕様と内部構造。逆アセンブルと実測の結果であり、このプロジェクトの都合とは無関係に成り立つ |
-| [docs/project/](docs/project/) | RW-Intel の方針、実行基盤、モデル設計 |
+| [docs/system/](docs/system/) | 現状の実装が実際に何をするかの仕様書。コードと一対一で対応する |
+| [docs/record/](docs/record/) | 進捗と開発の記録。何を決め、何を測り、何を測り直して取り下げたか |
 
-はじめに読むなら [docs/project/01-approach.md](docs/project/01-approach.md)、モデルの設計に関わるなら [docs/project/04-model-design.md](docs/project/04-model-design.md)、実装に手を付けるなら [docs/project/05-interface.md](docs/project/05-interface.md) から入る。
+はじめに読むなら [docs/record/01-approach.md](docs/record/01-approach.md)、モデルの設計に関わるなら [docs/system/01-architecture.md](docs/system/01-architecture.md)、実装に手を付けるなら [docs/system/02-interface.md](docs/system/02-interface.md) から入る。
 
 ## 構成
 
@@ -103,7 +104,7 @@ robocopy "<ゲームのインストール先>" local\rw /E /XD jvm cache /XF "hs
 .\tools\windows\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 60
 ```
 
-macOS(Apple Silicon)では、ゲームをネイティブに走らせられないため、amd64 Linux ディストリビューションを Docker コンテナに入れて Rosetta で駆動し、制御プロセスだけをホストにネイティブで置く。ゲーム本体は `local/RustedWarfare_Linux`(`jvm-linux` と `.so` ネイティブを持つ Linux 版)を置く。構成と道具の詳細は [docs/project/02-runtime.md](docs/project/02-runtime.md) にある。
+macOS(Apple Silicon)では、ゲームをネイティブに走らせられないため、amd64 Linux ディストリビューションを Docker コンテナに入れて Rosetta で駆動し、制御プロセスだけをホストにネイティブで置く。ゲーム本体は `local/RustedWarfare_Linux`(`jvm-linux` と `.so` ネイティブを持つ Linux 版)を置く。構成と道具の詳細は [docs/system/06-runtime.md](docs/system/06-runtime.md) にある。
 
 ```bash
 tools/macos/build-image.sh
@@ -138,7 +139,7 @@ python -m rwintel.control --host 0.0.0.0 --instances 2 --episodes 2 --map Lake -
 tools/macos/start-agents.sh -Count 2 -Speed 10
 ```
 
-エピソードごとに勝敗と、決着しなかった場合の軍事価値差が報告される。詳細は [docs/project/05-interface.md](docs/project/05-interface.md) と [docs/project/02-runtime.md](docs/project/02-runtime.md) にある。
+エピソードごとに勝敗と、決着しなかった場合の軍事価値差が報告される。詳細は [docs/system/02-interface.md](docs/system/02-interface.md) と [docs/system/06-runtime.md](docs/system/06-runtime.md) にある。
 
 二つの方策を比べるときは評価の側を使う。方策はインスタンスの中で交互に走り、差とそれを主張するのに必要なエピソード数が出る。
 
@@ -147,7 +148,7 @@ python -m rwintel.eval --instances 4 --episodes 3 --arm script --arm arm --map L
 .\tools\windows\Start-RwAgents.ps1 -Count 4 -Speed 10
 ```
 
-手順の根拠は [docs/project/07-evaluation.md](docs/project/07-evaluation.md) にある。
+手順の根拠は [docs/system/05-evaluation.md](docs/system/05-evaluation.md) にある。
 
 試合の最中に人間が指揮を引き取るには、介入コンソールを開く。打った操作は指揮系統が出すのと同一形式の契約になり、`--interventions` を付けるとそのときの盤面と対にして書き出される。`--intrude` はスクリプト乱入者を入れる指定で、設計の頻度で干渉する相手を入れたまま計測するためのものである。
 
@@ -196,7 +197,7 @@ python -m rwintel.learn duel --instances 8 --episodes 4
 .\tools\windows\Start-RwAgents.ps1 -Count 8 -Speed 10
 ```
 
-主な引数である。数値を省略した場合は [docs/project/08-learning.md](docs/project/08-learning.md) の定数表の値がそのまま使われ、模倣の実行についてはそれが最初の行に出る。
+主な引数である。数値を省略した場合は [docs/system/04-learning.md](docs/system/04-learning.md) の定数表の値がそのまま使われ、模倣の実行についてはそれが最初の行に出る。
 
 | 引数 | 実行 | 意味 |
 | --- | --- | --- |
@@ -217,4 +218,4 @@ python -m rwintel.learn duel --instances 8 --episodes 4
 | `--discount` / `--trace` | `tactics` | 1 決定あたりどれだけ先を割り引くか、と GAE がどれだけバイアスと分散を交換するか。既定はどちらも 1.0、すなわち交戦 1 件を割り引かない。`operations` は 0.99 と 0.95 に固定である |
 | `--batch` | `tactics` `operations` `clone` | 1 回の勾配の一歩に載せる行数 |
 
-torch を要求するのは学習側だけであり、スクリプト方策だけを走らせる実行はその費用を払わない。環境の設計と定数、そしてこれまでに取った測定は [docs/project/08-learning.md](docs/project/08-learning.md) にある。**手書きの戦術層を上回ったと示された方策はまだ無い。** 引き直すアリーナで対にして測ると、逸脱を一つも使わない方策が -0.0555 と -0.0423、乱数のままの網が -0.125 なので、**逸脱の選び方が取り合っている幅は下へ 0.05 ほどである。** 主張する価値のある改善は数百分の数であり、それを見るには片側で数千交戦が要る。**歩幅を上げて三本続けると方策は動き、出てきた候補は手書き層と互角になった。互角までである**([docs/project/08-learning.md](docs/project/08-learning.md) の「次に試すこと」)。
+torch を要求するのは学習側だけであり、スクリプト方策だけを走らせる実行はその費用を払わない。環境の設計と定数、そしてこれまでに取った測定は [docs/system/04-learning.md](docs/system/04-learning.md) にある。**手書きの戦術層を上回ったと示された方策はまだ無い。** 引き直すアリーナで対にして測ると、逸脱を一つも使わない方策が -0.0555 と -0.0423、乱数のままの網が -0.125 なので、**逸脱の選び方が取り合っている幅は下へ 0.05 ほどである。** 主張する価値のある改善は数百分の数であり、それを見るには片側で数千交戦が要る。**歩幅を上げて三本続けると方策は動き、出てきた候補は手書き層と互角になった。互角までである**([docs/record/03-tactics.md](docs/record/03-tactics.md))。

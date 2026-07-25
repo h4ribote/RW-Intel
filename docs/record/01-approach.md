@@ -85,5 +85,5 @@ Steam 版の `game-lib.jar` は、既存の解析プロジェクト RWPP が同�
 
 - ゲーム内部の構造とクラス対応は [../game/01-internals.md](../game/01-internals.md)
 - 起動方法と速度制御は [../game/02-launch.md](../game/02-launch.md)
-- この方式で実際に環境を組む手順は [02-runtime.md](02-runtime.md)
-- 方式の妥当性を裏付ける実測値は [03-throughput.md](03-throughput.md)
+- この方式で実際に環境を組む手順は [../system/06-runtime.md](../system/06-runtime.md)
+- 方式の妥当性を裏付ける実測値は [02-throughput.md](02-throughput.md)
