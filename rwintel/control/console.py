@@ -56,15 +56,18 @@ Commands. Squads, units and regions are numbers; every name may be shortened to 
   contract N TASK REGION [STANCE] [BUDGET] [SECONDS]
                                     write a squad's contract; stance aggressive, budget the squad's own worth, deadline {deadline}s
   move N UNIT... [to M]             move units out of squad N into squad M, or into a squad of your own if no M is given
+  merge N into M                    fold every unit of squad N into squad M; N ceases to exist and its slot comes back
   depart N HOW                      hold, withdraw, focus, spread or kite, for a squad whose tactical command you hold
   posture [NAME|auto]               pin the strategic layer to a posture, or hand it back its own judgement
 
   help                              this
   stop                              end the run
 
-  tasks     {tasks}
-  stances   {stances}
-  postures  {postures}
+The words those commands take. These are not commands themselves.
+
+tasks     {tasks}
+stances   {stances}
+postures  {postures}
 """.format(
     deadline=DEFAULT_DEADLINE_S,
     tasks=" ".join(task.name.lower() for task in Task),
@@ -95,6 +98,8 @@ class Shown:
     spread: float = 0.0
     #: True when this console raised the squad, which is what a command may not assume of a squad the chain formed and the reverse.
     raised: bool = False
+    #: True when a commander outside this console holds it. The observation says that somebody does without saying who, so what this means is 'neither the chain's nor yours', which for the person typing is the distinction that matters: it is not theirs to take and not theirs to reorganise.
+    outside: bool = False
 
 
 class Console:
@@ -184,6 +189,7 @@ class Console:
             "return": self.give_back, "give": self.give_back,
             "contract": self.contract, "order": self.contract,
             "move": self.move, "detach": self.move,
+            "merge": self.merge, "fold": self.merge,
             "depart": self.depart, "deviate": self.depart,
             "posture": self.posture,
             "stop": self.stop, "quit": self.stop, "exit": self.stop,
@@ -338,6 +344,8 @@ class Console:
         if shown.raised:
             self.say(f"squad {shown.id} is one of your own and already answers to you alone.")
             return
+        if not self._mine(shown):
+            return
         interface.take(shown.id, int(layers))
         asked = self.asked.setdefault(session.instance, {})
         # Taking replaces what is held rather than adding to it, since that is what the interface does with the layers it is given.
@@ -413,6 +421,7 @@ class Console:
             return
         session, policy, interface = running
         into = -1
+        destination = None
         if len(words) > 2 and words[-2].lower() in ("to", "into"):
             destination = self._one(session, policy, interface, words[-1])
             if destination is None:
@@ -425,6 +434,8 @@ class Console:
         shown = self._one(session, policy, interface, words[0])
         if shown is None:
             return
+        if not self._mine(shown) or (destination is not None and not self._mine(destination)):
+            return
         units = [_number(word) for word in words[1:]]
         if any(unit is None for unit in units):
             self.say("every unit has to be a number; 'squad 3' lists them.")
@@ -435,8 +446,8 @@ class Console:
                      f"Its members are {', '.join(str(m) for m in shown.members) or 'none'}.")
             return
         if len(units) >= len(shown.members):
-            self.say(f"that is every unit in squad {shown.id}; take the squad whole with "
-                     f"'take {shown.id} both' rather than emptying it.")
+            self.say(f"that is every unit in squad {shown.id}; say 'merge {shown.id} into M' to fold "
+                     f"it into another squad, or 'take {shown.id} both' to command it whole.")
             return
         interface.reassign(shown.id, units, into=into)
         if into >= 0:
@@ -446,6 +457,54 @@ class Console:
             self.say(f"detaching {len(units)} unit(s) from squad {shown.id} into a squad of your own. "
                      f"Which number it is given is settled when the request is drained, so ask for "
                      f"'squads' afterwards; if all eight slots are in use the move will not happen.")
+
+    def merge(self, words: List[str]) -> None:
+        """Folds one squad into another and ends it. The only command here that destroys something, which is why it is a verb of its own and why it insists on the word that says which of the two squads is destroyed."""
+        running = self._running()
+        if running is None:
+            return
+        session, policy, interface = running
+        if len(words) != 3 or words[1].lower() not in ("into", "to"):
+            self.say("say which squad joins which, as 'merge 3 into 5'. The word 'into' is not "
+                     "decoration: it says which of the two ceases to exist, and nothing here undoes "
+                     "a merge.")
+            return
+        source = self._one(session, policy, interface, words[0])
+        if source is None:
+            return
+        destination = self._one(session, policy, interface, words[2])
+        if destination is None:
+            return
+        if source.id == destination.id:
+            self.say(f"squad {source.id} is already itself. A merge needs two squads, as "
+                     f"'merge {source.id} into 5'.")
+            return
+        if not source.members:
+            self.say(f"squad {source.id} has no members, so there is nothing to fold into squad "
+                     f"{destination.id}. The organisation layer retires an empty squad on its own.")
+            return
+        if not self._mine(source) or not self._mine(destination):
+            return
+        interface.merge(source.id, destination.id)
+        # Dropped for the reason giving a squad back drops it: what this console reports itself as holding is read from here as well as from the interface, and an entry left behind for a number that is about to be free would claim layers of whatever squad is raised into that number next.
+        self.asked.get(session.instance, {}).pop(source.id, None)
+        moving = (f"merging squad {source.id} into squad {destination.id} at the next period: every "
+                  f"unit it holds then, not only the {len(source.members)} listed here. Squad "
+                  f"{source.id} then ceases to exist and its slot returns to the organisation layer; "
+                  f"a merge hands a slot back rather than asking for one, so all eight being in use "
+                  f"is no reason it cannot happen.")
+        if destination.raised:
+            # What is said next of a squad the chain formed is untrue of one this console raised, in both halves and not by a little. A raised squad sits in a slot the organisation layer has lent out and keeps no record of, so it is never reinforced rather than reinforced as one, and it is never given an errand, so it is left alone for good rather than for a period. Its doctrine is not a doctrine either: there is no record to carry one, and what is shown in its place is the word saying the squad is the person's own, which would come back as a sentence declaring that the merged squad stays yours and will be reinforced.
+            self.say(f"{moving} Squad {destination.id} is one of your own, so taking them in is all "
+                     f"that happens to it: the chain does not reinforce a squad in a slot it has lent "
+                     f"out, and writes it no errands, for as long as you hold it.")
+            return
+        doctrines = ("" if source.doctrine == destination.doctrine else
+                     f" Squad {source.id} is {source.doctrine} and squad {destination.id} is "
+                     f"{destination.doctrine}; the merged squad stays {destination.doctrine} and "
+                     f"will be reinforced as one.")
+        self.say(f"{moving} Squad {destination.id} is then left alone for one operational period "
+                 f"while it looks at what it now consists of.{doctrines}")
 
     def depart(self, words: List[str]) -> None:
         running = self._running()
@@ -537,6 +596,20 @@ class Console:
             return None
         return session, session.policy, interface
 
+    def _mine(self, shown: Shown) -> bool:
+        """Whether a squad is this console's to command or to reorganise, answered with the sentence when it is not.
+
+        A squad has one commander, so a squad already held outside this console can be neither taken nor reshuffled, and all three verbs that would do one of those ask this before they queue anything. The reorganising two ask it of the destination as well as of the source, because moving units into a squad somebody else holds changes that squad as surely as taking units out of one does.
+
+        The interface refuses all three itself, with a line in the log that nobody typing is reading. Asking here does two things that refusal cannot. The person is told, in the one place they can see it, that the squad is not theirs and that nothing happened, rather than being promised something which then silently does not occur. And the request never joins the queue, which matters because a queued take is remembered as a holding this console has asked for and not yet been given: one that can never be delivered would go on being reported as held for the rest of the episode, and would make every later check of what this console holds answer yes about a squad belonging to somebody else.
+        """
+        if not shown.outside:
+            return True
+        self.say(f"squad {shown.id} is held by a commander outside this console, so it is neither "
+                 f"yours to command nor yours to reorganise. It becomes the chain's again when that "
+                 f"commander gives it back, and can be taken then.")
+        return False
+
     def _holding(self, session, interface: Interface, squad: int) -> int:
         """Which layers of a squad this console has, counting what it has asked for and the next period has not yet delivered."""
         if squad in interface.own:
@@ -590,7 +663,7 @@ def _from_record(record, holding: int, now: int) -> Shown:
     return Shown(
         id=record.id, doctrine=record.doctrine.name.lower(), members=list(record.members),
         value=record.value, health=record.health, status=record.status.name.lower(),
-        held_by=_holder(holding, record.commander),
+        held_by=_holder(holding, record.commander), outside=bool(record.commander) and not holding,
         contract=("-" if contract is None else
                   _contract_text(contract.task, contract.target_region, contract.stance,
                                  contract.cost_budget, contract.deadline_ms, now)),

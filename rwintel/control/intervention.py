@@ -31,7 +31,7 @@ class Kind(enum.IntEnum):
     RETURN = 1
     #: Contract editing: write one for a squad this commander holds.
     CONTRACT = 2
-    #: Reorganisation: move units out of a squad, into another or into one of this commander's own.
+    #: Reorganisation: move units out of a squad, into another or into one of this commander's own. Moving the whole of a squad is a merge, which is this same operation with the squad it empties retired rather than a fifth kind of thing to do.
     REASSIGN = 3
     #: Direct tactical command: choose the departure for a squad whose tactical command this commander holds.
     DEPART = 4
@@ -54,6 +54,8 @@ class Intervention:
     units: Sequence[int] = ()
     #: Where reassigned units go: a squad id, or -1 to leave them loose for the organisation layer to place.
     into: int = -1
+    #: True when the reassignment is of the whole squad — a merge — so that which units move is settled from the roster in hand when the request is drained rather than from one named when it was asked for, and the squad it empties is retired rather than left standing with nothing in it.
+    whole: bool = False
     deviation: int = int(Deviation.HOLD)
     #: What raised this. "human" for the interface, or the intruder's own name, so a record can be read back knowing who wrote it.
     by: str = "human"
@@ -67,7 +69,7 @@ class Intervention:
                        stance=int(self.stance), cost_budget=round(float(self.cost_budget), 2),
                        deadline_ms=int(self.deadline_ms))
         elif self.kind is Kind.REASSIGN:
-            row.update(units=list(self.units), into=int(self.into))
+            row.update(units=list(self.units), into=int(self.into), whole=bool(self.whole))
         elif self.kind is Kind.DEPART:
             row["deviation"] = int(self.deviation)
         return row
@@ -167,6 +169,14 @@ class Interface:
         self.request(Intervention(kind=Kind.REASSIGN, squad=squad, units=tuple(units),
                                   into=int(into), by=self.name))
 
+    def merge(self, squad: int, into: int) -> None:
+        """Folds a squad whole into another. Every unit it has when the request is drained goes, and the emptied squad is retired.
+
+        Stated as an intention rather than as a list of units because the roster moves between the moment a commander decides to merge and the moment the action carrying it is built: a unit finishes production and is reinforced in, or one is destroyed. A list captured at the first of those moments would leave a straggler behind and the squad standing, which is the one outcome a merge must not have — the point of the operation is that one of the two squads stops existing.
+        """
+        self.request(Intervention(kind=Kind.REASSIGN, squad=squad, into=int(into),
+                                  whole=True, by=self.name))
+
     def depart(self, squad: int, deviation: Deviation) -> None:
         self.request(Intervention(kind=Kind.DEPART, squad=squad, deviation=int(deviation), by=self.name))
 
@@ -200,11 +210,7 @@ class Interface:
         if not alive:
             return
         for slot in [slot for slot, members in self.own.items() if not [m for m in members if m in alive]]:
-            del self.own[slot]
-            self.held.pop(slot, None)
-            self._written.pop(slot, None)
-            if self.organisation is not None:
-                self.organisation.release(slot)
+            self._give_up(slot)
 
     def _apply(self, intervention: Intervention, action: Action,
                by_id: Dict[int, object], observation: Observation) -> bool:
@@ -222,7 +228,7 @@ class Interface:
 
     def _take(self, intervention: Intervention, action: Action,
               by_id: Dict[int, object], observation: Observation) -> bool:
-        members = self._roster(intervention.squad, by_id, observation)
+        members = self._membership(action, intervention.squad, by_id, observation)
         if not members:
             log.info("no squad %d to take", intervention.squad)
             return False
@@ -244,15 +250,14 @@ class Interface:
             return False
         intervention.layers = self.held.pop(intervention.squad, 0)
         self._written.pop(intervention.squad, None)
+        # Read before the chain's rows come off, because stripping cannot tell the chain's roster for this squad from one this commander wrote earlier in the same drain, and handing a squad back is not a reason to undo a reorganisation asked for a moment before it.
+        members = self._membership(action, intervention.squad, by_id, observation)
         _strip(action, intervention.squad)
         if intervention.squad in self.own:
             # A squad this commander raised is not handed back as a squad. Its slot returns to the organisation layer and its units are released loose, which is the same route a squad the chain formed takes when it is retired.
             action.squads.append(SquadAssignment(squad=intervention.squad, commander=Commander.MACHINE, units=[]))
-            del self.own[intervention.squad]
-            if self.organisation is not None:
-                self.organisation.release(intervention.squad)
+            self._give_up(intervention.squad)
             return True
-        members = self._roster(intervention.squad, by_id, observation)
         action.squads.append(SquadAssignment(squad=intervention.squad, commander=Commander.MACHINE,
                                              units=list(members)))
         return True
@@ -274,17 +279,26 @@ class Interface:
 
     def _reassign(self, intervention: Intervention, action: Action,
                   by_id: Dict[int, object], observation: Observation) -> bool:
-        members = self._roster(intervention.squad, by_id, observation)
-        taken = [unit for unit in intervention.units if unit in members]
+        members = self._membership(action, intervention.squad, by_id, observation)
+        taken = list(members) if intervention.whole else [u for u in intervention.units if u in members]
         if not taken:
+            if intervention.whole:
+                log.info("squad %d has nothing left to merge", intervention.squad)
             return False
         # Moving units from a squad into itself would state two rosters for it in one action, the second of which is the first minus the units, so they would end up belonging to nothing at all.
         if intervention.into == intervention.squad:
             log.info("squad %d is where those units already are", intervention.squad)
             return False
+        # A merge has to say where the squad is going. Left unsaid it would fall through to raising a squad of this commander's own, which is a rename rather than a merge: the same units under a new number, and a slot spent out of the cap of eight by the one operation that is supposed to give a slot back.
+        if intervention.whole and intervention.into < 0:
+            log.info("a merge has to say which squad to merge into")
+            return False
         if self._taken_by_another(intervention.squad, by_id) or (
                 intervention.into >= 0 and self._taken_by_another(intervention.into, by_id)):
             log.info("a squad in that move is held by someone else")
+            return False
+        if intervention.into >= 0 and not self._exists(action, intervention.into, by_id, observation):
+            log.info("there is no squad %d to move units into", intervention.into)
             return False
         remaining = [unit for unit in members if unit not in taken]
         destination = intervention.into
@@ -298,18 +312,51 @@ class Interface:
             action.squads.append(SquadAssignment(
                 squad=destination, commander=Commander(self.held[destination]), units=list(taken)))
         else:
-            into_members = self._roster(destination, by_id, observation)
+            into_members = self._membership(action, destination, by_id, observation)
+            joined = list(into_members) + [u for u in taken if u not in into_members]
             action.squads.append(SquadAssignment(
-                squad=destination, commander=Commander(self.held.get(destination, 0)),
-                units=list(into_members) + [u for u in taken if u not in into_members]))
+                squad=destination, commander=Commander(self.held.get(destination, 0)), units=joined))
             if destination in self.own:
-                self.own[destination] = list(into_members) + [u for u in taken if u not in into_members]
-        action.squads.append(SquadAssignment(
-            squad=intervention.squad, commander=Commander(self.held.get(intervention.squad, 0)),
-            units=remaining))
-        if intervention.squad in self.own:
-            self.own[intervention.squad] = remaining
+                self.own[destination] = list(joined)
+        if remaining:
+            action.squads.append(SquadAssignment(
+                squad=intervention.squad, commander=Commander(self.held.get(intervention.squad, 0)),
+                units=remaining))
+            if intervention.squad in self.own:
+                self.own[intervention.squad] = remaining
+        else:
+            # Stated after the destination's roster, so the game moves the units out before it is told the squad they were in is finished, rather than dropping the squad with them still in it.
+            self._dissolve(intervention.squad, action)
+        if intervention.whole:
+            # Recorded as the units that actually moved rather than as the intention, exactly as the raised slot above is written back: what the record is for is the pair of a board and the decision taken from it, and "the whole squad" is not a decision anything can be learnt from without the roster it resolved to.
+            intervention.units = tuple(taken)
         return True
+
+    def _dissolve(self, squad: int, action: Action) -> None:
+        """Retires a squad every one of whose units has just been moved out.
+
+        An empty roster is how a squad is retired: the game side drops a squad it is sent one, and the organisation layer expresses its own disbands the same way, so ending a squad needs no second mechanism, only a statement of the emptiness. The row says the squad is nobody's as it goes, because a disband carrying a holder's command bits would hand a squad over in the same breath that removes it.
+
+        The chain's own rows about the squad come off first, for the reason taking a squad over takes them off: the chain decided this period without knowing the squad was about to be dissolved, and a contract or a departure left on the action names a squad that will not exist by the time it is read. The game refuses both in that case, so this is tidiness rather than safety — but an action is also the record of what was commanded, and one that orders a dissolved squad about is a record that lies.
+        """
+        # Before the row is appended rather than after, because stripping takes off the chain's own rosters for the squad and the disband is one of those.
+        _strip(action, squad)
+        action.squads.append(SquadAssignment(squad=squad, commander=Commander.MACHINE, units=[]))
+        self._give_up(squad)
+
+    def _give_up(self, squad: int) -> None:
+        """Forgets everything this commander held about a squad and hands its slot back where the slot was borrowed.
+
+        Both halves matter and they are separate. A holding left behind goes on stripping the chain's rows about a number that now belongs to nothing, or to somebody else's squad once the number is handed out again, which silences a squad this commander has no relation to. And a slot lent by the organisation layer and never returned is worse than one merely lost, because the cap it counts against is kept in a layer that cannot see it went: the chain quietly loses the ability to form a squad and nothing says why.
+
+        The slot is handed back only for a squad this commander raised. A number belonging to a squad the chain formed was never ours to return, and offering it would read as though the chain's slots were in this commander's gift.
+        """
+        raised = squad in self.own
+        self.own.pop(squad, None)
+        self.held.pop(squad, None)
+        self._written.pop(squad, None)
+        if raised and self.organisation is not None:
+            self.organisation.release(squad)
 
     def _depart(self, intervention: Intervention, action: Action) -> bool:
         if not self.held.get(intervention.squad, 0) & int(Commander.TACTICS) and intervention.squad not in self.own:
@@ -325,6 +372,20 @@ class Interface:
             return False
         record = by_id.get(squad)
         return bool(record is not None and record.commander)
+
+    def _exists(self, action: Action, squad: int, by_id: Dict[int, object],
+                observation: Observation) -> bool:
+        """Whether a squad number will name a squad once this action has landed: what the action already says about it where anything does, and where nothing does, whichever side of the process knows — the chain's records, this commander's own, or the game's squad block for one somebody else raised.
+
+        Asked before units are moved into a squad because a roster stated for a number nobody has raised does not fail. It creates a squad in a slot the organisation layer still believes is free, and that layer hands the slot out again the next time it forms a squad; two squads would then answer to one number and the observation would describe whichever was written last, which is the collision the borrowed-slot rule exists to prevent.
+
+        The action is read first, and an empty roster already on it is an answer rather than a silence, exactly as it is when a roster is read: it says the squad has just been retired, whether the chain's own disband row retired it or a merge drained a moment earlier in this same period did. Everything the other sources know describes the board as the period opened, so they still carry a squad this action ends, and moving units into it would append a live roster after the row that retired it — resurrecting a squad whose number the organisation layer has already taken back, which is the same collision arrived at from the other direction.
+        """
+        stated = self._stated(action, squad)
+        if stated is not None:
+            return bool(stated)
+        return (squad in self.own or squad in by_id
+                or any(state.id == squad for state in observation.squads))
 
     def _raise_squad(self, units: Sequence[int]) -> int:
         """A squad of this commander's own for units taken out of another. The slot is borrowed from the organisation layer, which is where the cap of eight is kept."""
@@ -360,6 +421,25 @@ class Interface:
         if record is not None and record.members:
             return list(record.members)
         return [unit.id for unit in observation.unit_states if unit.squad == squad]
+
+    def _membership(self, action: Action, squad: int, by_id: Dict[int, object],
+                    observation: Observation) -> List[int]:
+        """Who a squad will consist of once this action has landed: what the action already says about it where anything does, and who is in it now where nothing does.
+
+        Every row about a squad restates its whole roster and the game takes the last such row as the answer, so a row built from the roster the period opened with does not merely ignore an earlier row in the same action — it undoes it. That is what lets two things be asked for in one period and both mean what they said: a second reorganisation reads the first one's result, and taking a squad over or handing it back carries whatever was just moved into or out of it instead of restoring the composition the period began with.
+        """
+        stated = self._stated(action, squad)
+        return list(stated) if stated is not None else self._roster(squad, by_id, observation)
+
+    def _stated(self, action: Action, squad: int) -> Optional[List[int]]:
+        """The roster this action already carries for a squad, read off the last row about it because that is the row the game settles on, or nothing where the action says nothing about it.
+
+        An empty roster already stated is an answer rather than a silence: it says the squad has just been dissolved, and reading past it to the roster the squad had before would raise the squad again with the units it no longer has.
+        """
+        for row in reversed(action.squads):
+            if row.squad == squad:
+                return list(row.units)
+        return None
 
 
 def _strip(action: Action, squad: int, contracts: bool = True, deviations: bool = True,

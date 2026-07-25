@@ -61,6 +61,8 @@ class Organisation:
         self.squads: Dict[int, SquadRecord] = {}
         #: Ids not in use. They double as the observation's squad slots, so they are drawn from a fixed set and handed back on a disband rather than counted upward.
         self.free_ids: List[int] = list(range(SQUAD_CAP))
+        #: Ids of squads retired this period, kept out of circulation until the next one begins. A number that went back among the free ids the moment its squad was retired could be raised into again by the same update that retired it, and everything downstream that follows a squad through time knows a squad only by its number: the number would never once be missing, so a squad that ended and a different squad that took its number would read as one squad that carried on.
+        self._released: Set[int] = set()
         #: Units the game has announced finished but which have not yet been seen loose in a unit block. A completion is the economy handing a unit over, and it should not be forgotten because the frame that carried it had no roster on it.
         self.awaiting_orders: Set[int] = set()
         #: Squads a human held as of last period, which is how a return of command is recognised: the byte going back to zero.
@@ -77,14 +79,20 @@ class Organisation:
         observation = view.observation
         by_id: Dict[int, Sighting] = {s.unit.id: s for s in view.ours}
 
+        # The numbers of the squads retired last period come back into circulation here, at the top of the period after the one that ended them, and not at the moment they were ended. That is what buys the one period in which the number names nothing at all, and something has to: a layer learning from these records reads a squad's death as its number's absence from them, and a number retired and re-raised inside one update is never absent, so the decisions taken about the squad that died would be paid out of what the squad that replaced it went on to earn. It is also what keeps a squad from being formed into a number this layer has just told the game to disband, in an action the game reads in order.
+        if self._released:
+            self.free_ids = sorted(set(self.free_ids) | self._released)
+            self._released.clear()
+
         self._fold(observation)
         lost, depleted = self._read_events(observation.events)
+        # Cleared before the rosters are brought back in line rather than after, because taking in a unit somebody else moved is one of the things that makes a squad settle, and that is found while reconciling.
+        self.settling = set()
         self._reconcile(observation, by_id, lost)
 
         changed: Set[int] = set()
         disbanded: Set[int] = set()
         pool: List[Sighting] = []
-        self.settling = set()
 
         returned = self._take_back(by_id, pool, changed)
         # A squad the operational layer says is too worn for a mission is considered for merging whatever its worth says, since it is the layer giving the missions that knows the squad cannot do one.
@@ -122,7 +130,10 @@ class Organisation:
         return slot
 
     def release(self, squad_id: int) -> None:
-        """Takes a reserved slot back once its holder is finished with it."""
+        """Takes a reserved slot back once its holder is finished with it.
+
+        Straight back among the free ids, rather than through the period of quiet a retired squad's number is held out for. The two numbers are not the same kind of thing: a lent slot never had a record here, so nothing that follows a squad through these records was ever keyed to it and there is no continuity for a gap to break. Nor can the slot be reused any sooner for going back immediately, since a slot is given up while a commander outside the chain amends an action this layer has already finished with, and the earliest anything is raised is the next period regardless.
+        """
         if squad_id in self.reserved:
             self.reserved.discard(squad_id)
             bisect.insort(self.free_ids, squad_id)
@@ -197,15 +208,29 @@ class Organisation:
         return lost, depleted
 
     def _reconcile(self, observation: Observation, by_id: Dict[int, Sighting], lost: Set[int]) -> None:
-        """Brings the rosters back in line with what is actually on the field. A unit reported lost goes immediately; the roster is otherwise trusted only when a unit block is present, since an absent block is silence rather than an empty world."""
+        """Brings the rosters back in line with what is actually on the field, in both directions. A unit reported lost goes immediately; the roster is otherwise trusted only when a unit block is present, since an absent block is silence rather than an empty world.
+
+        Taking units in matters as much as letting them go, and it is the same rule read the other way: the game is right about where a unit is. A commander outside the chain may fold a whole squad into one of this layer's, and if only the departures were believed, the squad that received them would be short on this layer's books by however many arrived — asking for reinforcements it does not need and drawing the next loose units towards a squad that is already over strength, for the rest of the match.
+        """
         for record in self.squads.values():
             record.members = [m for m in record.members if m not in lost]
         if not observation.blocks & BLOCK_UNITS:
             return
+        arrived: Dict[int, List[int]] = {}
+        for sighting in by_id.values():
+            # A unit the same frame reported lost is gone whatever squad the block still files it under, so it is not adopted back onto a roster it has just been taken off.
+            if sighting.unit.squad != NO_SQUAD and sighting.unit.id not in lost:
+                arrived.setdefault(sighting.unit.squad, []).append(sighting.unit.id)
         for record in self.squads.values():
             # A member the game now places in another squad has been moved by something outside this layer, and the game is right about where it is.
             record.members = [m for m in record.members
                               if m in by_id and by_id[m].unit.squad in (record.id, NO_SQUAD)]
+            taken_in = [unit for unit in sorted(arrived.get(record.id, ())) if unit not in record.members]
+            if not taken_in:
+                continue
+            record.members.extend(taken_in)
+            # The squad holds its stance for a period on the same grounds a squad that took back a human's units does: what was done with these and where they have been left is not knowable here, and a contract written now would be written about a composition this layer has not yet seen reported.
+            self.settling.add(record.id)
 
     # ---- lifetime ----------------------------------------------------------------------
 
@@ -275,8 +300,9 @@ class Organisation:
             self._retire(record, disbanded)
 
     def _retire(self, record: SquadRecord, disbanded: Set[int]) -> None:
+        """Ends a squad. Its number is set aside rather than freed, so that the next period is the earliest at which anything can be raised into it."""
         del self.squads[record.id]
-        bisect.insort(self.free_ids, record.id)
+        self._released.add(record.id)
         disbanded.add(record.id)
 
     # ---- filling the squads ------------------------------------------------------------
