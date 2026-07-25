@@ -28,7 +28,7 @@ from rwintel.control.policy.operations import Concentrated, Operations
 from rwintel.control.policy.view import WorldView
 from rwintel.data.regions import Region
 from rwintel.learn.layers import LearntOperations
-from rwintel.learn.rollout import Rollout, Step
+from rwintel.learn.rollout import FIGHT_DISCOUNT, FIGHT_TRACE, Rollout, Step
 from rwintel.learn.ops_arena import (
     CATCHMENT_RADIUS,
     CONTEST_PAIRS,
@@ -137,6 +137,7 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena.orders = None
     arena.priorities = {}
     arena.garrison_share = {}
+    arena._frozen = {}
     arena.our_home_id = None
     arena.their_home_id = None
     arena.our_reports = []
@@ -483,6 +484,8 @@ def test_the_two_credit_readings_pay_a_pile_of_squads_differently():
     """Two squads converge on one region and take it between them; a third is sent to a region it never reaches.
 
     Under the region reading each squad on the taken region is paid the whole of that region's domination, so being the second squad on a won region is worth exactly as much as being the first — the free-rider term. Under the marginal reading each is paid only what its own surviving units account for, so the two divide what they jointly produced, and the squad with nothing in any catchment is paid nothing either way.
+
+    Neither reading pays a squad with nothing left on the board. The free-rider term is what makes the region reading able to teach a concentrated assault — every squad of the pile is paid for the pile's work — but a squad that no longer exists is not part of the pile, and paying it would attribute to a decision about it whatever its allies go on doing without it. Its figure is frozen where its last unit left it instead, which here is nought because it never reached the disc at all.
     """
     arena = _arena(seed=3)
     _contested(arena, 4, (0.0, 0.0), 1.0)
@@ -510,8 +513,8 @@ def test_the_two_credit_readings_pay_a_pile_of_squads_differently():
     # Without either squad the disc reads one tank ours against one hostile, which is a half; each is credited the sixth it added.
     assert abs(marginal_ops.paid[1] - (2.0 / 3.0 - 0.5)) < 1e-9
     assert abs(marginal_ops.paid[2] - marginal_ops.paid[1]) < 1e-9
-    # The third squad was sent to the same region and is not on the board at the horizon. The region reading pays it in full for a region it is no longer standing in; the marginal reading pays it nothing, which is this reading's known cost — it can ask what the catchment would read without these units, not what it would read had the squad never been sent.
-    assert abs(region_ops.paid[3] - (2.0 / 3.0 - 0.5)) < 1e-9
+    # The third squad was sent to the same region and is not on the board at the horizon. Neither reading pays it: it has moved nothing since its last unit went, and the disc it was sent to was taken by others.
+    assert region_ops.paid[3] == 0.0
     assert marginal_ops.paid[3] == 0.0
 
     # A third squad piled onto the same taken region is paid in full by the region reading and almost nothing by the marginal one, which is the whole difference between them.
@@ -692,6 +695,232 @@ def test_the_terminal_is_what_the_ground_came_to_against_where_it_opened_and_not
     whole = reading(middle, 4) - arena._share_without(middle, contest, [10, 11])
     survivor = reading(middle, 4) - arena._share_without(middle, contest, [10])
     assert abs(whole - 2.0 / 3.0) < 1e-9 and abs(survivor - 1.0 / 6.0) < 1e-9
+
+
+# ---- the reading the periods are paid off ---------------------------------------------------
+
+def _standing_board():
+    """An arena with two discs of opposite ownership, which is the pair every property here needs: one this side has to take from the enemy's garrison and one it only has to keep."""
+    arena = _arena(seed=23)
+    _contested(arena, 4, (0.0, 0.0), 0.8)              # the enemy's garrison opened here
+    _contested(arena, 9, (2000.0, 0.0), 0.5)           # ours opened here
+    arena.garrison_share = {4: 0.0, 9: 1.0}
+    return arena
+
+
+def _tasked(squad_id, region, members=()):
+    squad = SquadRecord(id=squad_id, doctrine=Doctrine.VANGUARD, members=list(members))
+    if region is not None:
+        squad.contract = dataclasses.replace(_CONTRACT, squad=squad_id, target_region=region)
+    return squad
+
+
+def test_the_period_reading_and_the_horizon_reading_are_one_expression():
+    """The invariant the whole dense credit rests on, and the one thing a later edit could break in silence.
+
+    Every operational period is paid the movement of a squad's scored figure and the horizon is paid the same figure once more, so the payments telescope to the horizon's reading — but only for as long as the two readings are the same reading. Were the horizon to keep an expression of its own, the identity would be an intention that two pieces of code had to be kept in step, and the first time they drifted every episode would return the terminal plus whatever the drift came to, with nothing in any log to say so. So the horizon calls `_standing` and this holds it to that: what `_finish_side` hands a layer is exactly what the period loop reads, under either credit.
+    """
+    for credit in ("region", "marginal"):
+        arena = _standing_board()
+        arena.credit = credit
+        units = [_unit(1, 0.0, 0.0), _unit(2, 20.0, 0.0), _unit(3, 40.0, 0.0, hostile=1),
+                 _unit(4, 2000.0, 0.0), _unit(5, 2030.0, 0.0, hostile=1, health=40.0)]
+        squads = {1: _tasked(1, 4, [1, 2]), 2: _tasked(2, 9, [4]), 3: _tasked(3, 7, [3])}
+        shares = arena._shares(units)
+
+        for sign in (+1.0, -1.0):
+            ledger = _Paid()
+            arena._finish_side(ledger, squads, shares, sign, units)
+            for squad in squads.values():
+                assert ledger.paid[squad.id] == arena._standing(squad, shares, sign, units), (
+                    "the horizon paid something the period loop does not read, so the payments cannot telescope")
+
+    # And a squad sent at a region the board put no priority on moves no figure at all, which is what the early return says and what the horizon paid before there was one.
+    arena = _standing_board()
+    assert arena._standing(_tasked(3, 7), {4: 1.0, 9: 1.0}, +1.0) == 0.0
+    assert arena._standing(_tasked(4, None), {4: 1.0, 9: 1.0}, +1.0) == 0.0
+
+
+def test_a_squads_standing_is_antisymmetric_between_the_sides():
+    """What is now paid every period used to be paid once, and the property that made the arena a measurement has to survive being paid a hundred and fifty times instead of once.
+
+    The other side's share of a disc is one less this side's and its opening is one less this side's, so its figure is `w · ((1 − s) − (1 − o))`, the exact negative of `w · (s − o)` at every baseline. That is what the sign the arena carries stands for, and it has to hold on every board the period loop reads, not only on the one the horizon reads — otherwise a period would pay the two sides something other than a number and its negation, and the self-play zero would stop being a statement about the board.
+    """
+    worst = 0.0
+    for trial in range(60):
+        seed = random.Random(trial)
+        for baseline in (0.0, 0.4, 1.0):
+            arena = _arena(seed=trial)
+            arena.opening_baseline = baseline
+            _contested(arena, 4, (0.0, 0.0), seed.uniform(0.3, 1.0))
+            _contested(arena, 9, (2000.0, 0.0), seed.uniform(0.3, 1.0))
+            arena.garrison_share = {4: 0.0, 9: 1.0}
+            units = []
+            for index in range(seed.randrange(1, 7)):
+                units.append(_unit(10 + index, seed.uniform(-300.0, 300.0), seed.uniform(-300.0, 300.0),
+                                   hostile=seed.randrange(2), health=seed.uniform(1.0, 100.0)))
+                units.append(_unit(30 + index, 2000.0 + seed.uniform(-300.0, 300.0),
+                                   seed.uniform(-300.0, 300.0), hostile=seed.randrange(2),
+                                   health=seed.uniform(1.0, 100.0)))
+            shares = arena._shares(units)
+
+            for region in (4, 9):
+                squad = _tasked(1, region, [10])
+                ours = arena._standing(squad, shares, +1.0, units)
+                theirs = arena._standing(squad, shares, -1.0, units)
+                worst = max(worst, abs(ours + theirs))
+                # And read the long way round, as the mirror actually reads it: the other side's own share of the disc is one less ours and its own opening is one less ours, which is what the sign stands in for.
+                mirror = _arena(seed=trial)
+                mirror.opening_baseline = baseline
+                mirror.contests = list(arena.contests)
+                mirror.priorities = dict(arena.priorities)
+                mirror.garrison_share = {r: 1.0 - s for r, s in arena.garrison_share.items()}
+                flipped = {r: 1.0 - s for r, s in shares.items()}
+                worst = max(worst, abs(ours + mirror._standing(squad, flipped, +1.0, units)))
+    assert worst < 1e-15, "a period's figures are not exact negatives between the sides: %.3e" % worst
+
+
+def test_a_period_reads_every_disc_off_one_board():
+    """One reading of one board, covering every disc and every squad, and taken before either side decides.
+
+    Read per squad instead, a disc that two squads were sent to would be read twice; read per side, the leader alternation would hand the two sides boards a decision apart and their figures would stop being exact negatives. And the dict has to be total over the side's squads, including one contracted to ground the board put no priority on, because the layer must never have to fall back on a quantity of its own for a squad it cannot find — a trajectory paid partly in the arena's disc reading and partly in the game's region block sums to neither.
+    """
+    arena = _standing_board()
+    units = [_unit(1, 0.0, 0.0), _unit(2, 20.0, 0.0, hostile=1), _unit(3, 2000.0, 0.0),
+             _unit(4, 9000.0, 0.0)]
+    shares = arena._shares(units)
+
+    assert sorted(shares) == [4, 9]
+    for contest in arena.contests:
+        our_worth, enemy_worth = arena._catchment_worths(units, contest.point)
+        total = our_worth + enemy_worth
+        assert shares[contest.region_id] == (our_worth / total if total > 0 else 0.5)
+
+    squads = {1: _tasked(1, 4, [1]), 2: _tasked(2, 9, [3]), 3: _tasked(3, 7, [4]), 4: _tasked(4, None)}
+    standings = arena._standings(squads, shares, +1.0, units)
+    assert sorted(standings) == [1, 2, 3, 4], "every squad the side has, or the layer needs a fallback of its own"
+    assert standings[3] == 0.0 and standings[4] == 0.0
+    assert abs(standings[1] - 0.8 * (0.5 - 0.0)) < 1e-9      # one of ours against one hostile is a half share
+    assert abs(standings[2] - 0.5 * (1.0 - 1.0)) < 1e-9      # the disc we opened whole is still whole
+
+
+class _Chain:
+    """An operational layer that records the order it was called in and what it was handed, so the arena's hand-off can be checked rather than assumed."""
+
+    def __init__(self, calls, name):
+        self.calls = calls
+        self.name = name
+        self.standings = []
+
+    def standing(self, figures):
+        self.calls.append((self.name, "standing"))
+        self.standings.append(dict(figures))
+
+    def decide(self, view, orders, squads, reports, now):
+        self.calls.append((self.name, "decide"))
+        return [], []
+
+
+class _Still:
+    """A tactical layer that moves nothing, so a period can be driven without one."""
+
+    def decide(self, view, squads, now):
+        return [], []
+
+
+def test_the_arena_hands_the_layer_its_standing_before_it_decides():
+    """The hand-off has to arrive before the decision, because settling is what pays the decision the last period left waiting and settling happens at the top of the layer's own decide. Handed over afterwards it would pay every period out of the board of the period before, and the last one out of nothing at all.
+
+    Both sides are handed the same period's reading of the same board, which is what the alternating leader would otherwise break: the two sides decide one after the other, and a reading taken inside that loop would give the second side a board the first has already acted on.
+    """
+    arena = _standing_board()
+    calls = []
+    arena.our_ops = _Chain(calls, "ours")
+    arena.their_ops = _Chain(calls, "theirs")
+    arena.our_tac = arena.their_tac = _Still()
+    arena.orders = OperationsOrders(posture=Posture.ARM, priorities=dict(arena.priorities),
+                                    offensive=True, loss_allowance=1000.0)
+    # One squad a side, both sent at the disc the enemy's garrison opened on, so the two figures are read off one disc and must come out as a number and its negation.
+    arena.squads = {1: _tasked(1, 4, [1])}
+    arena.enemy = {5: _tasked(5, 4, [2])}
+    arena.until_ms = 999999
+
+    units = [_unit(1, 0.0, 0.0), _unit(2, 30.0, 0.0, hostile=1), _unit(3, 60.0, 0.0, hostile=1)]
+    observation = _observation(units=units)
+    view = WorldView(observation=observation, catalogue=_CATALOGUE, regions=[])
+    arena._run(observation, view, Action(), 5000)
+
+    assert calls == [("ours", "standing"), ("ours", "decide"),
+                     ("theirs", "standing"), ("theirs", "decide")], calls
+    ours, = arena.our_ops.standings
+    theirs, = arena.their_ops.standings
+    assert sorted(ours) == [1] and sorted(theirs) == [5]
+    assert abs(ours[1] + theirs[5]) < 1e-15, "the two sides were paid off different boards"
+    # And the figure is the board's own reading: one of ours against two hostiles is a third of the disc, off an opening of nought.
+    assert abs(ours[1] - 0.8 * (1.0 / 3.0 - 0.0)) < 1e-9
+
+    # The leader alternates period by period, and the reading is taken outside that alternation, so the second period's figures are still exact negatives.
+    arena._run(observation, view, Action(), 7000)
+    assert [name for name, _ in calls[4:]] == ["theirs", "theirs", "ours", "ours"]
+    assert abs(arena.our_ops.standings[-1][1] + arena.their_ops.standings[-1][5]) < 1e-15
+
+
+def test_the_horizon_pays_only_what_the_periods_have_not():
+    """End to end on the real layer and the real buffer: the arena reads its discs every period, the layer is paid the movement of each squad's own figure, and the horizon adds what is left. What the whole episode returns has to be the horizon's reading and nothing more, or the dense credit has changed the objective instead of only its density.
+
+    And nothing is cut. The layer re-draws its region every period and used to have its trajectory cut every time it did, which is what left four fifths of a batch carrying an advantage of exactly nought; paid off one quantity from the first decision to the last there is no boundary left to cut at, so the census reads one finished trajectory a squad and every step paid.
+    """
+    arena = _standing_board()
+    rollout = Rollout(discount=FIGHT_DISCOUNT, trace=FIGHT_TRACE)
+    # The real layer over the real inherited ladder, so the contracts are written the way a run writes them.
+    layer = LearntOperations(None, _CATALOGUE, None, rollout=rollout, instance=0, discount=1.0)
+    arena.our_ops = layer
+    arena.their_ops = _Chain([], "theirs")
+    arena.our_tac = arena.their_tac = _Still()
+    arena.orders = OperationsOrders(posture=Posture.ARM, priorities=dict(arena.priorities),
+                                    offensive=True, loss_allowance=1000.0)
+    squad = _tasked(1, 4, [1])
+    arena.squads = {1: squad}
+    arena.enemy = {}
+    arena.until_ms = 999999
+
+    def board(ours_in_disc, enemy_in_disc, region):
+        """A board with a stated number of tanks a side inside the disc the enemy opened on, and the squad re-tasked as asked."""
+        units = [_unit(10 + index, index * 20.0, 0.0) for index in range(ours_in_disc)]
+        units += [_unit(50 + index, 100.0 + index * 20.0, 0.0, hostile=1) for index in range(enemy_in_disc)]
+        units.append(_unit(90, 2000.0, 0.0))          # our garrison, still holding the disc we opened whole
+        squad.members = [10 + index for index in range(ours_in_disc)]
+        squad.contract = dataclasses.replace(_CONTRACT, squad=1, target_region=region,
+                                             issued_at_ms=1000 * region)
+        return units
+
+    # Five periods: the squad arrives at the enemy's disc and takes ground, is re-tasked onto its own, and is re-tasked back.
+    for period, (ours_in, enemy_in, region) in enumerate(
+            ((0, 3, 4), (1, 3, 4), (2, 2, 4), (2, 2, 9), (3, 1, 4))):
+        units = board(ours_in, enemy_in, region)
+        observation = _observation(units=units, game_time_ms=2000 * period)
+        view = WorldView(observation=observation, catalogue=_CATALOGUE, regions=[])
+        # A decision of this squad's is recorded every period, as a layer with a decider takes one.
+        arena._run(observation, view, Action(), 2000 * period)
+        layer.pending[1] = Step(state=[0.0], action=0, mask=[1.0], value=0.1 * (period + 1), squad=1)
+
+    # And the horizon, on a board that has moved again since the last period.
+    units = board(4, 1, 4)
+    horizon = _observation(units=units, game_time_ms=999999)
+    arena._score(horizon)
+
+    terminal = arena._standing(squad, arena._shares(units), +1.0, units)
+    trajectory, = rollout.done
+    assert trajectory.finished and trajectory.reason == "" and trajectory.steps[-1].done
+    assert abs(sum(step.reward for step in trajectory.steps) - terminal) < 1e-12, (
+        "the episode returned something other than the horizon's own reading")
+    assert arena.statistics.terminals == 1 and layer.terminals["horizon"] == 1
+
+    rollout.drain()
+    census = rollout.census
+    assert census.cut == {} and census.finished == 1
+    assert census.paid_steps == census.steps == 5
+    assert census.zero_advantage == 0
 
 
 def test_the_concentrating_arm_sends_every_squad_at_the_one_region_most_wanted():

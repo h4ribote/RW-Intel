@@ -177,10 +177,23 @@ class LearntOperations(Operations):
         self.owed: Dict[int, float] = {}
         #: How many errands were closed for each reason, so a run can be asked whether its terminals are firing. An operational errand takes its terminal only from outside, through finish, so this stays empty in a match and fills in the arena.
         self.terminals: Counter = Counter()
+        #: What the board a contest is scored on last read for each of this side's squads, handed in from outside before the period's decisions are settled against it. None in a match, where there is no such board and the region block is the only signal there is. The switch is per board and not per squad on purpose: a trajectory whose steps were paid in two different quantities sums to neither.
+        self._standing: Optional[Dict[int, float]] = None
         self._state: List[float] = []
         self._regions: List[float] = []
         self._view: Optional[WorldView] = None
         self._spawns = tuple(region.id for region in getattr(session, "regions", ()) if region.spawn)
+
+    def standing(self, figures: Dict[int, float]) -> None:
+        """Takes what the scored board reads for each of this side's squads, for the period about to be settled.
+
+        Reached from outside exactly as `finish` is, and for the same reason: what a squad's errand is worth is a statement about ground that only whoever runs the contest can read, and this layer sees periods and nothing else. Everything of one period at once, by squad, because the discs are read once for the whole board — several squads may be sent to one of them, and both sides are paid off the one reading so that their figures stay exact negatives.
+
+        A match never calls this, so the figures stay unset there and the region block goes on being the whole of the signal.
+
+        Nothing of this figure reaches the observation the decider is handed: the squad row carries no contracted region and no scored standing, so a critic cannot subtract the part of a return that is already fixed when the action is taken. That is variance and not bias — the figure is read before the decision, so what it adds to a return is an action-independent offset and the estimator stays unbiased for the same objective — but it is the one thing that blunts this credit, and putting the contracted region or the figure itself into the squad row is what would remove it.
+        """
+        self._standing = dict(figures)
 
     def decide(self, view: WorldView, orders: OperationsOrders, squads: List[SquadRecord],
                reports: List[MissionReport], game_time_ms: int):
@@ -195,13 +208,17 @@ class LearntOperations(Operations):
 
         Each decision is paid the shaping of the region its own contract named, not one board-wide figure shared out to all of them. The figure that paid all of them was the disease: what the strategic layer asks for is region by region, and a squad sent to a region it took has to be paid differently from one sent to a region it lost, or the advantage does not depend on the choice and the gradient is dead.
 
-        A squad handed a new contract has begun a different errand and its old trajectory is cut, because advantage estimation would otherwise run what the new errand earned backwards into the decisions of the old, whose potential is measured against different ground. A squad gone from the board — folded into another by the organisation layer, disbanded, or wiped — is cut rather than ended: its last decision is bootstrapped from its own value estimate, as any decision that merely stopped being observed is, not closed against a terminal potential of nought. Marking it done would teach the critic that every state a squad turns over from, a routine merge of a healthy squad included, is worth nothing from here, corrupting the baseline every other squad's advantage is taken against. What ends an operational errand as a terminal comes only from outside, through finish, which the constructed arena calls at the horizon.
+        Where a contest reads its own ground and has handed its reading in, that is what a period is paid the movement of instead of the region block, and the same figure the contest pays at its horizon is then the last of the same series. A trajectory then has one currency from the first decision to the last, so there is no errand boundary left in it: a squad handed a new contract has its old ground handed back and its new ground taken on in one payment, and its trajectory runs on. In a match no such reading exists, the region block is re-based at every fresh contract, and the cut below is that case — two errands' payments there really do have incomparable origins.
+
+        A squad gone from the board — folded into another by the organisation layer, disbanded, or wiped — is cut rather than ended: its last decision is bootstrapped from its own value estimate, as any decision that merely stopped being observed is, not closed against a terminal potential of nought. Marking it done would teach the critic that every state a squad turns over from, a routine merge of a healthy squad included, is worth nothing from here, corrupting the baseline every other squad's advantage is taken against. What ends an operational errand as a terminal comes only from outside, through finish, which the constructed arena calls at the horizon.
         """
         if self.rollout is None:
             return
         present = {squad.id for squad in squads}
         for squad in squads:
-            outcome = self.reward.step(squad, view, orders)
+            # Nothing where no contest reads this board, which is a match; the contest's reading where one does. Read per board rather than per squad, and the reading a contest hands in covers every squad it has, so the default here is a guard and not a path — a squad paid out of the region block for a period while its neighbours were paid out of the discs would leave a trajectory summing to neither quantity.
+            figure = None if self._standing is None else self._standing.get(squad.id, 0.0)
+            outcome = self.reward.step(squad, view, orders, figure=figure)
             step = self.pending.pop(squad.id, None)
             if step is not None:
                 step.reward = outcome.reward + self.owed.pop(squad.id, 0.0)
@@ -210,9 +227,7 @@ class LearntOperations(Operations):
             else:
                 self.owed[squad.id] = self.owed.get(squad.id, 0.0) + outcome.reward
             if outcome.renewed:
-                # Whatever was carried belonged to the errand being cut, whose potential was measured against different ground.
-                #
-                # What this costs is worth writing down where the cut is made, because it is not visible from anything a run reports. A renewal pays nought by construction, so the decision this lands on is written a reward of nought and then bootstrapped from its own value estimate; at a discount and a trace of one that leaves it an advantage of exactly nought, and every earlier decision of the cut errand anchored by nothing but the difference between two of the critic's own estimates, since a terminal only ever arrives through finish and a cut errand never reaches one. Where contracts are re-issued nearly every period — which is what a learnt layer does, its `_settled` returning the fresh draw rather than holding the errand — that is nearly the whole of the batch. The buffer's census counts the share so a run says it rather than having it inferred.
+                # The match's case alone, and it arrives through the meaning of the flag rather than through a test of which board this is: `renewed` says that what has been paid so far is in a currency the next errand cannot inherit, and that is true of the region block, which is re-based against fresh ground whenever a contract is issued. A contest's scored figure has one origin for the whole episode and never sets it, so nothing here fires on that path and a trajectory paid off the discs is never cut. Whatever was carried belonged to the errand being cut, and cannot be paid into the errand replacing it.
                 self.owed.pop(squad.id, None)
                 self.rollout.cut((self.instance, squad.id), reason="renewed")
         for squad_id in [key for key in self.pending if key not in present]:
@@ -225,6 +240,8 @@ class LearntOperations(Operations):
         """Ends this squad's errand from outside, paying the decision still waiting on it as the last of its trajectory. Structurally the tactical layer's finish: whoever runs the contest knows when it is over, the layer only sees periods.
 
         The payment is the terminal handed in plus the last shaping term taken against a terminal potential of nought, so the shaping over the errand telescopes away and cannot change which policy is best. A squad whose errand already took its terminal has its still-waiting decision cut instead of paid, and a squad gone between periods has no decision waiting, so the terminal is added to the last step there was through the buffer's close-with — exactly the three cases the tactical finish handles.
+
+        The same arithmetic makes this the last of a series where a contest has been paying every period. `close` hands back everything already paid, so what is added here is the terminal less that — the movement of the scored figure over the final period — and the episode still returns the terminal exactly. Nothing in this method knows which of the two it is doing, and nothing needs to.
         """
         if self.reward.ended(squad.id):
             self.pending.pop(squad.id, None)
@@ -294,6 +311,8 @@ class LearntOperations(Operations):
         self.owed.clear()
         self.rollout.cut_all(owner=self.instance, reason="episode")
         self.reward.reset()
+        # An episode's boards belong to that episode: whatever the last contest read says nothing about the next one's ground, and a reading left standing would be paid against a ledger that has just been cleared.
+        self._standing = None
 
     def close(self) -> None:
         """Ends every open period and releases this episode's trajectories to the trainer. The operational chain reaches the seal through its policy's close, which taints first; this direct close is the path with no intruder above it, where flush and seal are one call."""

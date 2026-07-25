@@ -479,7 +479,7 @@ def test_a_decision_in_a_cut_errand_is_anchored_by_the_critic_alone_and_its_last
                                              reward=0.0, squad=squad))
             # Every period of these errands paid nothing, which is what a period that renews a contract pays.
             rollout.cut((0, squad), reason="renewed")
-        # And one errand that ran to the horizon and was paid there, as the arena pays the last errand of each squad.
+        # And one errand that ran to a terminal and was paid there, which is what every trajectory of a contest that reads its own scored ground now looks like.
         rollout.add((0, 9), Step(state=[0.0], action=0, mask=[1.0], value=values[0], reward=0.5,
                                  done=True, squad=9))
         return rollout, rollout.drain()
@@ -855,7 +855,8 @@ def test_an_operational_squad_that_leaves_the_board_is_cut_rather_than_ended():
     Marking it done would bootstrap from nought and assert the world ended where a squad turned over, which a routine merge of a healthy squad does several times a match. That would teach the critic that the states before every merge are worth nothing from here, corrupting the baseline the operational advantage of every other squad is taken against — the one thing a benign merge must leave untouched.
     """
     class _PerSquadReward:
-        def step(self, squad, view, orders):
+        # The figure is what a contest that reads its own scored ground hands in for the period, and it is None here because this is the match path, where no such board exists and the region block is the whole of the signal. Taken and ignored so that the double has the signature the real reward has: the layer passes it on every path, and a double that could not accept it would be testing a call the layer does not make.
+        def step(self, squad, view, orders, figure=None):
             return Outcome(reward=0.1)
         def forget(self, squad_id):
             pass
@@ -890,7 +891,8 @@ def test_shaping_earned_in_a_period_with_no_decision_waiting_is_carried_and_not_
     class _Ticking:
         """A reward that pays a tenth every period, so what arrived and what was paid can be told apart by counting."""
 
-        def step(self, squad, view, orders):
+        # The figure a contest hands in for the period, None on the match path this test drives, taken so the double matches the real reward's signature.
+        def step(self, squad, view, orders, figure=None):
             return Outcome(reward=0.1)
 
         def forget(self, squad_id):
@@ -988,7 +990,9 @@ def test_an_operational_errand_replaced_by_a_new_contract_takes_no_terminal_and_
 
     Two things are true at once here and each is half of the diagnosis. The shaping of a replaced errand is not cancelled — `close` is only reached from `finish`, and a renewal never reaches `finish` — so what those decisions were paid is the whole movement of the potential over the errand, in the region block's own quantity. And no terminal ever arrives for them: a terminal only comes from outside, at the horizon, and by then this trajectory has been cut and is no longer the squad's. So the errand is paid something, and it is paid nothing of what the arena is scored on.
 
-    The period that does the replacing is paid exactly nought, by construction, and it is the last step of the trajectory. At the discount and trace a whole bounded contest is run at, that leaves its advantage exactly nought and the rest of the errand anchored by the critic's own estimates. The layer re-draws its region every period on the constructed arena, so unless the policy decides to stay, this is what happens to the errand every period and the horizon pays the last one alone.
+    The period that does the replacing is paid exactly nought, by construction, and it is the last step of the trajectory. At the discount and trace a whole bounded contest is run at, that leaves its advantage exactly nought and the rest of the errand anchored by the critic's own estimates.
+
+    This is the match's case and only the match's. In a match the region block is the whole of the operational signal and it really is re-based against fresh ground at every contract, so two errands' payments have origins that cannot be compared and running one's advantage backwards into the other's decisions would be wrong. Where a contest reads its own scored ground and hands the reading in, every period is paid the movement of one quantity from the first decision to the last, `renewed` is never set, and none of this happens — see the scored-board tests below, which drive the same layer and the same buffer with a figure handed in.
     """
     class _Orders:
         priorities = {1: 1.0, 2: 1.0}
@@ -1028,6 +1032,205 @@ def test_an_operational_errand_replaced_by_a_new_contract_takes_no_terminal_and_
     assert [round(step.advantage, 9) for step in steps] == [0.9, 0.1, 0.0]
     assert rollout.census.paid_steps == 0 and rollout.census.cut == {"renewed": 1}
     assert rollout.census.zero_advantage == 1
+
+
+# ---- a board that reads its own scored ground ----------------------------------------------
+
+#: What the strategic layer said each of the two discs was worth, and the ownership each opened at. The first is a disc the enemy's garrison stood on, so it opens at nought and can only be gained by taking it; the second is one ours stood on, so it opens whole and can only be lost.
+_SCORED_PRIORITY = {1: 0.8, 2: 0.5}
+_SCORED_OPENING = {1: 0.0, 2: 1.0}
+
+#: The board period by period: which disc the squad's contract named, and this side's share of that disc's catchment as that board read. The squad works the enemy's disc and takes half of it, is re-tasked onto its own, loses units inside it so it slips away, and is re-tasked back to finish the first — two re-taskings and a casualty, which is what a policy that re-draws its region every period actually does.
+_SCORED_BOARD = ((1, 0.00), (1, 0.25), (1, 0.50), (2, 0.95), (2, 0.90), (2, 0.70), (1, 0.75), (1, 0.60))
+
+#: And the board the contest is scored on, which has moved again since the last decision was taken.
+_SCORED_HORIZON = (1, 0.65)
+
+
+def _figure(period) -> float:
+    """One squad's scored figure on one board: what the disc its contract names has moved from the ownership that disc opened at, weighted by what the disc was said to be worth. This is the whole of the quantity — the arena reads it off a health-weighted catchment, and what reaches the layer is this number."""
+    region, share = period
+    return _SCORED_PRIORITY[region] * (share - _SCORED_OPENING[region])
+
+
+def _scored_episode(skip=(), squads=(0,)):
+    """Drives `_SCORED_BOARD` through the real layer, the real reward and the real buffer, one decision a squad a period except where `skip` says the layer passed the squad over, and closes at the horizon the way the arena does."""
+    rollout = Rollout(discount=FIGHT_DISCOUNT, trace=FIGHT_TRACE)
+    layer = LearntOperations(None, None, None, rollout=rollout, instance=0, discount=1.0)
+    records = {squad_id: _squad(id=squad_id) for squad_id in squads}
+    issued = {squad_id: 0 for squad_id in squads}
+    for index, period in enumerate(_SCORED_BOARD):
+        region = period[0]
+        for squad_id, squad in records.items():
+            if squad.contract is None or squad.contract.target_region != region:
+                # A fresh contract, exactly as the inherited rule writes one when the region changes. Under the region block this is what cuts the trajectory; here it must not.
+                issued[squad_id] += 1000
+                squad.contract = TaskContract(squad=squad_id, task=Task.ATTACK, target_region=region,
+                                              stance=Stance.AGGRESSIVE, cost_budget=1000.0,
+                                              deadline_ms=90000, issued_at_ms=issued[squad_id])
+        layer.standing({squad_id: _figure(period) for squad_id in records})
+        layer._settle(None, None, list(records.values()))
+        if index + 1 not in skip:
+            for squad_id in records:
+                layer.pending[squad_id] = Step(state=[0.0], action=0, mask=[1.0],
+                                               value=0.05 * (index + 1) + 0.01 * squad_id,
+                                               squad=squad_id)
+    for squad in records.values():
+        layer.finish(squad, _figure(_SCORED_HORIZON), "horizon")
+    return rollout, layer
+
+
+def test_a_scored_board_pays_a_squad_the_movement_of_its_own_figure():
+    """Every period pays the movement of the squad's own scored figure, each board read under the contract in force at that board and against that disc's own opening. The payments are differences of one quantity, so they telescope: the episode sums to the last reading of the figure, which is exactly the terminal the contest pays at its horizon. The objective is unchanged and only its density changes, which is what makes this a credit assignment rather than a new objective."""
+    rollout, _ = _scored_episode()
+    trajectory, = rollout.done
+    paid = [step.reward for step in trajectory.steps]
+
+    figures = [_figure(period) for period in _SCORED_BOARD] + [_figure(_SCORED_HORIZON)]
+    expected = [after - before for before, after in zip(figures, figures[1:])]
+    assert len(paid) == len(expected)
+    for index, (got, want) in enumerate(zip(paid, expected)):
+        assert abs(got - want) < 1e-12, "period %d paid %r rather than the movement of the figure %r" % (
+            index + 1, got, want)
+    assert abs(sum(paid) - _figure(_SCORED_HORIZON)) < 1e-12, (
+        "the episode returned something other than the terminal")
+
+
+def test_the_payments_telescope_to_the_terminal_across_two_re_taskings():
+    """The property a weaker dense credit lacks, and the whole reason this one is written as it is.
+
+    On the period a squad is re-tasked it hands back the entire figure it had banked on the disc it is leaving and takes on the new disc's standing measured from that disc's own opening. It is not paid for having re-tasked and it is not charged for it; the sum depends only on where the disc it ends on ends. A ledger that re-set its origin at each change of contract would instead let the squad keep what it had gained on one disc and open clean on another — banking a rise and ducking a fall, which is a change of objective smuggled in as a change of density and one a policy can help itself to by re-tasking. Measured on this board that ledger returns something other than the terminal, and it is the difference between the two that this pins.
+    """
+    rollout, _ = _scored_episode()
+    trajectory, = rollout.done
+    paid = [step.reward for step in trajectory.steps]
+
+    # The first hand-off: the squad had taken half of a disc worth 0.8 and is sent to one it opened whole.
+    assert abs(paid[2] - (_figure(_SCORED_BOARD[3]) - _figure(_SCORED_BOARD[2]))) < 1e-12
+    assert abs(paid[2] - -0.425) < 1e-12, "the squad did not hand back what it had banked on the disc it left"
+    # The second: back onto the first disc, which its allies have carried further while it was away.
+    assert abs(paid[5] - (_figure(_SCORED_BOARD[6]) - _figure(_SCORED_BOARD[5]))) < 1e-12
+    assert abs(paid[5] - 0.75) < 1e-12
+    assert abs(sum(paid) - _figure(_SCORED_HORIZON)) < 1e-12
+
+    # And what a re-set origin would have returned on the same board: each errand paid its own disc's movement from wherever it stood when the errand opened, so the rise on the first disc is banked and the fall on the second is ducked.
+    rebased = 0.0
+    previous = 0.0
+    for index, period in enumerate(_SCORED_BOARD):
+        changed = index > 0 and period[0] != _SCORED_BOARD[index - 1][0]
+        rebased += 0.0 if changed else _figure(period) - previous
+        previous = _figure(period)
+    rebased += _figure(_SCORED_HORIZON) - previous
+    assert abs(rebased - _figure(_SCORED_HORIZON)) > 0.3, (
+        "this board no longer separates the two ledgers, so it cannot pin the one that telescopes")
+
+
+def test_a_squad_losing_its_units_is_charged_as_it_loses_them():
+    """The squad's units die inside the disc it is holding and the disc slips from nine tenths to seven. Under a terminal paid once that arrives as a lump at the horizon, tens of decisions after the ones that led to it; paid every period it is charged to the decision that was in force while it happened, which is the point of a dense credit. Nothing about the sum changes — that is the point of this one."""
+    rollout, _ = _scored_episode()
+    trajectory, = rollout.done
+    paid = [step.reward for step in trajectory.steps]
+
+    losing = _figure(_SCORED_BOARD[5]) - _figure(_SCORED_BOARD[4])
+    assert abs(losing - 0.5 * (0.70 - 0.90)) < 1e-12
+    assert abs(paid[4] - losing) < 1e-12, "the charge did not land on the period the units were lost on"
+    assert abs(sum(paid) - _figure(_SCORED_HORIZON)) < 1e-12
+
+
+def test_a_scored_board_leaves_no_errand_boundary_to_cut_at():
+    """The direct regression on the defect. The squad is handed a fresh contract twice over this episode, and under the region block each of those cut its trajectory: the period that did the replacing was written a reward of nought, its advantage came out at exactly nought at a discount and a trace of one, every earlier decision was anchored by nothing but two of the critic's own estimates, and the terminal reached none of them.
+
+    Paid off one quantity from the first decision to the last there is no boundary left to cut at. One trajectory, finished, no reason, and every decision of the episode inside it.
+    """
+    rollout, layer = _scored_episode()
+    assert not rollout.live, "the episode left a trajectory open"
+    trajectory, = rollout.done
+    assert trajectory.finished and trajectory.reason == ""
+    assert trajectory.steps[-1].done and len(trajectory.steps) == len(_SCORED_BOARD)
+    assert layer.terminals["horizon"] == 1
+    assert not layer.owed and not layer.reward.missions
+
+
+def test_a_scored_board_replaces_the_region_block_rather_than_joining_it():
+    """Which of the two quantities a period is paid in is a decision about the board and not about the squad, and where a contest reads its own ground its reading replaces the region block rather than being added to it.
+
+    Added, the block's own movement would stand in the return as well, and that residue is not a constant: the block is re-based at every contract, only the last errand's movement is ever cancelled, and what is left over is chosen by the policy — a squad can bank a rise on one block and re-task away before the fall, which is the very thing the scored ledger is written to forbid. It would also be worth nothing here: the block is the whole Voronoi cell at unit prices with this side's free base standing in it, while the figure is a health-weighted disc about a contest point some hundreds of units away.
+
+    So the block is made to move sharply under the squad while the figure moves a little, and what the squad is paid has to be the figure's movement alone.
+    """
+    class _Orders:
+        priorities = {1: 1.0}
+
+    rollout = Rollout(discount=FIGHT_DISCOUNT, trace=FIGHT_TRACE)
+    layer = LearntOperations(None, None, None, rollout=rollout, instance=0, discount=1.0)
+    squad = _squad(id=0)
+    orders = _Orders()
+
+    # The block swings from a region we are being beaten in, through level, to one we hold: four tenths of its own quantity a period. The scored figure moves a tenth and then two tenths.
+    for figure, (ours, theirs) in ((0.0, (100.0, 900.0)), (0.1, (500.0, 500.0)), (0.3, (900.0, 100.0))):
+        layer.standing({squad.id: figure})
+        layer._settle(_view([], [_region(1, ours=ours, theirs=theirs)]), orders, [squad])
+        layer.pending[squad.id] = Step(state=[0.0], action=0, mask=[1.0], value=0.5, squad=squad.id)
+
+    paid = [step.reward for step in rollout.live[(0, squad.id)].steps]
+    assert [round(reward, 12) for reward in paid] == [0.1, 0.2], (
+        "the region block reached a period the contest was paying for")
+    # The scored ledger opens at nought and holds the last figure, which is what makes the horizon payment the last difference rather than the whole of it.
+    mission = layer.reward.missions[squad.id]
+    assert mission.opening == 0.0 and abs(mission.potential - 0.3) < 1e-12
+    assert abs(layer.reward.close(squad.id) - 0.3) < 1e-12
+
+
+def test_a_squad_the_layer_passed_over_carries_its_scored_credit_forward():
+    """The inherited rule leaves a squad worn below the health it will task at all out of the decision while its contract stands, so no step is recorded for it that period and the movement of its figure has nothing to be paid to. Dropped, the sum stops telescoping and the episode returns the terminal less whatever those periods moved. Carried to the next decision that is paid — and to the terminal if none is — the telescope closes again."""
+    rollout, layer = _scored_episode(skip=(3, 4))
+    trajectory, = rollout.done
+    paid = [step.reward for step in trajectory.steps]
+
+    assert len(paid) == len(_SCORED_BOARD) - 2, "a decision was recorded on a period the layer passed the squad over"
+    assert abs(sum(paid) - _figure(_SCORED_HORIZON)) < 1e-12
+    # The decision that follows the passed-over periods is paid what they moved as well as what it moved itself.
+    assert abs(paid[2] - (_figure(_SCORED_BOARD[5]) - _figure(_SCORED_BOARD[2]))) < 1e-12
+    assert not layer.owed
+
+
+def test_a_squad_between_contracts_hands_its_ground_back_rather_than_forgetting_it():
+    """A squad holding no contract has moved no ground, so its figure is nought and the honest payment is nought less whatever the ledger held — the same hand-back a re-tasking makes.
+
+    This is why the scored branch is taken before the guard that drops a contract-less squad's mission and not after it. Dropped there, the ledger would restart at nought with the hand-back unpaid, and the next contracted period would pay its whole figure again: the episode would return the terminal plus everything banked before the gap, which is the re-basing this whole ledger exists to forbid arriving through the back door.
+    """
+    rollout = Rollout(discount=FIGHT_DISCOUNT, trace=FIGHT_TRACE)
+    layer = LearntOperations(None, None, None, rollout=rollout, instance=0, discount=1.0)
+    squad = _squad(id=0)
+
+    # The squad takes three tenths of a disc's worth, then holds no contract for a period, then is sent out again and takes half.
+    for index, figure in enumerate((0.0, 0.3, 0.0, 0.5)):
+        squad.contract = None if index == 2 else _squad(id=0).contract
+        layer.standing({squad.id: figure})
+        layer._settle(None, None, [squad])
+        layer.pending[squad.id] = Step(state=[0.0], action=0, mask=[1.0], value=0.1 * index, squad=squad.id)
+    layer.finish(squad, 0.5, "horizon")
+
+    trajectory, = rollout.done
+    paid = [step.reward for step in trajectory.steps]
+    assert abs(paid[1] - -0.3) < 1e-12, "the ground held before the gap was not handed back"
+    assert abs(paid[2] - 0.5) < 1e-12
+    assert abs(sum(paid) - 0.5) < 1e-12, "the episode paid what was banked before the gap a second time"
+
+
+def test_the_scored_batch_is_paid_and_distinct():
+    """The census counterpart of the batch that could not learn, on the same four squads and the same buffer.
+
+    Under the region block a batch of this shape read `paid_steps 0`, `cut {'renewed': …}` and an advantage of exactly nought on nearly every step — and normalisation turns a mass of identical noughts into one identical nonzero number, which is a uniform push on whatever the policy happened to draw, on no merit at all. Paid every period, every step lies in a trajectory a payment reached, nothing is cut, and the advantages are as many different numbers as there are decisions.
+    """
+    rollout, _ = _scored_episode(squads=(0, 1, 2, 3))
+    steps = rollout.drain()
+    census = rollout.census
+
+    assert census.steps == len(steps) == 4 * len(_SCORED_BOARD)
+    assert census.paid_steps == census.steps and census.cut == {} and census.finished == 4
+    assert census.zero_advantage == 0
+    assert census.distinct == census.steps, "the batch holds fewer advantages than decisions"
 
 
 def test_a_layer_built_with_a_discount_pays_its_shaping_at_that_discount():

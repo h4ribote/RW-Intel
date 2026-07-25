@@ -177,11 +177,11 @@ class OperationalReward:
 
     Per squad, and region-specific, because a single global board figure written identically into every squad's step was the disease. The per-decision advantage barely depended on which region a squad was sent to, so only the entropy bonus had a consistent gradient and the policy spread toward uniform while the return sat still: a dead gradient. The potential of a decision is the priority-weighted domination of the one region that decision's contract named — the share of that region that is ours, less an even split, times what the strategic layer said the region was worth — so a squad sent to a region it took and a squad sent to one it lost are paid differently, and the shaping already points where the choice does. Keyed by the contract's issue time exactly as the tactical layer's errand is, so a squad handed a new region begins a fresh mission and the two are not run into one trajectory.
 
-    What this potential is not is the quantity any terminal is paid in, and saying otherwise was a false statement that sat here long enough to be believed. On the constructed operations arena the terminal is read off the unit rows — a health-weighted disc of fixed radius about a contest point — while this is the game's own region cell at unit prices, a Voronoi block about a region centre with this side's free base counted into it; the two are not the same figure, not read from the same table, and not read over the same ground. Nothing anywhere makes them telescope against each other.
+    Which board is in force decides which of two quantities a period is paid in, and it is one or the other and never both. In a match the region block above is the whole of the signal: there is no operational terminal at all — the match result is the strategic layer's — and nothing outside can read anything better, so the block's own movement is what the layer is taught by and a fresh contract opens a fresh errand against fresh ground. On a contest that scores its own ground the arena hands in a figure every period and `step` pays the movement of that instead, through `_scored`; the block is not added to it, because two densities of one objective can be summed and two different quantities cannot, and the block's residue over an errand is chosen by the policy exactly as a re-based ledger's would be.
 
-    That costs nothing where an errand is closed from outside, and for a reason that has nothing to do with the quantities agreeing: `close` hands back the whole of the movement this potential made, opening term included, so the errand returns its terminal exactly whatever this potential happens to be. Where it costs something is an errand no terminal ever reaches. An errand replaced by a new contract is cut rather than closed, nothing is cancelled, and what its decisions were paid is this potential's own movement and nothing else — a dense signal in a neighbouring quantity, which on a board where contracts are re-issued nearly every period is very nearly all the layer is taught by.
+    The two are not the same figure and were once written here as though they were. On the constructed operations arena the scored figure is read off the unit rows — a health-weighted disc of fixed radius about a contest point — while the block is the game's own region cell at unit prices, a Voronoi block about a region centre with this side's free base counted into it: not the same table and not the same ground. Nothing would make them telescope against each other, which is why the switch is per board rather than per squad — a trajectory some of whose steps were paid in one and some in the other sums to neither.
 
-    There is no status terminal here. What ends an operational errand — the region taken, the deadline past — is not read from the board and paid the way the tactical layer's is; the constructed arena that this per-squad form exists for pays a region-domination terminal from outside through `finish`, and a match pays none at all (the match result is the strategic layer's). So `step` only ever shapes and renews, and `close`/`ended` are here for the outside terminal to telescope against.
+    There is no status terminal here either way. What ends an operational errand — the region taken, the deadline past — is not read from the board and paid the way the tactical layer's is; a contest pays its terminal from outside through `finish` and a match pays none at all. So `step` only ever shapes, and `close`/`ended` are here for the outside terminal to telescope against.
     """
 
     def __init__(self, discount: float = DISCOUNT) -> None:
@@ -198,7 +198,9 @@ class OperationalReward:
         return mission is not None and mission.ended
 
     def close(self, squad_id: int) -> float:
-        """Hands back how far this squad's errand moved its potential — the last valuation less the opening one — and forgets the errand, so that a caller ending it from outside pays `terminal − (last − opening)` and the errand's whole return comes to the terminal exactly. Nought when nothing is held.
+        """Hands back everything this squad has already been paid — the last valuation less the opening one — and forgets the errand, so that a caller ending it from outside pays `terminal − (last − opening)` and the errand's whole return comes to the terminal exactly. Nought when nothing is held.
+
+        One statement covers both boards, which is why this needs no case of its own. On the region block the opening is the valuation the errand began at and the difference is the errand's own movement, which is the sum of the shaping terms already paid. On a scored contest the opening is nought and the difference is the last figure, which is likewise the sum of the differences already paid, every period having been paid one. Either way what is handed back is what has been paid, so what the caller adds is what has not.
 
         The cancellation is exact at a discount of one, which is where it has to be: a terminal only ever arrives from the constructed arena, an arena contest is one whole bounded errand, and such an errand is discounted at nothing. A match pays no operational terminal at all, so nothing here runs under the match's discount.
 
@@ -210,7 +212,11 @@ class OperationalReward:
     def reset(self) -> None:
         self.missions.clear()
 
-    def step(self, squad: SquadRecord, view: WorldView, orders) -> Outcome:
+    def step(self, squad: SquadRecord, view: WorldView, orders,
+             figure: Optional[float] = None) -> Outcome:
+        if figure is not None:
+            return self._scored(squad, figure)
+
         contract = squad.contract
         if contract is None:
             self.forget(squad.id)
@@ -231,6 +237,30 @@ class OperationalReward:
         potential = self._potential(squad, view, orders)
         reward = self.discount * potential - mission.potential
         mission.potential = potential
+        return Outcome(reward=reward)
+
+    def _scored(self, squad: SquadRecord, figure: float) -> Outcome:
+        """Pays this period the movement of the squad's own scored figure, which is what a contest hands in when it can read its own ground.
+
+        Three properties are load-bearing and none of them is arithmetic convenience.
+
+        The ledger opens at nought and is never re-based. There is no comparison of the contract's issue time here, so a squad handed a different region does not start again: the period that re-tasks it pays the new region's figure less the old region's figure, which hands back everything banked on the ground it is leaving. Re-basing instead would let a squad keep what it gained on one region and open clean on another, so that a rise could be banked and a fall ducked by re-tasking — a change of objective wearing the clothes of a change of density, and one a policy can help itself to at will. What makes this the right ledger and not merely a different one is that the payments then telescope: every period pays a difference of the same quantity, so the whole episode sums to the last reading of it, which is exactly the terminal the contest pays at its horizon. The objective is unchanged and only its density changes.
+
+        A period in which the squad holds no contract is paid rather than forgotten, which is why this branch sits above the guard that drops a contract-less squad's mission. A squad between contracts has simply not moved any ground, its figure is nought, and the honest payment is nought less whatever the ledger held — the same hand-back a re-tasking makes. Dropping the mission there would restart the ledger at nought with that hand-back unpaid, and the episode would then pay everything banked before the gap a second time.
+
+        The ledger's opening stays nought, and the horizon depends on it. `close` returns the last figure less the opening, and the contest's `finish` pays its terminal less that, so the last payment is the last two figures' difference only because the opening is nought. A scored mission given a non-nought opening would leave every period payment right and the horizon wrong.
+        """
+        mission = self.missions.get(squad.id)
+        if mission is None:
+            contract = squad.contract
+            mission = _Mission(issued_at_ms=contract.issued_at_ms if contract is not None else 0,
+                               potential=0.0, opening=0.0)
+            self.missions[squad.id] = mission
+        if mission.ended:
+            # Nothing in this class ever ends a mission, so this is inert as things stand. It is here because `finish` asks the same question before paying a terminal, and if anything ever did end a scored errand mid-episode the payments would have to stop with it: a ledger that went on moving after its terminal had been paid would no longer sum to that terminal.
+            return Outcome()
+        reward = self.discount * figure - mission.potential
+        mission.potential = figure
         return Outcome(reward=reward)
 
     def _potential(self, squad: SquadRecord, view: WorldView, orders) -> float:

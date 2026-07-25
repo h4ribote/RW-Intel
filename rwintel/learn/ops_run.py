@@ -178,11 +178,11 @@ def _discs(sessions, arm: str) -> None:
 
 
 def signal(sessions, arm: Optional[str] = None) -> None:
-    """How far this arm's one payment could reach the decisions it is supposed to teach.
+    """How decisive this arm was, and how many of the arena's payments landed on a decision.
 
-    The arena pays a squad once, at the horizon, and pays it to the errand the squad was on when the board was scored. So what a run has to be able to say is how long an errand was: an episode in which a squad held one contract from the staging point to the horizon is an episode in which the payment reaches every decision taken about it, and an episode in which the contract was re-drawn every period is one in which the payment reaches the last decision and no other, however many hundred were taken. Those two episodes report the same score, the same shares and the same disc tallies, and nothing else here tells them apart.
+    The arena pays a squad every operational period the movement of its own scored figure, so how long an errand ran no longer decides how much of the episode a payment reaches — the payments telescope and reach all of it. What the ratio still says is whether an arm settled on a deployment or changed its mind: an episode in which four contracts stood from the staging point to the horizon and one in which they were re-drawn every period report the same score, the same shares and the same disc tallies, and nothing else here tells them apart. That is a real difference between arms and worth reporting per arm, because the handwritten ladder holds a squad on the errand it is running while a learnt layer re-draws as it likes.
 
-    The three figures are the decisions the squads were given, the errands those decisions were divided into, and how many payments actually landed on a decision. The last is nought for every arm of this runner and that is not a fault: no arm here is handed a rollout, so no decision is recorded and there is nothing for a payment to land on. It is reported all the same, because it is the figure a training run has to be read by and a measuring run is where the ratio it has to be compared against is taken.
+    The three figures are the decisions the squads were given, the errands those decisions were divided into, and how many horizon payments actually landed on a decision. The last is nought for every arm of this runner and that is not a fault: no arm here is handed a rollout, so no decision is recorded and there is nothing for a payment to land on. It is reported all the same, because it is the figure a training run has to be read by and a measuring run is where the errand lengths it is compared against are taken.
     """
     periods = errands = terminals = staged = 0
     for session in sessions:
@@ -195,10 +195,10 @@ def signal(sessions, arm: Optional[str] = None) -> None:
             staged += int(record.statistics.get("squads", 0))
     if not periods or not errands:
         return
-    # Each squad's last errand is the only one the horizon pays, so the share of the decisions a payment can reach is the share of the errands that are somebody's last one — the squads staged, against every errand they were given.
+    # No share of the decisions is quoted any more. It used to be `min(staged, errands) / errands`, on the ground that the horizon paid each squad's last errand and no other, and that ground is gone: every period is paid its own movement now, so a payment reaches every decision whatever the errands come to, and the old figure would assert the opposite of the truth on every run.
     log.info("this arm's squads took %d operational decision(s) over %d errand(s), so an errand ran %.1f decision(s) "
-             "and the payment made at the horizon reaches about %.1f%% of them; %d payment(s) landed on a decision",
-             periods, errands, periods / errands, 100.0 * min(staged, errands) / errands, terminals)
+             "before the arm changed its mind; %d horizon payment(s) landed on a decision out of %d squad(s) staged",
+             periods, errands, periods / errands, terminals, staged)
 
 
 def measure(arguments) -> Dict[str, Summary]:
