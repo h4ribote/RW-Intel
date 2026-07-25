@@ -61,8 +61,10 @@ STAGING_REACH = 800.0
 #: How many offsets are tried before an episode gives up on placing its contest pairs. A pair is rejected when its two points share a region, collide with a region already taken, sit within a catchment diameter of a point already placed, or reach anything that was already standing when the board was laid out.
 MAX_PAIR_ATTEMPTS = 400
 
-#: Control variate on the initial garrison share, subtracted from the terminal. Antisymmetric and policy-invariant like the fight arena's STRENGTH_SLOPE, so it cannot move the optimum or break the self-play zero; it starts at nought and is fitted only after the structural zero is confirmed.
-STRENGTH_SLOPE = 0.0
+#: What point a squad's terminal is read from, mixing the neutral half at nought with the opening ownership of the disc it was sent to at one. At nought the squad is paid the region's absolute domination, and that reading is why a layer trained on this arena learnt to attack nothing: measured on Hills at the default draw, a garrison holds its own disc through the horizon about 88 times in 100 whatever is sent there, while even four squads massed on one enemy disc take it only about 40 times in 100, so absolute domination pays a defender about +0.38 of a priority and an assailant about -0.10, and the best errand a squad can be given is one it was going to be paid for anyway. At one the terminal is what the errand changed on the ground it was sent to, which is the quantity the side score is a priority-weighted mean of, and the same two rates then pay an assault about +0.40 and a redundant defence about nothing.
+#:
+#: Unlike the engagement arena's strength slope this is NOT policy-invariant, and it is not a control variate: the squad chooses which region it is measured against and therefore chooses which opening it is read from. That is the point rather than a flaw — an errand is worth what it changed, and what it changed cannot be read without knowing where the ground started. It stays antisymmetric at every value, because the two sides' opening shares of one disc sum to one exactly as their final shares do, so the self-play zero remains a statement about the board and says nothing about this.
+OPENING_BASELINE = 1.0
 
 #: How a squad's terminal is read off the scored board. `region` pays the whole domination of the region the squad's contract named, which several squads on one region then each take in full; `marginal` pays only the part of it that squad's own surviving units account for. See `OpsArena._finish_side` for what each teaches and what each costs.
 CREDITS = ("region", "marginal")
@@ -140,6 +142,8 @@ class OpsStatistics:
     our_alive: int = 0
     our_in_catchment: int = 0
     our_reach: float = 0.0
+    #: How many terminals this side actually paid at the horizon. The learnt layer counts the errands it closed and for what reason, so that a run can be asked whether its terminals are firing at all rather than having it guessed at from the shape of the returns, and on this arena the terminal arrives only from outside — one payment per staged squad that still holds a contract when the board is scored. A run whose figure is short of the squads staged has squads that were never paid, and a policy cannot be taught by a signal that does not reach it; the engagement arena writes the same count for the same reason.
+    terminals: int = 0
 
     def as_dict(self) -> dict:
         return {"scored": self.scored, "side_score": round(self.side_score, 6),
@@ -150,11 +154,12 @@ class OpsStatistics:
                 "refused": self.refused, "our_alive": self.our_alive,
                 "our_in_catchment": self.our_in_catchment, "our_reach": round(self.our_reach, 1),
                 "board": self.board, "horizon_ms": self.horizon_ms, "radius": round(self.radius, 1),
-                "squads": self.squads, "pairs": self.pairs, "garrison": round(self.garrison, 1)}
+                "squads": self.squads, "pairs": self.pairs, "garrison": round(self.garrison, 1),
+                "terminals": self.terminals}
 
 
 class OpsArena(Arena):
-    """Runs one region-domination episode: deploy a mirror board about one centre, run both command chains over a bounded horizon with the economy frozen, score region domination antisymmetrically off a health-weighted catchment, and pay each squad the domination of the region it was sent to.
+    """Runs one region-domination episode: deploy a mirror board about one centre, run both command chains over a bounded horizon with the economy frozen, score region domination antisymmetrically off a health-weighted catchment, and pay each squad what its errand changed on the region it was sent to.
 
     Subclasses the engagement arena so every geometry and spawn helper — `_sites`, `_site`, `_rows`, `_interleave`, `_commissioned`, `_record`, `_health_worth`, the catalogue and the seeded random — is inherited unchanged and the two arenas cannot drift in how they place or read a board.
     """
@@ -162,7 +167,7 @@ class OpsArena(Arena):
     def __init__(self, session, operations=None, opponent=None, tactics=None, seed: int = 0,
                  horizon_ms: int = HORIZON_MS, our_squads: int = OUR_SQUADS,
                  catchment_radius: float = CATCHMENT_RADIUS, contest_pairs: int = CONTEST_PAIRS,
-                 score_slope: float = STRENGTH_SLOPE, credit: str = CREDIT,
+                 opening_baseline: float = OPENING_BASELINE, credit: str = CREDIT,
                  garrison_scale: float = GARRISON_SCALE) -> None:
         super().__init__(session, seed=seed)  # inherits catalogue, random, _sites and every spawn helper
         # The layer under study on this side (a learnt operational layer, or the script for the baseline) and what it is measured against on the other (the script for a duel, its own policy for self-play). Built here rather than handed in already made, for the same reason the engagement arena builds its layers here: both sides must read the same type catalogue as the arena that spawns their units, or a unit would be sorted into a different role on each side. The tactical layer below both actually moves the units and is frozen.
@@ -174,7 +179,7 @@ class OpsArena(Arena):
         self.our_n = our_squads
         self.radius = catchment_radius
         self.contest_pairs = contest_pairs
-        self.score_slope = score_slope
+        self.opening_baseline = opening_baseline
         if credit not in CREDITS:
             raise ValueError("the terminal a squad is paid is either %s" % " or ".join(CREDITS))
         self.credit = credit
@@ -522,11 +527,13 @@ class OpsArena(Arena):
 
     def _finish_side(self, ops, squads: Dict[int, SquadRecord], shares: Dict[int, float], sign: float,
                      unit_states=()) -> None:
-        """Pays every squad of one side the domination of the region its final contract named, plus the opposite sign for the other side exactly as the engagement arena pays outcome and −outcome. A script layer keeps no trajectories and offers no `finish`, so this is a no-op for the self-play baseline; a learnt operational layer routes the terminal back to the operational decision that produced it.
+        """Pays every squad of one side what its errand moved on the region its final contract named, plus the opposite sign for the other side exactly as the engagement arena pays outcome and −outcome. A script layer keeps no trajectories and offers no `finish`, so this is a no-op for the self-play baseline; a learnt operational layer routes the terminal back to the operational decision that produced it.
 
         There are two ways to say what one squad's deployment earned, and which one is in force is a construction argument because they teach different things.
 
-        `region` pays the region's own outcome, so several squads that converged on one region share the identical figure. It is the plainest reading of "you were sent here and here is how here went", and its flaw is that it pays a squad in full for a region its allies had already taken — the free-rider term, which rewards piling on whether or not the pile helped.
+        Both readings are taken from the opening baseline rather than from an absolute domination, which is the correction that made the arena teachable at all. A terminal read from the neutral half pays a squad for how the ground stands rather than for what its errand did to the ground, and on this arena those are almost opposite things: a garrison keeps its own disc through the horizon about 88 times in 100 whether or not a squad is sent to help it, so the neutral reading pays a redundant defence in full and charges an assault for the two chances in three it fails, and the layer trained under it duly learnt to send nobody anywhere. Read from where the disc started, the same errands pay what they moved.
+
+        `region` pays the region's own outcome, so several squads that converged on one region share the identical figure. It is the plainest reading of "you were sent here and here is how here went", and its flaw is that it pays a squad in full for a region its allies had already taken — the free-rider term, which rewards piling on whether or not the pile helped. On this arena that flaw is the right way round: one squad takes a defended disc about a tenth of the time and four massed on it about four tenths, so a pile is what taking ground is made of, and a reading that pays every member of the pile is the one that can teach it.
 
         `marginal` pays the difference the squad itself made: the region's domination as it stands, less what the same catchment would have read with that squad's surviving units taken out of it. Several squads on one region then divide what they jointly produced rather than each taking all of it, and a squad that added nothing to a region already won is paid nothing for it. It is the difference reward, and the reason it is the more honest signal is that it is the part of the team's score that this decision actually moved. Its known cost is that a squad wiped out at the horizon has nothing left in the catchment and is paid nothing, however much of the enemy it took with it — the counterfactual it can compute is "had these units not been standing here", not "had this squad never been sent".
 
@@ -535,18 +542,24 @@ class OpsArena(Arena):
         finish = getattr(ops, "finish", None)
         if finish is None:
             return
+        paid = 0
         by_region = {contest.region_id: contest for contest in self.contests}
         for squad in squads.values():
             region = squad.contract.target_region if squad.contract is not None else None
             share = shares.get(region, 0.5)
             weight = self.priorities.get(region, 0.0)
-            garrison = self.garrison_share.get(region, 0.5)
+            # Where the errand's outcome is read from: the neutral half when the baseline is nought, the disc's own opening ownership when it is one. The baseline is inside the priority weighting rather than beside it, because it is the point one region's outcome is measured from and not a separate term added to it; weighting the outcome and not its origin would leave a standing payment on every disc that scaled with nothing.
+            opening = 0.5 + self.opening_baseline * (self.garrison_share.get(region, 0.5) - 0.5)
             if self.credit == "marginal" and weight > 0.0 and region in by_region:
-                share = share - self._share_without(unit_states, by_region[region], squad.members)
+                # The marginal reading carries its own origin — what the catchment would have read with this squad's units taken out of it — so the opening is not subtracted from it a second time.
+                moved = share - self._share_without(unit_states, by_region[region], squad.members)
             else:
-                share = share - 0.5
-            terminal = sign * (weight * share - self.score_slope * (garrison - 0.5))
-            finish(squad, terminal, "horizon")
+                moved = share - opening
+            finish(squad, sign * weight * moved, "horizon")
+            paid += 1
+        # Only this side's payments are counted: the statistics belong to the process's own side, and the enemy's terminals are the mirror's business.
+        if sign > 0.0:
+            self.statistics.terminals = paid
 
     def _share_without(self, unit_states, contest: "_Contest", members: Sequence[int]) -> float:
         """What one contest's catchment would have read with a squad's surviving units taken out of it. An empty disc reads a half, as it does everywhere else, so a squad that was the only thing in a catchment is credited with the whole of taking it."""

@@ -142,6 +142,38 @@ def diagnose(sessions, arm: str, radius: float) -> None:
         log.warning("this arm's squads ended outside the catchment in the median episode, so its score is not a "
                     "measure of how it deployed onto the contests but of what happened on ground it never reached: "
                     "read it as a floor for abandoning the scored board, not as a deployment")
+    _discs(sessions, arm)
+
+
+#: How far a final share must sit from an even split before the disc is called won or lost rather than neither. A disc both sides emptied reads exactly a half and is no more a defeat than a victory, and a disc decided by a handful of health is not the kind of outcome a deployment should be credited with either.
+_DECIDED = 0.05
+
+
+def _discs(sessions, arm: str) -> None:
+    """How the arm's contested discs ended, split by what each one started as.
+
+    The pooled side score cannot tell an arm that took ground from one that abandoned it, because a disc left empty reads a half and so scores better than a disc assaulted and lost. What separates them is the opening: a disc the enemy's garrison stood on is one this side had to TAKE and can only gain on, and a disc its own garrison stood on is one it had to HOLD and can only lose on. Measured on this arena at the default draw, the handwritten ladder takes about seven of every hundred it has to take and a layer that masses every squad on one contest takes about twenty-one, and the two sit within a few hundredths of each other in the pooled mean — so the tally is the statistic that says which skill an arm actually has, and it was being recomputed by hand from the journal every time it was wanted.
+    """
+    tally: Dict[str, int] = {}
+    for session in sessions:
+        for record in session.records:
+            if record.arm != arm or not record.statistics.get("scored"):
+                continue
+            held = record.statistics.get("held") or {}
+            for region, share in (record.statistics.get("shares") or {}).items():
+                start = float(held.get(region, 0.5))
+                kind = "take" if start < 0.25 else "hold" if start > 0.75 else "open"
+                end = ("won" if float(share) > 0.5 + _DECIDED else
+                       "lost" if float(share) < 0.5 - _DECIDED else "neither")
+                tally[kind + "/" + end] = tally.get(kind + "/" + end, 0) + 1
+                tally[kind] = tally.get(kind, 0) + 1
+    if not tally:
+        return
+    log.info("of the discs an enemy garrison opened on, which are the ones this arm could only gain by taking, it took "
+             "%d of %d and left %d neither; of the discs its own garrison opened on, which are the ones it could only "
+             "lose, it kept %d of %d and lost %d",
+             tally.get("take/won", 0), tally.get("take", 0), tally.get("take/neither", 0),
+             tally.get("hold/won", 0), tally.get("hold", 0), tally.get("hold/lost", 0))
 
 
 def measure(arguments) -> Dict[str, Summary]:

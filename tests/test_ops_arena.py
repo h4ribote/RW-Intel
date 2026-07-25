@@ -33,6 +33,7 @@ from rwintel.learn.ops_arena import (
     CREDIT,
     GARRISON_SCALE,
     HORIZON_MS,
+    OPENING_BASELINE,
     OUR_SQUADS,
     OURS,
     THEIRS,
@@ -120,7 +121,7 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena.radius = radius
     arena.contest_pairs = pairs
     arena.horizon_ms = HORIZON_MS
-    arena.score_slope = 0.0
+    arena.opening_baseline = OPENING_BASELINE
     arena.credit = CREDIT
     arena.garrison_scale = GARRISON_SCALE
     arena.enemy_slot = None
@@ -426,6 +427,54 @@ def test_a_scored_episode_says_which_discs_it_had_to_take_and_which_to_hold():
     assert record["priorities"] == {4: 0.9, 9: 0.4}
     # And what happened: the disc we held is ours, the one we would have had to take is the enemy's.
     assert record["shares"] == {4: 1.0, 9: 0.0}
+
+
+def test_a_terminal_is_read_from_where_its_disc_started_and_not_from_the_neutral_half():
+    """An errand is worth what it changed, and what it changed cannot be read without knowing where the ground started.
+
+    A garrison keeps its own disc through the horizon about eighty-eight times in a hundred whether or not a squad is sent to stand with it, and even four squads massed on an enemy's disc take it only about four times in ten. Read from the neutral half, those two rates pay a redundant defence about +0.38 of a priority and an assault about −0.10, so the most profitable errand a squad can be given is one that was going to be won without it, and the first layer trained on this arena duly learnt to attack nothing and lose nothing. Read from the disc's own opening, the same two rates pay the assault about +0.40 and the redundant defence about nothing, which is the quantity the side score is a priority-weighted mean of.
+    """
+    arena = _arena(seed=11)
+    _contested(arena, 4, (0.0, 0.0), 0.8)                 # the enemy's garrison stands here, so this disc has to be taken
+    _contested(arena, 9, (2000.0, 0.0), 0.5)              # ours stands here, so this one only has to be kept
+    arena.garrison_share = {4: 0.0, 9: 1.0}
+
+    def paid(shares, sign=+1.0, baseline=OPENING_BASELINE):
+        arena.opening_baseline = baseline
+        squads = {}
+        for slot, region in ((1, 4), (2, 9)):
+            squad = SquadRecord(id=slot, doctrine=Doctrine.VANGUARD, members=[slot])
+            squad.contract = dataclasses.replace(_CONTRACT, squad=slot, target_region=region)
+            squads[slot] = squad
+        ledger = _Paid()
+        arena._finish_side(ledger, squads, shares, sign, [_unit(1, 0.0, 0.0), _unit(2, 2000.0, 0.0)])
+        return ledger.paid
+
+    # Both errands come off: the assault turned a disc from theirs to ours and is paid the whole of its priority, and the defence left a disc exactly where it started and is paid nothing for it.
+    won = paid({4: 1.0, 9: 1.0})
+    assert abs(won[1] - 0.8) < 1e-9
+    assert abs(won[2]) < 1e-9
+
+    # Both errands fail: the assault left the disc where it found it and is charged nothing for having tried, and the defence gave up ground that was already ours and is charged the whole of its priority.
+    lost = paid({4: 0.0, 9: 0.0})
+    assert abs(lost[1]) < 1e-9
+    assert abs(lost[2] + 0.5) < 1e-9
+
+    # The enemy is paid the same figures with the sign turned over, which is what keeps the self-play zero a statement about the board: the two sides' openings on one disc sum to one exactly as their final shares do.
+    theirs = paid({4: 1.0, 9: 1.0}, sign=-1.0)
+    assert abs(theirs[1] + won[1]) < 1e-9
+    assert abs(theirs[2] + won[2]) < 1e-9
+
+    # At the neutral baseline the reading that taught the layer to stay at home comes back, and both errands are paid for how the ground stands rather than for what they did to it.
+    neutral = paid({4: 1.0, 9: 1.0}, baseline=0.0)
+    assert abs(neutral[1] - 0.8 * 0.5) < 1e-9
+    assert abs(neutral[2] - 0.5 * 0.5) < 1e-9
+
+    # The episode writes down how many terminals this side actually paid, because a policy cannot be taught by a signal that never reached it and the count is the only thing that says whether it did. The enemy's payments are the mirror's business and are not counted here.
+    assert arena.statistics.terminals == 2
+    arena.statistics.terminals = 0
+    paid({4: 1.0, 9: 1.0}, sign=-1.0)
+    assert arena.statistics.terminals == 0
 
 
 def test_the_two_credit_readings_pay_a_pile_of_squads_differently():

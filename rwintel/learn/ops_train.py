@@ -21,7 +21,8 @@ from .__main__ import _device, _given, _load, _save, _serve, _warmup
 from .deciders import NetworkOperations, operational_batcher
 from .layers import LearntOperations
 from .net import OperationalNet
-from .ops_arena import CATCHMENT_RADIUS, CREDIT, CREDITS, GARRISON_SCALE, HORIZON_MS, OpsArena
+from .ops_arena import (CATCHMENT_RADIUS, CREDIT, CREDITS, GARRISON_SCALE, HORIZON_MS,
+                        OPENING_BASELINE, OpsArena)
 from .ops_run import _arena_seed, pool, report
 from .rollout import FIGHT_DISCOUNT, FIGHT_TRACE, Rollout
 from .train import Trainer
@@ -55,7 +56,8 @@ def train(arguments) -> int:
         return OpsArena(session, operations=learnt, seed=_arena_seed(arguments.seed, session, 1),
                         horizon_ms=arguments.horizon * 1000, our_squads=arguments.squads,
                         catchment_radius=arguments.radius, contest_pairs=arguments.pairs,
-                        credit=arguments.credit, garrison_scale=arguments.garrison)
+                        credit=arguments.credit, opening_baseline=arguments.opening,
+                        garrison_scale=arguments.garrison)
 
     episode = EpisodeSettings(
         map=arguments.map, opponents=arguments.opponents, difficulty=arguments.difficulty,
@@ -101,6 +103,8 @@ def main(argv=None) -> int:
     parser.add_argument("--radius", type=float, default=CATCHMENT_RADIUS)
     parser.add_argument("--garrison", type=float, default=GARRISON_SCALE,
                         help="credits a contested region's defender is drawn out of, which is what decides whether taking ground pays at all")
+    parser.add_argument("--opening", type=float, default=OPENING_BASELINE,
+                        help="what point a squad's terminal is read from: one measures the errand against the opening ownership of the disc it was sent to, which is what the side score is a mean of, and nought measures it against the neutral half, which pays a squad for how the ground stands rather than for what it did to the ground and is the reading the layers that learnt to attack nothing were trained under")
     parser.add_argument("--credit", choices=CREDITS, default=CREDIT,
                         help="what a squad's terminal is: the whole domination of the region its contract named, which every squad sent there takes in full, or only the part its own surviving units account for")
     parser.add_argument("--max-seconds", type=int, default=0)
