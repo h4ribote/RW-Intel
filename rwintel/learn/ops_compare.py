@@ -6,7 +6,7 @@ This reads journals; it starts nothing and needs no game. `_arena_seed` is the b
 
 That subtraction is worth doing but it is not free of the board. One arm's scored episodes scatter by about 0.11 while the differences the arms are being compared for are around 0.04, so an unpaired difference carries about 0.15 of spread; paired, the same two runs carried 0.12, which is the two arms' scores correlating at about 0.36 across the shared boards. **The board is a third of the scatter, not all of it**, because the same board played twice is the same staging, the same garrisons and the same regions but not the same fight — the engine is delta-driven and does not reproduce. So a pair is two plays of one construction rather than two plays of one match, the residual is the fight's own scatter, and that residual is what the reported interval measures. The report says all three spreads and the correlation between them every time, so how much the pairing actually bought is never assumed.
 
-The two runs must be the same instrument. Map, horizon, catchment radius, staged squads, contest pairs and the credits a defender is drawn out of all change what is being measured, and a run drawn under different ones is a different arena; this refuses to pair across them rather than quietly reporting the change in the instrument as a difference between the arms.
+The two runs must be the same instrument. Map, horizon, catchment radius, staged squads, contest pairs, the credits a defender is drawn out of, and which tactical layer did the fighting beneath both sides all change what is being measured, and a run drawn under different ones is a different arena; this refuses to pair across them rather than quietly reporting the change in the instrument as a difference between the arms.
 """
 
 from __future__ import annotations
@@ -20,13 +20,17 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..eval.journal import read
 from ..eval.sampling import PairedComparison, UNBOUNDED_EPISODES
+from .ops_arena import SCRIPT_TACTICS
 from .ops_run import INSTANCE_STRIDE
 
 log = logging.getLogger(__name__)
 
-#: The episode settings that have to agree before two runs are the same instrument, and the arena draw settings that have to agree beside them. The seed is deliberately not among them: two runs at different base seeds simply share no board and pair on nothing, which the pair count says by itself.
+#: The episode settings that have to agree before two runs are the same instrument, and the arena draw settings that have to agree beside them. The seed is deliberately not among them: two runs at different base seeds simply share no board and pair on nothing, which the pair count says by itself. `tactics` is the last of the draw settings and the least obvious: the fighting beneath an operational choice is what turns a deployment into a share of a disc, so a run made under trained tactical parameters and one made under the handwritten ladder are two arenas whatever else they agree on.
 EPISODE_KEYS = ("map", "opponents", "difficulty", "credits", "starting_units", "fog", "income", "arena")
-DRAW_KEYS = ("horizon_ms", "radius", "squads", "pairs", "garrison")
+DRAW_KEYS = ("horizon_ms", "radius", "squads", "pairs", "garrison", "tactics")
+
+#: What a draw setting a journal does not carry reads as, where it can only have been one thing. This is a deliberate exception to the rule that a missing field reads as None on both sides, and it is stateable exactly: a record carrying no radius could have been drawn at any radius its runner's flag allowed, whereas a record naming no tactical layer was written by a runner that had no way to put anything but the handwritten one under the arena. Without the exception every journal already written would stop pairing with every new one, which would be refusing over a difference that does not exist.
+DRAW_DEFAULTS = {"tactics": SCRIPT_TACTICS}
 
 
 def board_of(entry: dict) -> Optional[int]:
@@ -47,11 +51,11 @@ def board_of(entry: dict) -> Optional[int]:
 
 
 def signature(entry: dict) -> Tuple:
-    """What has to agree between two runs before their episodes are the same measurement. Anything a journal does not carry reads as None on both sides and so cannot make two runs disagree; it also cannot make them agree, which is why the draw settings were added to the arena statistics rather than left to be assumed."""
+    """What has to agree between two runs before their episodes are the same measurement. Anything a journal does not carry reads as None on both sides and so cannot make two runs disagree; it also cannot make them agree, which is why the draw settings were added to the arena statistics rather than left to be assumed. The one exception is a draw setting that could only ever have had one value before it was written down, which reads as that value instead of as nothing."""
     settings = entry.get("settings") or {}
     statistics = entry.get("statistics") or {}
     return (tuple(settings.get(key) for key in EPISODE_KEYS),
-            tuple(statistics.get(key) for key in DRAW_KEYS))
+            tuple(statistics.get(key, DRAW_DEFAULTS.get(key)) for key in DRAW_KEYS))
 
 
 def _scored(entries: Sequence[dict]) -> List[dict]:
@@ -102,8 +106,9 @@ def compare(first_path: str, second_path: Optional[str] = None, *, first_arm: Op
     signatures = {signature(first_boards[board]) for board in shared} | {signature(second_boards[board]) for board in shared}
     if len(signatures) > 1:
         for entry in sorted(signatures):
-            log.error("instrument: episode %s, draw %s", entry[0], entry[1])
-        log.error("the paired episodes were not run under one instrument, so the difference between them is a "
+            log.error("instrument: episode %s, draw %s (%s)", entry[0], entry[1], ", ".join(DRAW_KEYS))
+        log.error("the paired episodes were not run under one instrument — the episode settings, the arena's draw or "
+                  "the tactical layer that fought beneath both sides differ — so the difference between them is a "
                   "difference between two arenas and not between two arms; it is not reported")
         return None
 

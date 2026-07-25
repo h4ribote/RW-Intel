@@ -5,21 +5,25 @@
 
 Start this first and then the game instances, as with every other runner here.
 
-With the script chain alone it measures the self-play zero: the script `Operations` on both sides of the mirror board makes the two sides' side scores exact negatives every episode, so a run of many fresh boards must pool the reported side score to nought. A nonzero mean is a board lean the mirror-symmetric draw was supposed to have removed — the operational analogue of the headquarters-in-a-squad bias the fight baseline once carried — and it is the only instrument that can see the leans the within-episode sign check cannot: all-enemy garrisons, the free base polluting the region block, a non-congruent reflected layout, and empty regions reading a half under asymmetric reach. Every one of those is a break in exchange symmetry, and only this mean sees it. This is the gate the arena must pass before any operational policy measured on it is trusted, exactly as the engagement arena gates on its own script-against-itself baseline.
+With the script chain alone it measures the self-play zero: the script `Operations` on both sides of the mirror board makes the two sides' side scores exact negatives every episode, so a run of many fresh boards must pool the reported side score to nought. A nonzero mean is a board lean the mirror-symmetric draw was supposed to have removed — the operational analogue of the headquarters-in-a-squad bias the fight baseline once carried — and it is the only instrument that can see the leans the within-episode sign check cannot: all-enemy garrisons, the free base polluting the region block, a non-congruent reflected layout, and empty regions reading a half under asymmetric reach. Every one of those is a break in exchange symmetry, and only this mean sees it. This is the gate the arena must pass before any operational policy measured on it is trusted, exactly as the engagement arena gates on its own script-against-itself baseline. It is a statement about the board UNDER THE TACTICAL LAYER THE RUN WAS MADE WITH and under no other: the zero is a statistical claim about how the fighting on a mirrored board comes out, not a structural guarantee, so a run made under fresh tactical parameters has to re-take the gate before any arm measured beside it is trusted.
 
 Given several arms it runs all of them on the same boards. The arms alternate inside each instance and the board is held still until every one of them has played it, so each board is one paired observation across the arms and the run reports every pair's difference itself. That is the honest way to compare two operational policies here, because a board's draw moves the side score by more than the arms differ: one arm's episodes scatter by about 0.11 while the differences being looked for are around 0.04. Running the arms separately and subtracting the means pays for that scatter twice and also has to assume two runs, made at different moments on a machine doing different things, were otherwise alike. Running them together assumes nothing of the sort.
 
-It trains nothing and keeps no trajectories: no layer here is handed a rollout, so with nowhere to record a decision none is recorded.
+It trains nothing and keeps no trajectories: no layer here is handed a rollout, so with nowhere to record a decision none is recorded. That covers the trained tactical layer `--tactics` freezes under both sides of the board as well as the operational arms above it — it is read at its likeliest departure rather than drawn from, exactly as a duel reads the policy it is measuring rather than the one it is training.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import math
 import os
 import sys
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional
+
+import torch
 
 from ..control.policy.operations import Concentrated, Operations
 from ..control.server import Server, ServerSettings
@@ -28,10 +32,18 @@ from ..data import AssetPaths
 from ..eval.journal import Journal, default_path
 from ..eval.sampling import Summary
 from .__main__ import _device, _load
-from .deciders import NetworkOperations, PinnedRegion, operational_batcher
-from .layers import LearntOperations
-from .net import OperationalNet
-from .ops_arena import CATCHMENT_RADIUS, GARRISON_SCALE, HORIZON_MS, OpsArena
+from .deciders import (
+    NetworkOperations,
+    NetworkTactics,
+    PinnedRegion,
+    operational_batcher,
+    tactical_batcher,
+)
+from .encoding import TACTICAL_SIZE
+from .inference import Batcher
+from .layers import LearntOperations, LearntTactics
+from .net import OperationalNet, TacticalNet
+from .ops_arena import CATCHMENT_RADIUS, GARRISON_SCALE, HORIZON_MS, SCRIPT_TACTICS, OpsArena
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +59,76 @@ def _arena_seed(base_seed: int, session, arms: int = 1) -> int:
     return base_seed + INSTANCE_STRIDE * session.instance + len(session.records) // max(1, arms)
 
 
-def _arm(arguments, our: str, arms: int = 1, net=None, device=None, batcher=None):
+@dataclass(frozen=True)
+class FrozenTactics:
+    """The tactical layer an arena run does its fighting under, and the name a journal writes it down by.
+
+    Empty when a run named no tactical parameters, and then the arena builds the handwritten `Tactics` on both sides for itself, which is what every measurement taken on this arena so far was made under. Given parameters, `build` is the factory the arena calls once for each side, `batcher` is the single inference server the one network answers through, and `name` identifies the parameters themselves so that a later comparison can refuse to pair two runs made under different fighters.
+    """
+
+    build: Optional[Callable] = None
+    batcher: Optional[Batcher] = None
+    name: str = SCRIPT_TACTICS
+
+    def stop(self) -> None:
+        """Ends the inference server, if this run started one. A run fighting under the handwritten layer has nothing to tear down."""
+        if self.batcher is not None:
+            self.batcher.stop()
+
+
+def _digest(path: str) -> str:
+    """What a set of parameters is called in a journal: the first half of the SHA-256 of the file's own bytes.
+
+    The parameters themselves and not the path they were read from. A path is a nickname that changes underneath itself — a tactical training run overwrites whatever its `--save` names, every time it is run — so two runs a week apart would claim one instrument, would be paired board by board, and would report the change of fighter as a difference between the operational arms, which is exactly the silent misreading the paired comparison exists to refuse. The file is tens of kilobytes and is read once at the start of a run, and the runner logs the path beside the digest so a person can tie the two together.
+    """
+    with open(path, "rb") as handle:
+        return "sha256:" + hashlib.sha256(handle.read()).hexdigest()[:16]
+
+
+def frozen_tactics(path: Optional[str], device_name: Optional[str] = None) -> FrozenTactics:
+    """Trained tactical parameters read off a file and made into the layer that fights, frozen, beneath BOTH sides of the arena. Nothing at all when no path was given, which leaves the arena to build the handwritten ladder for itself.
+
+    Both sides, because the arena builds its two tactical layers from the one factory it is handed and there is deliberately no way to hand it two. Putting a trained fighter on one side only would plainly stop the two sides being exchangeable, and the script arm's pooled self-play mean — the arena's one check on whether the board leans — would no longer have to be nought. It is also what the project's learning order means when it says the operational layer is trained against a frozen tactical layer: the frozen layer is the whole environment's fighting, not our own side's.
+
+    The same layer on both sides is the least a mirror requires and it is not a guarantee. The other side's view turns the ownership flags over without reflecting the coordinates, so the two sides are given one function on inputs congruent in meaning and not in place; a handwritten ladder reading distances and strengths is indifferent to that and a network need not be. A run made under frozen tactical parameters is therefore a different instrument in the strict sense — it pairs only with runs made under the same parameters, which the journal records so the comparison can refuse rather than be trusted, and its script arm has to re-pass the self-play zero before any arm measured beside it is believed.
+
+    One network and one batching server for the run, and a fresh layer object per side per episode. One network is the point of batching at all: every request from both sides of every instance then meets in the same window, where two networks would halve the batch per call and buy nothing. The layer objects cannot be shared, because a tactical layer keeps per-side state — what each of its squads has destroyed, and the board it last saw — and the two sides are handed different boards.
+
+    Read at its likeliest departure rather than drawn from, on both the batcher and the decider, since one of them answers when there is a batcher and the other when there is not. Drawing is the exploration a run needs of the layer it is training, and this layer is not being trained; it would also add a second source of difference between the sides on top of the one the coordinates already carry, and a deterministic layer at least leaves the self-play zero something it can repeat.
+    """
+    if not path:
+        return FrozenTactics()
+    if not os.path.exists(path):
+        # Refused rather than started from nothing, unlike the tolerant load a training run gives the layer it is about to train. Beginning from a fresh policy is meaningful for the layer being learnt and is never meaningful for the instrument beneath it: a mistyped path would leave a randomly initialised fighter under the whole arena, and the run would be journalled as having been made under trained parameters with nothing downstream able to tell.
+        raise SystemExit("no tactical parameters at %s, so there is nothing to freeze under the arena" % path)
+    device = _device(device_name)
+    state = torch.load(path, map_location=device)
+    # An operational network's file has a `body.0.weight` too, so the test that catches parameters of the wrong layer handed to this option is the width of the input the first layer reads. A file that carries no first layer at all fails the same test and is refused the same way; the strict load below is the backstop for everything subtler than a different layer.
+    weight = state.get("body.0.weight") if isinstance(state, dict) else None
+    features = int(weight.shape[1]) if weight is not None and weight.dim() == 2 else None
+    if features != TACTICAL_SIZE:
+        raise SystemExit("the parameters at %s are not a tactical layer's: their first layer reads %s feature(s) "
+                         "where a tactical layer reads %d, which is what another layer's parameters look like here"
+                         % (path, "none" if features is None else features, TACTICAL_SIZE))
+    # The width is read off the file rather than asked for as a flag. The first layer is one linear map from the tactical features to the width, so the file states its own width, and a flag that had to be kept in step with a file would only ever fail a load that was going to succeed. The duel needs a width because it can also build a fresh network; here there is never a fresh network.
+    net = TacticalNet(width=int(weight.shape[0])).to(device)
+    net.load_state_dict(state)
+    batcher = tactical_batcher(net, device=device, greedy=True)
+    name = _digest(path)
+
+    def build(session, catalogue):
+        # No rollout: this layer is read and not learnt from, so with nowhere to record a decision it records none. That is the argument that matters here rather than thrift — the arena's operational layer records its own decisions against the very same squad ids, so a tactical layer handed the training run's buffer would splice tactical decisions into the operational trajectories and the trainer would feed them to a network that reads a different state and answers a different question.
+        #
+        # The layer's `status_terminals` is left at its default, which allows the conditions written into a contract to end an errand, rather than turned off the way the engagement arena's duel turns it off. That flag is inert without a rollout, so nothing is paid either way; it is set truthfully because this board reissues contracts every operational period while a constructed fight is one contract that nothing reissues, and a future reader must not find a lie here.
+        return LearntTactics(session, catalogue, NetworkTactics(net, device, batcher, greedy=True), None, -1)
+
+    log.info("both sides of the board will fight under the tactical parameters at %s (%s), read at their likeliest "
+             "departure and recording nothing", path, name)
+    return FrozenTactics(build=build, batcher=batcher, name=name)
+
+
+def _arm(arguments, our: str, arms: int = 1, net=None, device=None, batcher=None,
+         frozen: FrozenTactics = FrozenTactics()):
     """One `OpsArena` per episode of one arm, seeded so that every arm of the run meets the same boards.
 
     `script` on our side is the self-play zero: the same chain on both sides of the mirror, whose pooled score must be nought. `pin` is a layer that sends every squad to the lowest-numbered legal region and task, making no operational choice at all; subtracting it from the script arm board by board cancels the enemy and the board lean and leaves how much the script's careful deployment beat making no choice, which is the resolution the arena exists to produce. The enemy is always the script, so every arm is measured against one fixed opponent.
@@ -59,6 +140,8 @@ def _arm(arguments, our: str, arms: int = 1, net=None, device=None, batcher=None
     `concentrate` is the arm that does what the massed arm was supposed to do. It keeps the doctrine's own choice of task and overrides only the region, sending every squad at the single region the strategic layer wants most. On this arena the priorities sit on the contested regions alone, so that is every squad at one contest — concentration in the plain sense, made by replacing the choice rather than by removing a term from it.
 
     `learnt` is a trained network read from a file.
+
+    Whatever the arm, the tactical layer under both sides is whatever `frozen` carries: the handwritten ladder by default, and trained parameters where the run named some. Every arm of a run fights under the same one, which is what keeps the arms comparable to each other and what makes the run as a whole one instrument.
     """
     if our == "pin":
         operations = lambda session, catalogue: LearntOperations(session, catalogue, PinnedRegion(), None, -1)
@@ -74,7 +157,8 @@ def _arm(arguments, our: str, arms: int = 1, net=None, device=None, batcher=None
         operations = None
 
     def build(session) -> OpsArena:
-        return OpsArena(session, operations=operations, seed=_arena_seed(arguments.seed, session, arms),
+        return OpsArena(session, operations=operations, tactics=frozen.build, tactics_name=frozen.name,
+                        seed=_arena_seed(arguments.seed, session, arms),
                         horizon_ms=arguments.horizon * 1000, our_squads=arguments.squads,
                         catchment_radius=arguments.radius, contest_pairs=arguments.pairs,
                         garrison_scale=arguments.garrison)
@@ -212,6 +296,8 @@ def measure(arguments) -> Dict[str, Summary]:
         # An arena episode starts with nothing on the board: there is no command that removes a unit, so the only clean board to construct on is one nothing was ever put on.
         starting_units=0, arena=True,
     )
+    # The tactical layer beneath both sides first of all, so that a mistyped path is refused while the run has started nothing: no server, no inference thread and no game connected. It is one loader for both arms and every instance, exactly as the learnt arm's network is.
+    frozen = frozen_tactics(arguments.tactics, arguments.device)
     # A learnt arm reads one network off a file and shares it across every instance, built once here rather than per session for the same reason the training runner does: the network is what is being measured, and one copy batched across the instances is the whole point of batching the inference. The script, pin and massed arms need none of this.
     net = device = batcher = None
     if "learnt" in arguments.our:
@@ -226,11 +312,13 @@ def measure(arguments) -> Dict[str, Summary]:
         batcher = operational_batcher(net, device=device, greedy=True)
 
     count = len(arguments.our)
-    path = arguments.record or default_path("ops-" + "-".join(arguments.our))
+    # A run made under trained tactical parameters writes to a file of its own, because it is not the same instrument as a run made under the handwritten layer and the two must not land in one journal: a journal is opened for appending, and a board that appears twice in it cannot be told apart afterwards, so every repeated board would be dropped from every comparison. Named after the file the parameters came from, as the duel names its arms, which is a nickname rather than the identity — the identity is the digest each episode carries.
+    under = "-under-" + os.path.splitext(os.path.basename(arguments.tactics))[0] if arguments.tactics else ""
+    path = arguments.record or default_path("ops-" + "-".join(arguments.our) + under)
     settings = ServerSettings(
         host=arguments.host, port=arguments.port, instances=arguments.instances,
         episodes=arguments.episodes,
-        arms=[("ops-" + our, _arm(arguments, our, count, net, device, batcher)) for our in arguments.our],
+        arms=[("ops-" + our, _arm(arguments, our, count, net, device, batcher, frozen)) for our in arguments.our],
         assets=AssetPaths.at(arguments.assets) if arguments.assets else AssetPaths.default(),
         episode=episode,
         journal=Journal(path),
@@ -246,6 +334,7 @@ def measure(arguments) -> Dict[str, Summary]:
     finally:
         if batcher is not None:
             batcher.stop()
+        frozen.stop()
         if settings.journal is not None:
             settings.journal.close()
 
@@ -264,6 +353,10 @@ def measure(arguments) -> Dict[str, Summary]:
             for second in arguments.our[index + 1:]:
                 log.info("---- %s against %s, board by board ----", first, second)
                 compare(path, path, first_arm="ops-" + first, second_arm="ops-" + second)
+    if frozen.batcher is not None:
+        # Under a frozen tactical layer the fighting is the dominant inference load of the run and nothing else reports it: every squad of both sides asks it for a departure every tactical frame, against one operational request a squad a period. How that batches is the first thing to read a run's speed against, so it is said in the same words the engagement arena's runner says it in.
+        log.info("the frozen tactical layer's batched inference averaged %.1f per call over %d call(s)",
+                 frozen.batcher.batch_size, frozen.batcher.calls)
     return summaries
 
 
@@ -291,6 +384,8 @@ def main(argv=None) -> int:
     parser.add_argument("--our", choices=("script", "pin", "massed", "concentrate", "learnt"), action="append", default=None,
                         help="our side's operational layer, repeatable: the script chain (the self-play zero), a pinned deployment that makes no choice, the script with its crowding discount removed, which on this arena decides the same as the script, an arm that sends every squad at the single region the strategic layer wants most, or a learnt network read from --load. Give it more than once and every arm plays every board and the run reports the paired difference between every pair of arms itself; --episodes is per arm")
     parser.add_argument("--load", default=None, help="parameters for the learnt arm, read greedily")
+    parser.add_argument("--tactics", default=None,
+                        help="parameters for a trained tactical layer to be put, frozen, under BOTH sides of the board, read at its likeliest action and recording nothing; left out, both sides fight the handwritten layer, which is what every measurement so far was made under; given, the run is a different instrument and its journal says so, so it pairs only with runs made under the same parameters")
     parser.add_argument("--device", default=None)
     parser.add_argument("--radius", type=float, default=CATCHMENT_RADIUS, help="world units a contest's catchment disc reaches; sized to the engagement standoff so an assaulting squad registers")
     parser.add_argument("--garrison", type=float, default=GARRISON_SCALE,

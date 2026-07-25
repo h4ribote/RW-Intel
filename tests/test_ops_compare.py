@@ -25,13 +25,18 @@ class _Session:
 
 
 def _entry(instance=0, episode=1, seed=60001, score=0.0, scored=True, arm="ops-learnt",
-           map_name="Hills", horizon_ms=300000, radius=400.0, squads=4, pairs=2, board=0):
+           map_name="Hills", horizon_ms=300000, radius=400.0, squads=4, pairs=2, board=0,
+           tactics=None):
+    statistics = {"scored": scored, "side_score": score, "board": board, "horizon_ms": horizon_ms,
+                  "radius": radius, "squads": squads, "pairs": pairs}
+    if tactics is not None:
+        # Left out of the record entirely rather than written as nothing, because that is what a journal from before the tactical layer was written down actually looks like, and reading those is the case the default exists for.
+        statistics["tactics"] = tactics
     return {
         "arm": arm, "instance": instance, "episode": episode,
         "settings": {"map": map_name, "opponents": 1, "difficulty": 1, "credits": 0,
                      "starting_units": 0, "income": 1.0, "fog": 0, "arena": True, "seed": seed},
-        "statistics": {"scored": scored, "side_score": score, "board": board, "horizon_ms": horizon_ms,
-                       "radius": radius, "squads": squads, "pairs": pairs},
+        "statistics": statistics,
     }
 
 
@@ -153,8 +158,12 @@ def test_a_board_journalled_twice_is_dropped_rather_than_picked_from(tmp_path):
 
 
 def test_two_runs_under_different_instruments_are_not_compared(tmp_path):
-    """The catchment radius, the horizon, the staged squads, the contest pairs and the episode settings all change what is being measured. Two runs that disagree on any of them are two arenas, and their difference is not a difference between arms."""
-    for changed in ({"radius": 250.0}, {"horizon_ms": 120000}, {"squads": 6}, {"pairs": 3}, {"map_name": "Lake"}):
+    """The catchment radius, the horizon, the staged squads, the contest pairs, the tactical layer that did the fighting beneath both sides and the episode settings all change what is being measured. Two runs that disagree on any of them are two arenas, and their difference is not a difference between arms.
+
+    The tactical layer belongs in that list for a stronger reason than most of them, not a weaker one: the fighting under an operational choice is the whole of what turns a deployment into a share of a disc, so a different fighter moves the disc tallies, the rate at which a garrison holds its own ground, and the reach a squad ends at — which is what the horizon and the catchment radius were tuned against in the first place.
+    """
+    for changed in ({"radius": 250.0}, {"horizon_ms": 120000}, {"squads": 6}, {"pairs": 3},
+                    {"map_name": "Lake"}, {"tactics": "sha256:beefbeefbeefbeef"}):
         first = _journal(tmp_path, "first.jsonl", [_entry(instance=0, episode=e, score=0.1 * e) for e in (1, 2, 3)])
         second = _journal(tmp_path, "second.jsonl",
                           [_entry(instance=0, episode=e, score=0.0, arm="ops-pin", **changed) for e in (1, 2, 3)])
@@ -171,6 +180,29 @@ def test_the_signature_ignores_the_seed_and_the_arm():
     """Which arm played and which board it drew are what a comparison is made of; they must not be what stops it happening."""
     assert signature(_entry(seed=1, arm="ops-pin")) == signature(_entry(seed=999, arm="ops-learnt"))
     assert signature(_entry(radius=400.0)) != signature(_entry(radius=250.0))
+
+
+def test_a_journal_that_names_no_tactical_layer_reads_as_the_handwritten_one(tmp_path):
+    """Every journal written before the tactical layer was recorded came from a runner that had no way to put anything but the handwritten ladder under the arena, so a record naming no layer names that one.
+
+    This is a deliberate exception to the rule that a field a journal does not carry reads as nothing on both sides and so can neither make two runs disagree nor make them agree. The two cases are genuinely different: a record carrying no catchment radius could have been drawn at any radius the flag allowed, whereas a record carrying no tactical layer could only have been fought under the one. Without the exception every journal already on disk would stop pairing with every new one, which would be refusing over a difference that does not exist.
+    """
+    assert signature(_entry()) == signature(_entry(tactics="script"))
+    assert signature(_entry()) != signature(_entry(tactics="sha256:beefbeefbeefbeef"))
+
+    old = _journal(tmp_path, "old.jsonl", [_entry(instance=0, episode=e, score=0.1 * e) for e in (1, 2, 3)])
+    named = _journal(tmp_path, "named.jsonl",
+                     [_entry(instance=0, episode=e, score=0.0, arm="ops-pin", tactics="script")
+                      for e in (1, 2, 3)])
+    paired = compare(old, named)
+    assert paired is not None and paired.paired.n == 3
+
+    # And a run made under trained parameters is a different instrument from both of them.
+    trained = _journal(tmp_path, "trained.jsonl",
+                       [_entry(instance=0, episode=e, score=0.0, arm="ops-pin",
+                               tactics="sha256:beefbeefbeefbeef") for e in (1, 2, 3)])
+    assert compare(old, trained) is None
+    assert compare(named, trained) is None
 
 
 def test_a_paired_difference_resolves_only_when_its_interval_excludes_nought():

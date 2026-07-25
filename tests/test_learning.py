@@ -17,6 +17,7 @@ import os
 import random
 import sys
 import tempfile
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -34,7 +35,7 @@ from rwintel.learn.arena import (
     STRENGTH_SLOPE_KILLS,
     Engagement,
 )
-from rwintel.learn.deciders import Choice
+from rwintel.learn.deciders import Choice, NetworkTactics
 from rwintel.learn.encoding import (
     OPERATIONAL_SIZE,
     REGION_FEATURES,
@@ -51,6 +52,8 @@ from rwintel.learn.encoding import (
 from rwintel.learn.imitation import Sample, TeacherMismatch, fit, read_teacher
 from rwintel.learn.layers import LearntOperations, LearntTactics
 from rwintel.learn.net import OperationalNet, TacticalNet
+from rwintel.learn.ops_arena import SCRIPT_TACTICS
+from rwintel.learn.ops_run import frozen_tactics
 from rwintel.learn.reward import (
     COMPLETE_REWARD,
     DISCOUNT,
@@ -1595,6 +1598,108 @@ def test_script_and_posture_arms_still_build_without_a_tensor_library():
     arms, batchers = eval_arms.build_all(["script", "defend"])
     assert [name for name, _ in arms] == ["script", "defend"]
     assert batchers == []
+
+
+# ---- the tactical layer frozen under the operations arena -----------------------------------
+
+def test_naming_no_tactical_parameters_leaves_the_arena_its_handwritten_fighter():
+    """The half of the option that has to cost nothing: no path, no file read, no network built, no inference thread started, and no factory handed to the arena, which then builds the handwritten ladder for itself on both sides. That is the layer every measurement taken on this arena so far was made under, and the name a journal writes for it is the word a comparison reads as exactly that."""
+    threads = threading.active_count()
+    frozen = frozen_tactics(None)
+    assert frozen.build is None and frozen.batcher is None
+    assert frozen.name == SCRIPT_TACTICS
+    assert threading.active_count() == threads
+    # Torn down the same way whether or not it started anything, so neither runner has to ask which case it is in.
+    frozen.stop()
+
+
+def test_a_frozen_tactical_layer_reads_greedily_records_nothing_and_shares_one_network():
+    """What the runners put under both sides of the arena: one network behind one batching server, a fresh layer object per side, read at its likeliest departure, and handed no rollout at all.
+
+    Each of those is load-bearing. One network is what makes every request from both sides of every instance meet in one batch, where two would halve the batch per call and buy nothing. Separate layer objects are forced by the per-side state a tactical layer keeps. Greedy on the batcher as well as on the decider, because the batcher's flag is what answers when there is a batcher and the decider's when there is not, and drawing is exploration this layer is not being asked for. No rollout, because the operational layer above records against the very same squad ids and a shared buffer would splice two action spaces into one trajectory.
+    """
+    torch.manual_seed(1234)
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "tactics.pt")
+        torch.save(TacticalNet().state_dict(), path)
+        frozen = frozen_tactics(path)
+        try:
+            assert frozen.build is not None and frozen.batcher is not None
+            ours = frozen.build(None, _CATALOGUE)
+            theirs = frozen.build(None, _CATALOGUE)
+            assert isinstance(ours, LearntTactics) and isinstance(theirs, LearntTactics)
+            assert ours is not theirs
+            for layer in (ours, theirs):
+                assert layer.rollout is None, "a layer that is read rather than learnt from must record nothing"
+                assert layer.instance == -1
+                assert isinstance(layer.decider, NetworkTactics)
+                assert layer.decider.greedy and layer.decider.batcher is frozen.batcher
+            assert ours.decider.net is theirs.decider.net, "the two sides are fighting under two networks"
+
+            # The server itself answers greedily, which is the flag that decides on the live path. A freshly built policy is initialised nearly uniform on purpose, so a server that drew from it would not answer alike twenty times running.
+            request = ([0.0] * TACTICAL_SIZE, [1.0] * TACTICAL_ACTIONS)
+            answers = {frozen.batcher.submit(request).action for _ in range(20)}
+            assert len(answers) == 1, "the inference server is drawing rather than taking the likeliest departure"
+
+            # The name written into every episode is the parameters and not the path: the same file twice is one instrument, and different parameters are a different one however they are named on disk.
+            again = frozen_tactics(path)
+            try:
+                assert again.name == frozen.name and frozen.name.startswith("sha256:")
+            finally:
+                again.stop()
+            other = os.path.join(directory, "other.pt")
+            torch.save(TacticalNet().state_dict(), other)
+            different = frozen_tactics(other)
+            try:
+                assert different.name != frozen.name
+            finally:
+                different.stop()
+        finally:
+            frozen.stop()
+
+
+def test_missing_tactical_parameters_are_refused_before_any_inference_thread_exists():
+    """Refused rather than started from nothing, unlike the tolerant load a training run gives the layer it is about to train. Starting from a fresh policy is meaningful for the layer being learnt and never for the instrument beneath it: a mistyped path would leave a randomly initialised fighter under the whole arena, and the run would be journalled as having been made under trained parameters with nothing downstream able to tell.
+
+    And refused first, before anything is built, so the failure leaves no inference thread running against a run that will never start.
+    """
+    threads = threading.active_count()
+    try:
+        frozen_tactics("local/there-are-no-tactical-parameters-here.pt")
+    except SystemExit as refusal:
+        assert "there-are-no-tactical-parameters-here.pt" in str(refusal)
+        assert threading.active_count() == threads
+        return
+    raise AssertionError("a missing tactical file was not refused")
+
+
+def test_another_layers_parameters_handed_to_the_arena_are_refused_by_name():
+    """An operational network's file carries a `body.0.weight` too, so what tells the two apart is the width of the input the first layer reads. Handed the wrong file, the run says which file, how many features it found and how many a tactical layer reads, rather than failing somewhere inside the tensor library where the answer is a shape mismatch and the question is which flag was mistyped."""
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "operations.pt")
+        torch.save(OperationalNet().state_dict(), path)
+        found = int(torch.load(path, map_location="cpu")["body.0.weight"].shape[1])
+        try:
+            frozen_tactics(path)
+        except SystemExit as refusal:
+            message = str(refusal)
+            assert path in message and str(found) in message and str(TACTICAL_SIZE) in message
+            return
+        raise AssertionError("an operational network was accepted as a tactical one")
+
+
+def test_the_tactical_width_is_read_off_the_file_rather_than_asked_for_as_a_flag():
+    """The first layer is one map from the tactical features to the width, so the file states its own width and there is no flag to keep in step with it. A flag would only ever be a way to fail a load that was going to succeed — and unlike the duel, which can also build a fresh network, there is never a fresh network here."""
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "narrow.pt")
+        torch.save(TacticalNet(width=32).state_dict(), path)
+        frozen = frozen_tactics(path)
+        try:
+            layer = frozen.build(None, _CATALOGUE)
+            assert layer.decider.net.body[0].out_features == 32
+            assert layer.decider.net.body[0].in_features == TACTICAL_SIZE
+        finally:
+            frozen.stop()
 
 
 if __name__ == "__main__":

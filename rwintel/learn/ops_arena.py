@@ -72,6 +72,9 @@ CREDITS = ("region", "marginal")
 #: Which of them a run uses unless it says otherwise. The region reading is the one every measurement so far was taken under, so it stays the default until the marginal one has been measured against it on the same boards.
 CREDIT = "region"
 
+#: What a run calls the tactical layer that fought beneath both sides when that layer was the handwritten `Tactics` ladder — which is what the arena builds for itself when nothing else is handed to it, and what every measurement taken on this arena so far was made under. A run that froze trained tactical parameters under the arena instead names them by their content, so the two can never be mistaken for each other afterwards.
+SCRIPT_TACTICS = "script"
+
 #: The doctrines a staged squad may be drawn from. Engineers are excluded because the economy drives them and a contract would land on top of a placement; garrisons are the defenders, drawn separately and never staged as a taskable squad.
 _DOCTRINES = (Doctrine.VANGUARD, Doctrine.GARRISON, Doctrine.RAID)
 
@@ -138,6 +141,8 @@ class OpsStatistics:
     squads: int = 0
     pairs: int = 0
     garrison: float = 0.0
+    #: Which tactical layer did the fighting beneath both sides: the handwritten ladder, or trained parameters frozen under the arena and named by their content. It belongs with the draw settings above and meets their test word for word — it never reaches the episode settings, and two runs made under different ones are two different arenas. It is a stronger case than the garrison scale rather than a weaker one, because the fighting under an operational choice is the whole of what turns a deployment into a share of a disc: a different fighter moves the disc tallies, the rate at which a garrison holds its own ground through the horizon, the reach a squad ends at, and therefore the horizon and the catchment radius that were both tuned to where an assaulting squad halts.
+    tactics: str = SCRIPT_TACTICS
     #: Diagnostics that say whether the staged squads — the thing whose deployment the arena exists to measure — actually reached and contested the catchments, or whether the score was decided by the pre-placed garrisons alone. If the squads never register in a catchment the self-play zero is trivially met by the mirror garrisons and the arena resolves nothing.
     our_alive: int = 0
     our_in_catchment: int = 0
@@ -160,6 +165,7 @@ class OpsStatistics:
                 "our_in_catchment": self.our_in_catchment, "our_reach": round(self.our_reach, 1),
                 "board": self.board, "horizon_ms": self.horizon_ms, "radius": round(self.radius, 1),
                 "squads": self.squads, "pairs": self.pairs, "garrison": round(self.garrison, 1),
+                "tactics": self.tactics,
                 "terminals": self.terminals, "periods": self.periods, "errands": self.errands}
 
 
@@ -171,13 +177,20 @@ class OpsArena(Arena):
     Subclasses the engagement arena so every geometry and spawn helper — `_sites`, `_site`, `_rows`, `_interleave`, `_commissioned`, `_record`, `_health_worth`, the catalogue and the seeded random — is inherited unchanged and the two arenas cannot drift in how they place or read a board.
     """
 
-    def __init__(self, session, operations=None, opponent=None, tactics=None, seed: int = 0,
+    def __init__(self, session, operations=None, opponent=None, tactics=None,
+                 tactics_name: str = SCRIPT_TACTICS, seed: int = 0,
                  horizon_ms: int = HORIZON_MS, our_squads: int = OUR_SQUADS,
                  catchment_radius: float = CATCHMENT_RADIUS, contest_pairs: int = CONTEST_PAIRS,
                  opening_baseline: float = OPENING_BASELINE, credit: str = CREDIT,
                  garrison_scale: float = GARRISON_SCALE) -> None:
         super().__init__(session, seed=seed)  # inherits catalogue, random, _sites and every spawn helper
         # The layer under study on this side (a learnt operational layer, or the script for the baseline) and what it is measured against on the other (the script for a duel, its own policy for self-play). Built here rather than handed in already made, for the same reason the engagement arena builds its layers here: both sides must read the same type catalogue as the arena that spawns their units, or a unit would be sorted into a different role on each side. The tactical layer below both actually moves the units and is frozen.
+        #
+        # One tactical factory serves BOTH sides, which is deliberate and not a shortcut. A trained tactical layer frozen under the arena therefore fights for the enemy exactly as it fights for us, which is the least a mirror can require: were only one side to fight with it the two sides would plainly stop being exchangeable, the script arm's pooled self-play mean would no longer have to be nought, and the arena would lose the only instrument that says whether the board leans. It is also what the learning order means by an operational layer trained against a frozen tactical layer — the whole environment's fighting is that layer, not one side's.
+        #
+        # It is the least a mirror requires and it is NOT enough on its own, which matters and must not be read the other way. The board is a point reflection about a centre, but the other side's view is built by turning the ownership flags over and not by reflecting the coordinates, so the two sides are handed the same function applied to inputs that are congruent in what they mean and not in where they are. A handwritten ladder reading distances and strengths comes out the same either way; a network need not, and nothing here can promise it does. So a frozen tactical layer makes the run a different instrument in the strict sense: the script arm's self-play zero has to be measured again under it before any arm measured beside it is believed, exactly as it had to be measured for the map and the catchment.
+        #
+        # Two layer objects rather than one, off whatever single network the factory closes over. A tactical layer keeps per-side state — what each of its squads has destroyed, and the board and moment it last saw — and the two sides are handed different boards, this side's view and the other side's inverted and rehomed one, so one shared object would fold the two sides' bookkeeping together and the mirror would stop being a mirror.
         self.our_ops = operations(session, self.catalogue) if operations else Operations(session, self.catalogue)
         self.their_ops = opponent(session, self.catalogue) if opponent else Operations(session, self.catalogue)
         self.our_tac = tactics(session, self.catalogue) if tactics else Tactics(session, self.catalogue)
@@ -218,9 +231,10 @@ class OpsArena(Arena):
         #: When each of this side's squads was last handed a contract, so that a fresh one can be told from the same one standing. A contract carries the moment it was issued and the operational layer only writes a new one when something about it changed, so a change in this figure is exactly one errand ending and another beginning.
         self._issued: Dict[int, int] = {}
         self._sandbox_sent = False
-        # The draw's settings are written into the statistics at construction rather than at scoring, so that an episode which never reaches its horizon still says under what instrument it was run.
+        # The draw's settings are written into the statistics at construction rather than at scoring, so that an episode which never reaches its horizon still says under what instrument it was run. The name of the tactical layer beneath both sides is one of them: whoever builds the arena is the only one who knows which parameters the factory closes over, and the arena cannot read it back off a layer afterwards.
         self.statistics = OpsStatistics(board=seed, horizon_ms=horizon_ms, radius=catchment_radius,
-                                        squads=our_squads, pairs=contest_pairs, garrison=garrison_scale)
+                                        squads=our_squads, pairs=contest_pairs, garrison=garrison_scale,
+                                        tactics=tactics_name)
 
     # ---- the one entry point (mirrors Arena.decide) ------------------------------------
 

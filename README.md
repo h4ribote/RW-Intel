@@ -176,9 +176,12 @@ python -m rwintel.learn duel --instances 8 --episodes 4
 
 **構築作戦アリーナの実行は、`rwintel.learn` のサブコマンドではなく独立した三つのモジュールである。** 場を測る `ops_run`、その上で作戦層を学習させる `ops_train`、書かれた journal を盤面ごとに突き合わせる `ops_compare` である。**前の二つは他の実行と同じく先に起動してからゲームを繋ぎ、三つ目はゲームを起動しない。** `ops_run --our` は繰り返せる指定で、渡した数だけアームが立ち、**盤面は全アームが打ち終わるまで進まないので、1 回の実行がそのまま対にした比較になる。**
 
+`ops_run` と `ops_train` の `--tactics` は、訓練済みの戦術層を**盤面の両側の下に凍結して置く**指定である。層は確率最大の行動で読まれ、rollout を渡さないので何も記録しない。**これがアーキテクチャの学習順序の後半、すなわち戦術層を先に定めて凍結し、作戦層だけを動かす一巡である。** 渡さなければ両側とも手書きの戦術層で、これまでの測定はすべてそちらで取ったものであり、何も変わらない。**渡した実行は別の計器であり、episode 記録に置いた層の名前(パラメータ本体の SHA-256)が入るので、`ops_compare` は異なる戦術層どうしを対にしない。**
+
 ```powershell
 python -m rwintel.learn.ops_run --instances 8 --episodes 10 --map Hills --our script --our pin --our concentrate
 python -m rwintel.learn.ops_train --instances 8 --episodes 40 --map Hills --load local\operations-bc.pt --warmup 5 --save local\ops-arena.pt
+python -m rwintel.learn.ops_train --instances 8 --episodes 40 --map Hills --tactics local\tactics.pt --load local\operations-bc.pt --warmup 5 --save local\ops-under-tactics.pt
 python -m rwintel.learn.ops_compare local\ops-eval-learnt.jsonl local\ops-eval-pin.jsonl
 ```
 

@@ -25,9 +25,11 @@ from rwintel.control.policy.contracts import (
     TaskContract,
 )
 from rwintel.control.policy.operations import Concentrated, Operations
-from rwintel.control.policy.view import WorldView
+from rwintel.control.policy.tactics import Tactics
+from rwintel.control.policy.view import WorldView, build as build_view
 from rwintel.data.regions import Region
-from rwintel.learn.layers import LearntOperations
+from rwintel.learn.encoding import OPERATIONAL_SIZE, TACTICAL_SIZE
+from rwintel.learn.layers import LearntOperations, LearntTactics
 from rwintel.learn.rollout import FIGHT_DISCOUNT, FIGHT_TRACE, Rollout, Step
 from rwintel.learn.ops_arena import (
     CATCHMENT_RADIUS,
@@ -38,6 +40,7 @@ from rwintel.learn.ops_arena import (
     OPENING_BASELINE,
     OUR_SQUADS,
     OURS,
+    SCRIPT_TACTICS,
     THEIRS,
     OpsArena,
     OpsStatistics,
@@ -81,11 +84,16 @@ _CATALOGUE = _Catalogue(_TYPES)
 
 
 class _Session:
-    """Enough of a session for the arena's geometry: the stable region table the map decomposition would provide, whose baseless sparring slot owns the enemy side, and a scenario sink that records the one order the deployment submits."""
+    """Enough of a session for the arena's geometry: the stable region table the map decomposition would provide, whose baseless sparring slot owns the enemy side, and a scenario sink that records the one order the deployment submits.
+
+    The type table and the asset tree are here as well, because the arena's real constructor builds its own catalogue out of them and its own command layers out of that; the tests that go through the constructor rather than assembling an arena field by field need both. No asset tree at all is the right answer for a session that never touched a game: the catalogue then carries the types and no producer links, which is everything the layers ask of it here.
+    """
 
     def __init__(self, regions, sparring_slot=1):
         self.regions = regions
         self.sparring_slot = sparring_slot
+        self.types = list(_TYPES)
+        self.assets = None
         self.calls = []
 
     def scenario(self, spawns, sandbox=None):
@@ -977,6 +985,127 @@ def test_the_massed_arm_is_the_ladder_with_only_its_spreading_term_removed():
     regions[1] = dataclasses.replace(regions[1], our_value=0.0)
     assert Operations(None, _CATALOGUE, crowding=0.0)._pick(view, orders, squad, None)[1].id == 2
     assert Operations(None, _CATALOGUE)._pick(view, orders, squad, None)[1].id == 2
+
+
+# ---- the tactical layer that fights beneath both sides --------------------------------------
+
+class _OneNetwork:
+    """Stands in for the single network and batching server a frozen tactical layer is read through, so a test can say whether both sides of the board were built off one of them or off two."""
+
+
+def test_both_sides_of_the_mirror_are_built_from_the_one_tactical_factory():
+    """The arena is handed one tactical factory and calls it once for each side, so trained parameters frozen under it fight for the enemy exactly as they fight for us. There is deliberately no way to put a fighter under one side alone: the board is a single reflection about one centre and the trust gate is the pooled self-play zero of the script arm, so two sides that fought differently would stop being exchangeable and that mean would no longer have to be nought.
+
+    What one factory must not mean is one layer. A tactical layer keeps per-side state — what each of its squads has destroyed, and the board it last saw — and the two sides are handed different boards, so the two objects have to be distinct while the network behind them is one. Both halves of that are checked here, because either one alone would look right.
+    """
+    session = _Session(_grid())
+    decider = _OneNetwork()
+    built = []
+
+    def tactics(given, catalogue):
+        built.append((given, catalogue))
+        return LearntTactics(given, catalogue, decider, None, -1)
+
+    arena = OpsArena(session, tactics=tactics, seed=5)
+    assert len(built) == 2, "the arena did not build both of its tactical layers from the factory it was handed"
+    # Both are handed the arena's own session and the arena's own catalogue, which is why the layers are built in here at all: a layer classifying a unit from some other type table would sort the same tank into a different role from the arena that spawned it.
+    assert all(given is session and catalogue is arena.catalogue for given, catalogue in built)
+    assert isinstance(arena.our_tac, LearntTactics) and isinstance(arena.their_tac, LearntTactics)
+    assert arena.our_tac is not arena.their_tac, "one shared layer would fold the two sides' bookkeeping together"
+    assert arena.our_tac.decider is decider and arena.their_tac.decider is decider, (
+        "the two sides are reading different networks, so they are not fighting under one frozen layer")
+
+    # Named no factory, the arena builds the handwritten ladder for itself on both sides, which is what every measurement taken on this arena so far was made under — and two of it, for the same reason.
+    plain = OpsArena(session, seed=5)
+    assert type(plain.our_tac) is Tactics and type(plain.their_tac) is Tactics
+    assert plain.our_tac is not plain.their_tac
+    # And nothing about the operational layers moved: with no operational factory both sides are still the script chain.
+    assert type(plain.our_ops) is Operations and type(plain.their_ops) is Operations
+
+
+def test_an_episode_says_which_tactical_layer_it_was_made_under_before_it_has_scored_anything():
+    """Two runs made under different tactical layers are two different instruments, and pairing them board by board would read the change of fighter as a difference between the operational arms. So the episode record has to carry which layer was beneath it, and carry it from construction rather than from scoring: an episode cut off before its horizon still has to say what instrument it was run on."""
+    session = _Session(_grid())
+    arena = OpsArena(session, tactics_name="sha256:0123456789abcdef", seed=5)
+    assert not arena.statistics.scored
+    assert arena.statistics.tactics == "sha256:0123456789abcdef"
+    assert arena.statistics.as_dict()["tactics"] == "sha256:0123456789abcdef"
+
+    # And a run that named nothing says so in the one word a comparison reads as the handwritten ladder.
+    assert OpsStatistics().tactics == SCRIPT_TACTICS
+    assert OpsArena(session, seed=5).statistics.as_dict()["tactics"] == SCRIPT_TACTICS
+
+
+def _tactical_board():
+    """A board with two regions and one enemy in front of one of our units, which is the least that makes both layers decide: the operational one needs somewhere legal to send a squad, and the tactical one needs something to depart from its contract about."""
+    regions = [
+        RegionState(id=1, resources=3, held_by_us=1, held_by_enemy=0, x=0.0, y=0.0,
+                    our_value=500.0, enemy_value=200.0, enemy_seen_at_ms=0, distance_from_home=300.0),
+        RegionState(id=2, resources=1, held_by_us=0, held_by_enemy=1, x=600.0, y=0.0,
+                    our_value=0.0, enemy_value=1000.0, enemy_seen_at_ms=0, distance_from_home=900.0),
+    ]
+    units = [_unit(1, 0.0, 0.0), _unit(2, 20.0, 0.0), _unit(9, 200.0, 0.0, hostile=1, type_index=1)]
+    observation = _observation(units=units, regions=regions)
+    return build_view(observation, _CATALOGUE, None, regions)
+
+
+def test_the_frozen_tactical_layer_is_handed_no_rollout_because_the_buffer_belongs_to_the_operational_one():
+    """Why the layer the runners freeze under the arena is built with no rollout, which is a correctness requirement and not thrift.
+
+    A trajectory is keyed by the instance and the squad, and the tactical layer under this board sees the very same squad records, with the very same slot ids, that the operational layer above is deciding about. Handed the training run's buffer it would file its own decisions under the operational layer's keys — a state of the tactical width and one action, spliced into a trajectory of operational states and region-and-task pairs — and the trainer would feed the lot to a network that reads neither. Its flush would also cut, and its close seal, whatever the operational layer had left live. The first half of this drives one decision of each layer about one squad through one buffer and shows the collision; nothing but the missing rollout prevents it.
+    """
+    view = _tactical_board()
+    orders = OperationsOrders(posture=Posture.ARM, priorities={1: 0.4, 2: 1.0}, offensive=True,
+                              loss_allowance=4000.0)
+    squad = SquadRecord(id=1, doctrine=Doctrine.VANGUARD, members=[1, 2], value=1000.0)
+    shared = Rollout()
+    # No decider on either: the inherited rule then decides and the layer writes down what it chose, which records a step of exactly the shape a learnt layer emits and needs no network here.
+    tactical = LearntTactics(None, _CATALOGUE, None, rollout=shared, instance=0)
+    operational = LearntOperations(None, _CATALOGUE, None, rollout=shared, instance=0)
+    for now in (1000, 2000):
+        # Twice, because a decision is paid and filed by the period after it: one period leaves it waiting.
+        operational.decide(view, orders, [squad], [], now)
+        tactical.decide(view, [squad], now)
+
+    trajectories = list(shared.done) + list(shared.live.values())
+    assert {trajectory.key for trajectory in trajectories} == {(0, squad.id)}, (
+        "the two layers filed under different keys, and the splice this argument prevents is not what is being shown")
+    widths = sorted(len(step.state) for trajectory in trajectories for step in trajectory.steps)
+    assert widths == sorted([TACTICAL_SIZE, OPERATIONAL_SIZE]), (
+        "one buffer under one key really does hold two action spaces' decisions, which is what the frozen layer must not do")
+
+    # And the layer as the runners build it: no rollout, so a whole episode of it records nothing, and what the operational buffer holds at the end is the operational decisions and only those.
+    arena = _standing_board()
+    rollout = Rollout(discount=FIGHT_DISCOUNT, trace=FIGHT_TRACE)
+    layer = LearntOperations(None, _CATALOGUE, None, rollout=rollout, instance=0, discount=1.0)
+    arena.our_ops = layer
+    arena.their_ops = _Chain([], "theirs")
+    # Built as the runners' loader builds it — the fourth argument, the rollout, left out. The decider is left out too, because what is under test is what the layer records and not what answers it.
+    arena.our_tac = LearntTactics(None, _CATALOGUE, None, None, -1)
+    arena.their_tac = LearntTactics(None, _CATALOGUE, None, None, -1)
+    assert arena.our_tac.rollout is None and arena.their_tac.rollout is None
+    arena.orders = OperationsOrders(posture=Posture.ARM, priorities=dict(arena.priorities),
+                                    offensive=True, loss_allowance=4000.0)
+    arena.squads = {1: _tasked(1, 4, [1])}
+    arena.enemy = {}
+    arena.until_ms = 999999
+    regions = [RegionState(id=region, resources=1, held_by_us=0, held_by_enemy=1, x=0.0, y=0.0,
+                           our_value=0.0, enemy_value=1000.0, enemy_seen_at_ms=0, distance_from_home=400.0)
+               for region in (4, 9)]
+
+    for period in range(3):
+        units = [_unit(1, 0.0, 0.0), _unit(2, 60.0, 0.0, hostile=1), _unit(3, 2000.0, 0.0)]
+        observation = _observation(units=units, regions=regions, game_time_ms=2000 * period)
+        arena._run(observation, build_view(observation, _CATALOGUE, None, regions), Action(), 2000 * period)
+    arena._score(_observation(units=[_unit(1, 0.0, 0.0), _unit(3, 2000.0, 0.0)], regions=regions,
+                              game_time_ms=999999))
+    arena.close()
+
+    steps = [step for trajectory in rollout.done for step in trajectory.steps]
+    assert steps, "the operational layer recorded nothing, so there is no buffer to say anything about"
+    assert all(len(step.state) == OPERATIONAL_SIZE for step in steps), (
+        "a tactical decision is in the operational buffer, which is what a shared rollout would put there")
+    assert rollout.live == {}, "the episode closed with a trajectory still open"
 
 
 if __name__ == "__main__":
