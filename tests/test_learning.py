@@ -776,8 +776,8 @@ class _Fixed:
     def __init__(self, action=0):
         self.action = action
 
-    def choose(self, state, mask):
-        return Choice(action=self.action, log_prob=-1.6, value=0.25)
+    def choose_many(self, requests):
+        return [Choice(action=self.action, log_prob=-1.6, value=0.25) for _ in requests]
 
 
 def _skirmish():
@@ -1371,6 +1371,71 @@ def test_the_handwritten_layer_reaches_the_two_added_departures():
     assert departure(tanks_only, _squad(status=Status.ACTIVE, losses=0.0)) == Deviation.FOCUS
 
 
+def test_the_handwritten_ladder_decides_a_whole_side_as_it_decides_one_squad():
+    """A period is read squad by squad and then answered in one call for the whole side, which is the seam a learnt layer replaces so that a side of several squads costs one batching window rather than one window each. The handwritten ladder has no decider and must be entirely unaffected by that: it is the baseline every measurement in this project is taken against, so a change to what it decides would invalidate all of them.
+
+    This is the golden statement of that. One board, five squads landing on five different rungs at once, plus the two kinds of squad the layer reports on and does not order: one whose tactical command a human holds, and one with nothing of it left on the board. What is pinned is the exact list of deviations in squad order, that the two unordered squads appear among the reports and in no deviation, and that a report is filed for every squad in the order the squads were handed in.
+    """
+    import dataclasses
+
+    from rwintel.control.policy.tactics import HUMAN_TACTICS
+    from rwintel.wire.observation import SquadState
+
+    units = []
+    squads = []
+
+    def band(index, members, hit, enemy_type, enemy=True, **overrides):
+        """One squad well away from every other, so that no squad's threats are another's."""
+        base = index * 3000.0
+        ids = [10 * index + n for n in range(members)]
+        for offset, unit_id in enumerate(ids):
+            units.append(_unit(unit_id, base + 100.0 + 20.0 * offset, 100.0, type_index=enemy_type[0],
+                               hit=hit))
+        if enemy:
+            units.append(_unit(900 + index, base + 210.0, 110.0, type_index=enemy_type[1], hostile=1))
+        squads.append(_squad(id=index, members=ids, x=base + 120.0, y=100.0, contract=True,
+                             **overrides))
+
+    # Reported losing and heavily spent, which is the whole way out of the fight rather than a step back.
+    band(0, 3, 100, (0, 0), status=Status.LOSING)
+    # Spent against its budget but not reported losing, which is the short step back.
+    band(1, 3, 100, (0, 0), status=Status.ACTIVE)
+    # Bunched, freshly hit, and an artillery in range: one weapon covering the squad.
+    band(2, 3, 100, (0, 1), status=Status.ACTIVE, spread=60.0)
+    # Artillery of our own out-reaching the tank shooting at it, which is worth backing away while firing.
+    band(3, 3, 9999, (1, 0), status=Status.ACTIVE)
+    # Nothing shooting and nothing near, which is the quiet case: the squad is still ordered, and what it is ordered is to hold.
+    band(4, 3, 9999, (0, 0), enemy=False, status=Status.ACTIVE)
+    # A human is driving these units, so the layer reports and orders nothing.
+    band(5, 3, 100, (0, 0), status=Status.ACTIVE, commander=HUMAN_TACTICS)
+    # Listed members, none of them on the board.
+    squads.append(_squad(id=6, members=[70, 71], x=18000.0, y=100.0))
+
+    # The losses each mission has cost, which is what puts the first two squads over their budgets and leaves the rest under theirs.
+    spent = {0: 900.0, 1: 900.0}
+    rows = [SquadState(id=squad.id, commander=squad.commander, units=len(squad.members),
+                       value=squad.value, formed_value=squad.formed_value, x=squad.x, y=squad.y,
+                       spread=squad.spread, task_type=0, stance=0, target_region=1,
+                       status=int(squad.status), cost_budget=1000.0, budget_share=0.5,
+                       deadline_ms=90000, issued_at_ms=20000, losses=spent.get(squad.id, 0.0))
+            for squad in squads]
+    observation = dataclasses.replace(
+        _observation(units, [_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)]), squads=rows)
+    view = build_view(observation, _CATALOGUE, None)
+
+    deviations, reports = Tactics(None, _CATALOGUE).decide(view, squads, 21000)
+    assert [(d.squad, d.deviation) for d in deviations] == [
+        (0, Deviation.WITHDRAW_FAR),
+        (1, Deviation.WITHDRAW),
+        (2, Deviation.SPREAD),
+        (3, Deviation.KITE),
+        (4, Deviation.HOLD),
+    ]
+    # Reported on but never ordered, which is the one asymmetry between the two lists.
+    assert [report.squad for report in reports] == [0, 1, 2, 3, 4, 5, 6]
+    assert 5 not in [d.squad for d in deviations] and 6 not in [d.squad for d in deviations]
+
+
 # ---- which side of a fight is decided first --------------------------------------------------
 
 class _Recorder:
@@ -1700,6 +1765,132 @@ def test_the_tactical_width_is_read_off_the_file_rather_than_asked_for_as_a_flag
             assert layer.decider.net.body[0].in_features == TACTICAL_SIZE
         finally:
             frozen.stop()
+
+
+# ---- one ask a side, not one a squad ---------------------------------------------------------
+
+class _Counting:
+    """A batching server's evaluate that writes down every batch it was handed and answers each row from its own place in that batch, so a test can tell one call of four rows from four calls of one and can tell each caller's answer from its neighbour's."""
+
+    def __init__(self):
+        self.batches = []
+
+    def __call__(self, requests):
+        self.batches.append(list(requests))
+        return [(len(self.batches), index) for index in range(len(requests))]
+
+
+def test_a_sides_squads_are_one_ask_of_the_inference_server_rather_than_one_each():
+    """The defect this exists to keep out: a tactical layer that submitted its squads one at a time paid a full batching window for each, because a submission queues its request and then blocks on it, so the second was not even in the queue until the first had been answered. The window is sized against a twenty millisecond wall period, so a side of four squads spent four windows a frame and the decision lag stopped being the one period the interface promises and became a lag that depends on how many squads a side happens to have. There is no timing here: what is measured is that the whole side arrives at the server in one batch.
+
+    The rows are checked to be in squad order and each squad's departure to be its own row's answer, because a fix that handed the side one answer for all of them, or that zipped the answers onto the squads the wrong way round, would batch just as well and decide wrongly.
+    """
+    from rwintel.learn.inference import Batcher
+
+    batches = []
+
+    def evaluate(requests):
+        batches.append(list(requests))
+        # A different departure for every row, so that an answer handed to the wrong squad is visible.
+        return [Choice(action=index % len(Deviation)) for index in range(len(requests))]
+
+    batcher = Batcher(evaluate)
+    try:
+        layer = LearntTactics(None, _CATALOGUE, NetworkTactics(None, None, batcher), None, 0)
+        units, squads = [], []
+        # Squads of different sizes, because the first tactical feature is the member count and it is therefore what says which row of the batch belongs to which squad.
+        for index, size in enumerate((2, 3, 4, 5)):
+            base = index * 3000.0
+            ids = [10 * index + n for n in range(size)]
+            units += [_unit(unit_id, base + 100.0 + 20.0 * n, 100.0, hit=100)
+                      for n, unit_id in enumerate(ids)]
+            units.append(_unit(900 + index, base + 210.0, 110.0, hostile=1))
+            squads.append(_squad(id=index, members=ids, x=base + 120.0, y=100.0))
+        view = _view(units, [_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)])
+
+        deviations, _ = layer.decide(view, squads, 21000)
+
+        assert batcher.calls == 1, "the side was submitted one squad at a time, a batching window each"
+        assert batcher.served == 4 and batcher.batch_size == 4.0
+        batch, = batches
+        assert len(batch) == 4
+        # Ascending because the squads were built with ascending member counts and read in that order.
+        counts = [state[0] for state, _ in batch]
+        assert counts == sorted(counts) and len(set(counts)) == 4
+        # Each squad answered from its own row of the batch rather than all of them from one.
+        assert [(d.squad, int(d.deviation)) for d in deviations] == [(0, 0), (1, 1), (2, 2), (3, 3)]
+    finally:
+        batcher.stop()
+
+
+def test_the_steps_of_a_period_are_recorded_one_a_squad_and_in_the_order_they_were_read():
+    """What the trainer is shown must not depend on the side being asked in one call rather than in several. A rollout that reordered its steps, or that filed one squad's state under another squad's number, would train perfectly smoothly on decisions credited to the wrong board — so the recording is pinned here to one step a squad, filed under that squad's own number, holding that squad's own state, in the order the squads were read."""
+    rollout = Rollout()
+    layer = LearntTactics(None, _CATALOGUE, _Fixed(action=int(Deviation.KITE)), rollout=rollout,
+                          instance=0)
+    units, squads = [], []
+    for index, size in enumerate((2, 3, 4)):
+        base = index * 3000.0
+        ids = [10 * index + n for n in range(size)]
+        units += [_unit(unit_id, base + 100.0 + 20.0 * n, 100.0, hit=100)
+                  for n, unit_id in enumerate(ids)]
+        units.append(_unit(900 + index, base + 210.0, 110.0, hostile=1))
+        squads.append(_squad(id=index, members=ids, x=base + 120.0, y=100.0))
+    view = _view(units, [_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)])
+
+    layer.decide(view, squads, 21000)
+
+    assert list(layer.pending) == [0, 1, 2]
+    steps = [layer.pending[squad_id] for squad_id in (0, 1, 2)]
+    assert [step.squad for step in steps] == [0, 1, 2]
+    # The member count is the first tactical feature, so an ascending run of it says each step holds the state of the squad it is filed under.
+    sizes = [step.state[0] for step in steps]
+    assert sizes == sorted(sizes) and len(set(sizes)) == 3
+    # A mask of its own per step, because a shared list object would let one step's mask be edited through another's.
+    assert len({id(step.mask) for step in steps}) == 3
+    assert all(step.mask == [1.0] * len(Deviation) for step in steps)
+
+
+def test_the_batching_server_answers_a_group_queued_together_in_one_call():
+    """The half of the fix that lives in the server. A caller with several requests cannot loop over the single submission, because that one queues a ticket and then blocks on it; the group has to be queued before any of it is waited on. Queued that way it meets the window once and is answered in one call, and a group larger than the batch cap is answered over consecutive calls rather than refused, with every answer still coming back to the request that asked for it."""
+    from rwintel.learn.inference import Batcher
+
+    evaluate = _Counting()
+    batcher = Batcher(evaluate)
+    try:
+        assert batcher.submit_many([("a", i) for i in range(5)]) == [(1, i) for i in range(5)]
+        assert batcher.calls == 1 and batcher.served == 5
+        # Nothing asked is nothing waited for: an empty side must not spend a window being handed back nothing.
+        assert batcher.submit_many([]) == [] and batcher.calls == 1
+    finally:
+        batcher.stop()
+
+    evaluate = _Counting()
+    capped = Batcher(evaluate, max_batch=2)
+    try:
+        # Answered over three calls of two, two and one, and still one answer per request and in order.
+        assert capped.submit_many([("b", i) for i in range(5)]) == [
+            (1, 0), (1, 1), (2, 0), (2, 1), (3, 0)]
+        assert capped.calls == 3 and capped.served == 5
+    finally:
+        capped.stop()
+
+
+def test_a_failed_batch_reaches_every_caller_of_a_group():
+    """A forward pass that raises has to reach whoever was waiting on it, or every caller of the group waits for ever. The failure is raised only after every ticket of the group has been waited on, so a group is never left half collected with tickets still to be answered, and a server that has been stopped refuses a group at once rather than queueing it behind a thread that has gone."""
+    from rwintel.learn.inference import Batcher
+
+    def broken(requests):
+        raise ZeroDivisionError("the forward pass fell over")
+
+    batcher = Batcher(broken)
+    try:
+        assert "fell over" in _refusal(ZeroDivisionError, batcher.submit_many, [1, 2, 3])
+        # The single submission is the plural one with a group of one, so it fails the same way it always has.
+        assert "fell over" in _refusal(ZeroDivisionError, batcher.submit, 4)
+    finally:
+        batcher.stop()
+    assert "stopped" in _refusal(RuntimeError, batcher.submit_many, [1, 2])
 
 
 if __name__ == "__main__":

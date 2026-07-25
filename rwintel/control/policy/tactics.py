@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Sequence, Set, Tuple
 
 from ...wire import Deviation, SquadDeviation, Status
 from .catalogue import Catalogue
@@ -74,6 +74,20 @@ class _Track:
     killed: float = 0.0
 
 
+@dataclass
+class _Fight:
+    """What one squad's fight looks like in this one frame: the squad, who of it is on the board, what is shooting at it, what the mission has cost so far, and its memory.
+
+    The one-frame counterpart of `_Track`, and it holds exactly the argument list a departure has always been chosen from. It exists so that a period's fights can be read first and answered afterwards, which is what lets a whole side's departures be chosen in one call rather than one squad at a time.
+    """
+
+    squad: SquadRecord
+    members: List[Sighting]
+    threats: List[Sighting]
+    losses: float
+    track: _Track
+
+
 class Tactics:
     def __init__(self, session, catalogue: Catalogue) -> None:
         self.session = session
@@ -88,8 +102,9 @@ class Tactics:
         for squad_id in [k for k in self.tracks if k not in reported]:
             del self.tracks[squad_id]
 
-        deviations: List[SquadDeviation] = []
+        # The period is read first and answered afterwards. Reading is what builds each squad's report and advances its memory; answering is choosing its departure, and choosing writes nothing, so nothing that is read depends on whether the choices were made along the way or all at the end. Splitting the two is what lets a learnt layer replacing the choice ask about the whole side at once.
         reports: List[MissionReport] = []
+        fights: List[_Fight] = []
         for squad in squads:
             track = self._track(squad, game_time_ms)
             members = [mine[unit] for unit in squad.members if unit in mine]
@@ -108,13 +123,23 @@ class Tactics:
             # A human holding the tactical command of a squad is driving its units directly, so this layer stays off the wire for it and confines itself to reporting what it can see.
             if squad.commander & HUMAN_TACTICS or not members:
                 continue
-            deviations.append(SquadDeviation(
-                squad=squad.id,
-                deviation=self._departure(squad, members, threats, losses, track),
-            ))
+            fights.append(_Fight(squad=squad, members=members, threats=threats, losses=losses,
+                                 track=track))
+        deviations = [SquadDeviation(squad=fight.squad.id, deviation=departure)
+                      for fight, departure in zip(fights, self._departures(fights))]
         return deviations, reports
 
     # ---- the departures ----------------------------------------------------------------
+
+    def _departures(self, fights: Sequence[_Fight]) -> List[Deviation]:
+        """Every squad's departure for this period, in the order the squads were read.
+
+        The whole side in one call rather than one squad at a time, because this is the seam a learnt layer replaces and what answers there is a network reached through a batching server. Asked squad by squad, each ask waits out the server's window before the next one is even queued, so a side of four squads spends four windows a frame and the decision lag stops being the one period the interface promises and starts depending on how busy the machine is. Asked together they are one wait, whatever the side is made of.
+
+        Reading the period's fights first and choosing afterwards decides nothing differently. Each squad's memory is its own, kept under its own number, so nothing written while one squad is read can be reached while another is; and choosing a departure writes nothing at all, so deferring every choice to the end of the reading cannot change what any of them is chosen from.
+        """
+        return [self._departure(fight.squad, fight.members, fight.threats, fight.losses, fight.track)
+                for fight in fights]
 
     def _departure(self, squad: SquadRecord, members: List[Sighting], threats: List[Sighting],
                    losses: float, track: _Track) -> Deviation:

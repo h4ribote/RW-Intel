@@ -8,7 +8,7 @@ There is a third possibility and it is why the interface is shaped this way: no 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from .inference import Batcher
 
@@ -38,10 +38,15 @@ class NetworkTactics:
         self.batcher = batcher
         self.greedy = greedy
 
-    def choose(self, state: Sequence[float], mask: Sequence[float]) -> Choice:
+    def choose_many(self, requests: Sequence[Tuple[Sequence[float], Sequence[float]]]) -> List[Choice]:
+        """A whole side's departures in one ask.
+
+        The plural is the only form a tactical decider has, because a tactical layer decides about all of its squads from one board read at one instant, and asking one at a time is what makes a side of four cost four batching windows a frame instead of one. It is also why this is not a widened `choose`: a decider written against the older one-squad signature would silently take a list of pairs as its state and answer nonsense, where one that no longer has the method it is asked for fails at once.
+        """
+        batch = [(list(state), list(mask)) for state, mask in requests]
         if self.batcher is not None:
-            return self.batcher.submit((list(state), list(mask)))
-        return evaluate_tactical(self.net, [(list(state), list(mask))], self.device, self.greedy)[0]
+            return list(self.batcher.submit_many(batch))
+        return evaluate_tactical(self.net, batch, self.device, self.greedy)
 
 
 class PinnedDeparture:
@@ -53,9 +58,9 @@ class PinnedDeparture:
     def __init__(self, action: int) -> None:
         self.action = int(action)
 
-    def choose(self, state: Sequence[float], mask: Sequence[float]) -> Choice:
+    def choose_many(self, requests: Sequence[Tuple[Sequence[float], Sequence[float]]]) -> List[Choice]:
         # No log probability and no value: this is not a distribution, and nothing is ever learnt from what it chose.
-        return Choice(action=self.action)
+        return [Choice(action=self.action) for _ in requests]
 
 
 class PinnedRegion:

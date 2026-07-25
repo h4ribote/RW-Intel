@@ -17,7 +17,7 @@ from ..wire import Deviation, RegionState, Status, Task
 from ..control.policy.contracts import DOCTRINES, MissionReport, OperationsOrders, SquadRecord
 from ..control.policy.operations import Operations
 from ..control.policy.tactics import Tactics
-from ..control.policy.view import Sighting, WorldView
+from ..control.policy.view import WorldView
 from .deciders import Choice
 from .encoding import operational_state, region_mask, tactical_state, task_mask
 from .reward import DISCOUNT as REWARD_DISCOUNT, OperationalReward, TacticalReward
@@ -120,24 +120,36 @@ class LearntTactics(Tactics):
         if self.rollout is not None:
             self.rollout.add((self.instance, squad.id), step)
 
-    def _departure(self, squad: SquadRecord, members: List[Sighting], threats: List[Sighting],
-                   losses: float, track) -> Deviation:
+    def _departures(self, fights) -> List[Deviation]:
+        """Every squad's departure in one ask of the decider, and one step recorded for each, in the order the squads were read.
+
+        One ask a side and not one a squad. A network answers through a batching server whose window is sized against the wall period, so a layer that asked squad by squad would spend a window on each, and the fixed one-period decision lag the interface promises would become a lag that depends on how many squads a side happens to have. The states are all built before anything is asked, which is what lets them go over in one request; that costs nothing, because building a state reads the board and writes nothing, so a state built early is the state that would have been built late.
+        """
         view = self._view
         if view is None:
-            return super()._departure(squad, members, threats, losses, track)
-        state = tactical_state(squad, members, threats, losses, track.killed, view, self._now)
+            return super()._departures(fights)
+        if not fights:
+            # Nothing to order this period, so nothing to ask. Load-bearing and not merely tidy: the batching server answers an empty group without touching its queue, but the path with no server behind it puts the states through the network directly, and a forward pass on no rows is a shape error rather than an empty answer. A side whose squads are all human-held or all off the board is an ordinary period, not a fault, so it has to return here.
+            return []
         # Every departure is always available. Withdrawing from a fight that is going well is a bad idea and not an illegal one, and a mask that encoded which were sensible would be the rule ladder again, hidden.
-        mask = [1.0] * len(Deviation)
+        requests = [(tactical_state(fight.squad, fight.members, fight.threats, fight.losses,
+                                    fight.track.killed, view, self._now),
+                     [1.0] * len(Deviation))
+                    for fight in fights]
         if self.decider is None:
-            # No decider means the inherited rule decides and this class is only writing down what it chose, which is how the script is turned into a teacher: what comes out is a state and an action of exactly the form a learnt layer emits.
-            choice = Choice(action=int(super()._departure(squad, members, threats, losses, track)))
+            # No decider means the inherited rule decides and this class is only writing down what it chose, which is how the script is turned into a teacher: what comes out is a state and an action of exactly the form a learnt layer emits. Written as a loop rather than as a comprehension because a comprehension is a function of its own with no `self` argument, and the zero-argument `super()` below would raise inside one.
+            choices = []
+            for fight in fights:
+                choices.append(Choice(action=int(super()._departure(
+                    fight.squad, fight.members, fight.threats, fight.losses, fight.track))))
         else:
-            choice = self.decider.choose(state, mask)
+            choices = self.decider.choose_many(requests)
         if self.rollout is not None:
-            self.pending[squad.id] = Step(
-                state=state, action=choice.action, mask=mask, log_prob=choice.log_prob,
-                value=choice.value, squad=squad.id, at_ms=self._now)
-        return Deviation(choice.action)
+            for fight, (state, mask), choice in zip(fights, requests, choices):
+                self.pending[fight.squad.id] = Step(
+                    state=state, action=choice.action, mask=mask, log_prob=choice.log_prob,
+                    value=choice.value, squad=fight.squad.id, at_ms=self._now)
+        return [Deviation(choice.action) for choice in choices]
 
     def flush(self) -> None:
         """Ends every open errand at the end of an episode, without yet releasing the episode's trajectories to be drained. They did not fail; they stopped being observed, so they are bootstrapped rather than treated as terminal.

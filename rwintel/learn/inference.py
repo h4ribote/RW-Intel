@@ -57,16 +57,31 @@ class Batcher:
         return self.served / self.calls if self.calls else 0.0
 
     def submit(self, request: object) -> object:
-        ticket = _Ticket(request=request)
+        return self.submit_many([request])[0]
+
+    def submit_many(self, requests: Sequence[object]) -> List[object]:
+        """Several requests queued before any of them is waited on, and each caller's own answers handed back in the order it asked.
+
+        This is the whole of what one caller with several requests needs, and it is the reason such a caller cannot simply loop over the single entry: that one appends a ticket and then blocks on it, so a second request is not even in the queue until the first has been answered, and a caller with four of them spends four windows rather than one. Queued together they are one window and, at the sizes anyone submits, one call. The queue is extended under one acquisition of the lock the server slices it under, so the server sees either none of a group or all of it.
+
+        More than the batch cap in one group is answered over consecutive calls rather than refused; every ticket keeps its own identity through the queue, so the answers still come back one per request and in order. A failure is raised only once every ticket of the group has been waited on. That is not because a ticket left unwaited would strand anything — the server drains and answers its queue whether or not anyone is still listening — but so that the caller returns a failure describing the group rather than the first slice of it, and the cost of it is that a group larger than the cap whose first slice fails still waits out the windows the later slices need before it can raise. A reader shortening the failure path should know that is what they are shortenilf collected with tickets still to be answered.
+        """
+        tickets = [_Ticket(request=request) for request in requests]
+        if not tickets:
+            return []
         with self._arrived:
             if self._stop:
                 raise RuntimeError("the inference server has been stopped")
-            self._queue.append(ticket)
+            self._queue.extend(tickets)
             self._arrived.notify()
-        ticket.ready.wait()
-        if ticket.failed is not None:
-            raise ticket.failed
-        return ticket.reply
+        failure: Optional[BaseException] = None
+        for ticket in tickets:
+            ticket.ready.wait()
+            if ticket.failed is not None and failure is None:
+                failure = ticket.failed
+        if failure is not None:
+            raise failure
+        return [ticket.reply for ticket in tickets]
 
     def stop(self) -> None:
         with self._arrived:
