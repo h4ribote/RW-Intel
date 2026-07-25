@@ -44,7 +44,7 @@ SWEEP_MS = 20000
 
 #: How long a fight may go without a casualty on either side before it is called.
 #:
-#: Two forces that have stopped hurting each other are not about to start. Measured: an engagement that ends with somebody destroyed takes twenty to thirty seconds, and one that ends on the clock spends its whole minute with both sides nearly intact, so waiting the full minute for those buys nothing and costs the arena a third of its time. Long enough that a squad manoeuvring for position is not mistaken for one that has given up.
+#: Two forces that have stopped hurting each other are not about to start. Measured on the arena as it then stood: an engagement that ends with somebody destroyed takes twenty to thirty seconds, and one that ends on the clock spent its whole minute with both sides nearly intact, so waiting the full minute for those bought nothing and cost the arena a third of its time. With the cut-off in place almost nothing reaches the clock — 15 fights of the 21212 recorded since — so what the cut-off now decides is when a fight that has already had its casualties is swept, not whether an empty minute is paid for. Long enough that a squad manoeuvring for position is not mistaken for one that has given up.
 #:
 #: What removing it costs and buys has since been measured on both settings at once, as two arms of one run drawing the same fights. It buys decisiveness: fights that end with a side destroyed go from 31 per cent to 49. It costs throughput, because the fights that would have been called run their whole minute — the same wall clock produced 1380 fights against 894 — and it widens the scatter of the score from 0.569 to 0.643, which is what a sample size is paid in. It does not move the baseline: the two arms differ by -0.022 with two standard errors of 0.031, where a run of the handwritten layer against itself has to average nought. That last was once believed otherwise and was the stated reason for keeping the cut-off; the belief came from a run whose episodes all drew the same fights over again, and it did not survive drawing them afresh.
 STALL_MS = 12000
@@ -120,7 +120,11 @@ BY_KILLS = "kills"
 
 #: Scoring a fight on what is left standing weighted by how much of it is left, so that a unit at a tenth of its health counts for a tenth of its price.
 #:
-#: Most fights end with neither side destroyed — three quarters of them are called because the two forces stopped killing each other — and under the sparse reading every one of those is worth precisely nothing to either side, however one-sided the damage was. That is the largest single fact about this arena's signal: the score, which is both what the layer is paid and what the run is judged on, is nought on three quarters of what it measures. Weighting by health does not change what a fight is worth when it ends in a body count, because a dead unit is worth nothing under either reading; it changes what a fight is worth when it ends with two damaged forces, which is the common case.
+#: Two thirds of fights end with neither side destroyed, because a fight is called twelve seconds after its last casualty. Over the 21212 arena fights recorded so far — leaving out the arms pinned to one departure, since pinning moves that rate by thirty points either way — 13733 of them, 64.7 per cent with two standard errors of 0.7 points, were called that way rather than by a body count or by the clock.
+#:
+#: That is not a fight in which nothing happened, and the sparse reading does not score it as one. The call wants twelve quiet seconds, not an untouched pair of forces, so every casualty taken before the quiet counts in full: of those 13733 fights only 13 lost nobody at all and only 33 came out at exactly nought, and the median one has lost 32.8 per cent of this side's worth and destroyed 35.5 per cent of the other's. It was believed for a while that all of them scored nought, and that belief came from reading the cut-off as a fight nobody died in rather than as one that had gone quiet.
+#:
+#: What weighting by health buys is therefore sharpness rather than a signal where there was none: it counts the damage standing on the survivors, which is the one thing the sparse reading cannot see until it has killed something. Read with the strength-share multiple at nought, so that fights drawn before and after that multiple was fitted can be pooled, the per-fight spread over those 21212 is 0.585 sparse against 0.518 on health — a fifth of the variance, and so a fifth off the fights any claim about a mean costs. On a stall-called fight the two readings differ by 0.101 on average and disagree about which side did better in one fight in ten.
 #:
 #: Antisymmetry is untouched: the two sides' figures are the same subtraction with the terms exchanged, so a run of the handwritten layer against itself still has to average nought and the self-check that governs everything here still governs it.
 BY_HEALTH = "health"
@@ -207,9 +211,9 @@ class Engagement:
     def outcome_health(self) -> float:
         """The same score with every survivor counted at the share of its health it still holds.
 
-        The sparse reading above cannot tell a fight in which both sides walked away untouched from one in which both were shot to a tenth of themselves and neither quite died, and the arena calls a fight as soon as twelve seconds pass without a casualty, so the second is not a corner case: three fights in four end that way. Read on health those two fights are as far apart as they look, and a layer's choices during them are paid for.
+        The sparse reading above cannot tell a fight in which both sides walked away untouched from one in which both were shot to a tenth of themselves and neither quite died. Both of those are rare — of the 21212 fights recorded so far, 13 ended with nobody destroyed at all — because a fight is called twelve seconds after its last casualty rather than for want of one, and two thirds of fights are called that way with their dead already taken. So what this reading adds is not a score where the other had none, but the part of the score the other cannot reach: the damage left standing on the survivors, worth 0.101 of score on the average stall-called fight and enough to turn its sign once in ten.
 
-        Identical to the sparse reading whenever a fight ends by a body count, since a destroyed unit is worth nothing under either. Antisymmetric for the same reason the other is, being the same subtraction with the sides exchanged.
+        Not identical to the sparse reading on a fight that ended in a body count, which was once claimed here: the side that was destroyed is worth nothing under either, but the side that won walks away damaged and only this reading counts that, so the two differ on 89.2 per cent of the one-sided annihilations recorded, by 0.135 averaged over all of them. The two agree exactly only when the surviving side is untouched. Antisymmetric for the same reason the other is, being the same subtraction with the sides exchanged.
         """
         return self._scored(self.our_left_health, self.their_left_health, STRENGTH_SLOPE_HEALTH)
 
@@ -240,12 +244,12 @@ class Statistics:
 
     engagements: int = 0
     spawned: int = 0
-    #: Engagements that were built but where the units never appeared, so no fight took place. Counted separately because it is wasted time rather than a result, and because it is the first thing to look at when the arena is producing less than it should.
+    #: Engagements that were built but where the units never appeared, so no fight took place. Counted separately because it is wasted time rather than a result, and because it is the first thing to look at when the arena is producing less than it should. Measured over every episode record kept from the runs behind this design, it is two in 26420 engagements built, and both of those were the first engagement of an episode at one point on one map that would not take a unit — so what this counts now is ground rather than a board filled up by a weak layer, and a run that reports more than a handful of these is reporting something new.
     stillborn: int = 0
     won: int = 0
     lost: int = 0
     drawn: int = 0
-    #: The three ways a fight is drawn, kept apart because they say different things about the arena. A stalled fight is two forces that stopped hurting each other and was called early; an expired one ran the whole minute out with both sides still standing; a mutual one is both sides destroyed within the same period, which is a fight fought to the end rather than one that never happened. A run made almost entirely of the first two is an arena producing stand-offs rather than engagements, and the drawn count alone cannot show that.
+    #: The three ways a fight is drawn, kept apart because they say different things about the arena. A stalled fight is two forces that stopped hurting each other and was called early, which is the ordinary ending here rather than an absent one: it takes twelve quiet seconds and not an untouched pair, and the median one has already destroyed about a third of each side. An expired one ran the whole minute out with both sides still standing, and a run with many of those is an arena producing stand-offs rather than engagements. A mutual one is both sides destroyed within the same period, which is a fight fought to the end rather than one that never happened. The drawn count alone shows none of the three, which is why they are counted apart.
     stalled: int = 0
     expired: int = 0
     mutual: int = 0

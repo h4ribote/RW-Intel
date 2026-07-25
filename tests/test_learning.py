@@ -600,12 +600,12 @@ def test_the_health_reading_of_a_fight_is_the_same_number_negated_as_well():
     assert empty.outcome_health + _fight(1200.0, 0.0, 0.0, 0.0).outcome_health == 0.0
 
 
-def test_the_two_readings_agree_on_a_body_count_and_part_company_on_damage():
+def test_the_two_readings_agree_on_a_clean_kill_and_part_company_on_damage():
     """What the health reading is for, stated as the difference between the two.
 
-    A fight that ended with somebody destroyed is worth the same under both, because a dead unit is worth nothing whichever way it is counted. That is what keeps every ceiling this project has quoted readable: the second reading existing renumbers none of them.
+    A fight that ended with one side destroyed and the other untouched is worth the same under both, because a dead unit is worth nothing whichever way it is counted and an untouched survivor is worth its whole price under both. That is the case pinned below, and it is narrower than it looks: a winner that took damage on the way is worth less on the health reading, so the two readings do part company on most real annihilations, and only the clean kill is the fixture they have to agree on.
 
-    Where the two part company is the common ending — both sides still standing and one of them shot to pieces. A fight is called twelve seconds after the last casualty, so three fights in four end that way, and under the sparse reading every one of those is worth precisely nothing to either side however one-sided the damage was. A side left at half health on every survivor loses half of that survivor's worth on the health reading and none of it on the other.
+    Where the two part company is the damage left standing on whoever survived. A fight is called twelve seconds after its last casualty rather than for want of one, so a called fight has almost always had its dead and the sparse reading scores it on them; what it cannot see at any point is a survivor at half health, which is worth half its price on the health reading and its whole price on the other. The fight built below isolates that difference by killing nobody, which is why it is a fixture and not a common fight.
     """
     massacre = _fight(3000.0, 3000.0, 3000.0, 0.0)
     assert massacre.outcome == massacre.outcome_health == 1.0

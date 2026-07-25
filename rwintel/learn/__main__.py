@@ -319,7 +319,7 @@ def _report_arena(sessions, batcher=None) -> None:
                          "expired", "mutual", "decisions")}
     seconds = sum(r.seconds for r in records)
     wall = max(1.0, sum(r.wall_seconds for r in records) / max(1, len(sessions)))
-    # The drawn fights are broken out because they are the ones that say what kind of arena this was: two forces that stopped hurting each other, two that never reached each other before the clock, and two that destroyed each other are three different results and only the last of them is a fight.
+    # The drawn fights are broken out because they are the ones that say what kind of arena this was: two forces that stopped hurting each other after trading about a third of each side away, two that never reached each other before the clock, and two that destroyed each other are three different results, and only the middle one is an arena that failed to produce a fight.
     log.info("%d engagement(s) built, %d never appeared (%.0f%% wasted), %d fought: %d won %d lost %d drawn (%.0f%% drawn: %d stalled, %d out of time, %d mutual)",
              total["engagements"], total["stillborn"],
              100.0 * total["stillborn"] / max(1, total["engagements"]), total["fought"],
@@ -432,7 +432,7 @@ def duel(arguments) -> int:
 
 #: The two readings of a fight a run reports, as (what the journal calls the mean, what it calls the spread, what the history row calls it, what to call it in a log).
 #:
-#: Both, always, whichever one was paid. The sparse reading is what every ceiling this project has quoted was measured on and dropping it would make a new run unreadable against any of them; the health reading is the one that is not nought on the three quarters of fights that end with two damaged forces still standing. A run costs the same either way — both are computed as a fight is called — so there is no reason to report one.
+#: Both, always, whichever one was paid. The sparse reading is what every ceiling this project has quoted was measured on and dropping it would make a new run unreadable against any of them; the health reading is the one that also counts the damage left standing on the survivors, which is where two thirds of fights end and which the other cannot see until it has killed something. A run costs the same either way — both are computed as a fight is called — so there is no reason to report one.
 READINGS = (("outcome_mean", "outcome_sd", "outcome", "scored on bodies"),
             ("health_outcome_mean", "health_outcome_sd", "outcome_health", "scored on health"))
 
