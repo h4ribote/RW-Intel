@@ -7,6 +7,7 @@ The arena is exercised the way the engagement arena is exercised in test_learnin
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import math
 import os
@@ -98,6 +99,22 @@ class _Session:
 
     def scenario(self, spawns, sandbox=None):
         self.calls.append((list(spawns), sandbox))
+
+
+@contextlib.contextmanager
+def _without_the_game_installed():
+    """Builds a real arena without the game's definition files under it.
+
+    The arena's constructor makes its own catalogue, and a catalogue reads which building produces which type out of the files the engine itself loads; with no asset tree named it looks for the master copy. Every test here is meant to pass on a machine that has never had the game on it — a test that quietly needs the install passes where it was written and fails where it is read — and the production links are the one thing an arena test never asks about, so they are handed back empty.
+    """
+    from rwintel.control.policy import catalogue
+
+    original = catalogue._build_links
+    catalogue._build_links = lambda assets: ({}, {})
+    try:
+        yield
+    finally:
+        catalogue._build_links = original
 
 
 def _grid(step=400.0, reach=1200.0):
@@ -1030,7 +1047,8 @@ def test_both_sides_of_the_mirror_are_built_from_the_one_tactical_factory():
         built.append((given, catalogue))
         return LearntTactics(given, catalogue, decider, None, -1)
 
-    arena = OpsArena(session, tactics=tactics, seed=5)
+    with _without_the_game_installed():
+        arena = OpsArena(session, tactics=tactics, seed=5)
     assert len(built) == 2, "the arena did not build both of its tactical layers from the factory it was handed"
     # Both are handed the arena's own session and the arena's own catalogue, which is why the layers are built in here at all: a layer classifying a unit from some other type table would sort the same tank into a different role from the arena that spawned it.
     assert all(given is session and catalogue is arena.catalogue for given, catalogue in built)
@@ -1040,7 +1058,8 @@ def test_both_sides_of_the_mirror_are_built_from_the_one_tactical_factory():
         "the two sides are reading different networks, so they are not fighting under one frozen layer")
 
     # Named no factory, the arena builds the handwritten ladder for itself on both sides, which is what every measurement taken on this arena so far was made under — and two of it, for the same reason.
-    plain = OpsArena(session, seed=5)
+    with _without_the_game_installed():
+        plain = OpsArena(session, seed=5)
     assert type(plain.our_tac) is Tactics and type(plain.their_tac) is Tactics
     assert plain.our_tac is not plain.their_tac
     # And nothing about the operational layers moved: with no operational factory both sides are still the script chain.
@@ -1050,14 +1069,16 @@ def test_both_sides_of_the_mirror_are_built_from_the_one_tactical_factory():
 def test_an_episode_says_which_tactical_layer_it_was_made_under_before_it_has_scored_anything():
     """Two runs made under different tactical layers are two different instruments, and pairing them board by board would read the change of fighter as a difference between the operational arms. So the episode record has to carry which layer was beneath it, and carry it from construction rather than from scoring: an episode cut off before its horizon still has to say what instrument it was run on."""
     session = _Session(_grid())
-    arena = OpsArena(session, tactics_name="sha256:0123456789abcdef", seed=5)
+    with _without_the_game_installed():
+        arena = OpsArena(session, tactics_name="sha256:0123456789abcdef", seed=5)
     assert not arena.statistics.scored
     assert arena.statistics.tactics == "sha256:0123456789abcdef"
     assert arena.statistics.as_dict()["tactics"] == "sha256:0123456789abcdef"
 
     # And a run that named nothing says so in the one word a comparison reads as the handwritten ladder.
     assert OpsStatistics().tactics == SCRIPT_TACTICS
-    assert OpsArena(session, seed=5).statistics.as_dict()["tactics"] == SCRIPT_TACTICS
+    with _without_the_game_installed():
+        assert OpsArena(session, seed=5).statistics.as_dict()["tactics"] == SCRIPT_TACTICS
 
 
 def test_an_episode_says_which_operational_policy_played_it():
@@ -1066,13 +1087,15 @@ def test_an_episode_says_which_operational_policy_played_it():
     A learnt arm is named after the file its parameters were read from, and that file changes underneath itself: a training run overwrites whatever its save names. Two runs a week apart therefore write one arm name over two networks, and a comparison pairing them would report the change of policy as a difference between two arms that are the same arm. Carried from construction, exactly as the tactical layer beneath the board is, so an episode cut off before its horizon still says what played it.
     """
     session = _Session(_grid())
-    arena = OpsArena(session, operations_name="sha256:fedcba9876543210", seed=5)
+    with _without_the_game_installed():
+        arena = OpsArena(session, operations_name="sha256:fedcba9876543210", seed=5)
     assert not arena.statistics.scored
     assert arena.statistics.as_dict()["operations"] == "sha256:fedcba9876543210"
 
     # A run that named nothing carries nothing, which is what every journal written before the field existed looks like, and a comparison has to read that as saying nothing rather than as disagreeing.
     assert OpsStatistics().operations == ""
-    assert OpsArena(session, seed=5).statistics.as_dict()["operations"] == ""
+    with _without_the_game_installed():
+        assert OpsArena(session, seed=5).statistics.as_dict()["operations"] == ""
 
 
 def _tactical_board():

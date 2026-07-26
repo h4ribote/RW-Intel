@@ -56,6 +56,9 @@ KITE_RANGE_MARGIN = 80.0
 #: Fewer shooters than this and concentrating them changes nothing, because the engine's own target acquisition already has them on the same few enemies.
 FOCUS_MIN_SHOOTERS = 3
 
+#: How much closer than its own reach a squad walks when it closes, as a share of that reach. Short of the whole of it so that the squad comes to rest shooting rather than driving through the enemy and out the other side, and so that a unit or two lagging behind the centre is still inside the fight when the centre stops.
+CLOSE_SHARE = 0.8
+
 #: With fewer enemies than this there is nothing to concentrate away from: the squad is already fighting the only thing present.
 FOCUS_MIN_ENEMIES = 2
 
@@ -147,6 +150,10 @@ class Tactics:
 
         Breaking off comes first because everything below it is a way of fighting better and none of them helps a fight that should not go on. Scattering comes next because an area weapon on a bunched squad is the fastest way to lose one. Kiting before concentrating because a range advantage is worth more than a focused volley and the two want opposite positions. Concentrating last, as the thing to do when the fight is worth having on the ground it is on.
 
+        Closing sits between kiting and concentrating, and the pair of tests either side of it is the whole of the reasoning. A squad that out-reaches what is shooting at it keeps that difference, which is kiting. A squad with nothing inside its own reach cannot answer at all — it is being shot at from beyond where it can shoot back, which is where the engine's own advance leaves two forces standing, since a unit halts when it acquires a target and acquisition happens further out than shooting does. Neither withdrawing nor holding fixes that: one leaves the errand and the other leaves the halt in force. Walking in does, and nothing else in the set does.
+
+        It has to come before concentrating rather than after, and not by preference: the rule that decides whether concentrating is worth it only counts enemies already inside our reach, so with nothing inside it that test is false and the ladder would fall through to holding — which is precisely standing still under fire.
+
         Two of the departures also carry the choice a rule on the game side used to make on their behalf. A withdrawal is the short step back that repositions a squad, unless the squad is being destroyed, when it is the whole way out of the fight. A concentration goes onto the weakest enemy, unless a longer-ranged one is close enough to shoot at, when it goes onto that: the gun that out-reaches the squad does the most damage and dies to a focused volley like anything else.
         """
         if not threats and not self._under_fire(members):
@@ -157,6 +164,8 @@ class Tactics:
             return Deviation.SPREAD
         if self._out_ranges(members, threats) >= KITE_RANGE_MARGIN:
             return Deviation.KITE
+        if not self._anything_in_reach(members, threats):
+            return Deviation.CLOSE
         if self._worth_concentrating(members, threats):
             return Deviation.FOCUS_THREAT if self._long_range_in_reach(members, threats) else Deviation.FOCUS
         return Deviation.HOLD
@@ -198,6 +207,20 @@ class Tactics:
         if not reaches or not enemy:
             return 0.0
         return min(reaches) - max(enemy)
+
+    @staticmethod
+    def _anything_in_reach(members: List[Sighting], threats: List[Sighting]) -> bool:
+        """Whether the squad can shoot at anything it is fighting from where it stands.
+
+        Read from the shooters' centre against the shortest reach among them, which is the same pair every other range test here uses: that is the distance at which the whole squad is in the fight, and it is what the game side backs a squad off to and walks it in to. A squad with no armed members has nothing to bring into range and is left alone; a fight with nothing in it is not a fight this can be asked about.
+        """
+        shooters = [m for m in members if m.kind is not None and m.kind.armed]
+        if not shooters or not threats:
+            return True
+        reach = min(m.kind.range for m in shooters)
+        centre_x = sum(m.unit.x for m in shooters) / len(shooters)
+        centre_y = sum(m.unit.y for m in shooters) / len(shooters)
+        return any(math.hypot(e.unit.x - centre_x, e.unit.y - centre_y) <= reach for e in threats)
 
     @staticmethod
     def _worth_concentrating(members: List[Sighting], threats: List[Sighting]) -> bool:

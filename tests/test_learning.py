@@ -1741,6 +1741,36 @@ def test_the_handwritten_layer_reaches_the_two_added_departures():
     assert departure(tanks_only, _squad(status=Status.ACTIVE, losses=0.0)) == Deviation.FOCUS
 
 
+def test_the_handwritten_layer_closes_when_it_cannot_shoot_back():
+    """The departure the set was missing, and the rung the ladder reaches it on.
+
+    The engine halts a unit when it acquires a target and acquisition happens at sight range, while shooting needs weapon range, so two forces walking at each other come to rest in the gap between the two. A squad that outranges what is shooting at it keeps that gap, which is kiting. A squad that is outranged stands in it and is shot at without ever firing, and every departure the set had before this one leaves it there: withdrawing abandons the errand, holding leaves the engine's own halt in force, and concentrating is refused outright because the rule that picks a target only counts enemies already inside our reach.
+
+    That last point is why closing has to be tried before concentrating rather than after. With nothing in reach the concentration test is false, so a ladder that asked it first would fall through to holding — which is standing still under fire, the one answer that is certainly wrong.
+    """
+    tactics = Tactics(None, _CATALOGUE)
+
+    def departure(view, squad):
+        return tactics._departure(squad, [s for s in view.ours], [s for s in view.enemies],
+                                  squad.losses, _Track())
+
+    ours = [_unit(1, 100, 100), _unit(2, 120, 100), _unit(3, 140, 100)]
+    place = [_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)]
+    # Our tanks reach 130 and the gun reaches 320, and it stands 200 out from the squad's centre: it can shoot and we cannot.
+    outranged = _view(ours + [_unit(9, 320, 100, type_index=1, hostile=1)], place)
+    assert departure(outranged, _squad(status=Status.ACTIVE, losses=0.0)) == Deviation.CLOSE
+
+    # The same fight with the gun inside our own reach is a fight we can answer where we stand, and the ladder answers it as it always did.
+    engaged = _view(ours + [_unit(9, 220, 100, type_index=1, hostile=1),
+                            _unit(10, 200, 130, type_index=0, hostile=1)], place)
+    assert departure(engaged, _squad(status=Status.ACTIVE, losses=0.0)) == Deviation.FOCUS_THREAT
+
+    # And a squad that outreaches what is shooting at it keeps the gap rather than closing it.
+    kiting = _view([_unit(1, 100, 100, type_index=1), _unit(2, 120, 100, type_index=1)]
+                   + [_unit(9, 300, 100, type_index=0, hostile=1)], place)
+    assert departure(kiting, _squad(members=(1, 2), status=Status.ACTIVE, losses=0.0)) == Deviation.KITE
+
+
 def test_the_handwritten_ladder_decides_a_whole_side_as_it_decides_one_squad():
     """A period is read squad by squad and then answered in one call for the whole side, which is the seam a learnt layer replaces so that a side of several squads costs one batching window rather than one window each. The handwritten ladder has no decider and must be entirely unaffected by that: it is the baseline every measurement in this project is taken against, so a change to what it decides would invalidate all of them.
 
@@ -1992,7 +2022,8 @@ def test_an_engagement_episode_says_how_its_fights_were_drawn():
     assert plain["imbalance_floor"] == IMBALANCE[0] and plain["score"] == BY_HEALTH
 
     # Written at construction rather than at scoring, so an episode that produced no fight at all still says what it was run under.
-    arena = Arena(_Chained(), separation=600.0, stall_ms=8000, imbalance_floor=0.3, score=BY_KILLS)
+    with _without_the_game_installed():
+        arena = Arena(_Chained(), separation=600.0, stall_ms=8000, imbalance_floor=0.3, score=BY_KILLS)
     drawn = arena.statistics.as_dict()
     assert drawn["separation"] == 600.0 and drawn["stall_ms"] == 8000
     assert drawn["imbalance_floor"] == 0.3 and drawn["score"] == BY_KILLS
@@ -2006,6 +2037,22 @@ class _Chained:
     assets = None
     regions = ()
     map_content = None
+
+
+@contextlib.contextmanager
+def _without_the_game_installed():
+    """Builds a real chain without the game's definition files under it.
+
+    A catalogue reads which building produces which type out of the files the engine itself loads, and with no asset tree named it looks for the master copy. That is right in a run and wrong in this suite: everything here is meant to pass on a machine that has never had the game on it, and a test that quietly needs the install passes where it was written and fails where it is read. The links are what a test of the layers does not use, so they are handed back empty.
+    """
+    from rwintel.control.policy import catalogue
+
+    original = catalogue._build_links
+    catalogue._build_links = lambda assets: ({}, {})
+    try:
+        yield
+    finally:
+        catalogue._build_links = original
 
 
 def test_a_learnt_strategic_arm_is_built_the_same_way_and_can_be_read_either_way():
@@ -2045,15 +2092,17 @@ def test_a_layer_frozen_beneath_the_one_being_trained_records_nothing():
     session = _Chained()
     training, held = _Fixed(action=0), _Fixed(action=1)
     rollout = Rollout()
-    policy = LearningPolicy(session, STRATEGIC, training, rollout, 0, frozen={TACTICAL: held})
+    with _without_the_game_installed():
+        policy = LearningPolicy(session, STRATEGIC, training, rollout, 0, frozen={TACTICAL: held})
     assert isinstance(policy.strategy, LearntStrategy) and policy.strategy.rollout is rollout
     assert isinstance(policy.tactics, LearntTactics) and policy.tactics.rollout is None
     assert policy.tactics.decider is held and policy.strategy.decider is training
     # The layers not named are the script's own, unchanged.
     assert type(policy.operations).__name__ == "Operations"
 
-    assert "cannot be both trained and frozen" in _refusal(
-        ValueError, LearningPolicy, session, STRATEGIC, training, rollout, 0, {STRATEGIC: held})
+    with _without_the_game_installed():
+        assert "cannot be both trained and frozen" in _refusal(
+            ValueError, LearningPolicy, session, STRATEGIC, training, rollout, 0, {STRATEGIC: held})
 
 
 def test_freezing_a_layer_names_the_parameters_and_refuses_what_it_cannot_read():

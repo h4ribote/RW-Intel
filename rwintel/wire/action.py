@@ -50,7 +50,9 @@ class Stance(enum.IntEnum):
 class Deviation(enum.IntEnum):
     """What the tactical layer does instead of the contract's default advance.
 
-    The first five are the plain departures; a departure names the kind of move and rules on the game side settle where it points. The two after them are the same kinds with the choice a rule used to make handed to the layer instead: how far a withdrawal commits, and which enemy a concentration goes onto. They are appended rather than inserted so that a network trained on the five keeps the meaning of every value it already learnt, and so that the byte the wire carries needs no wider field.
+    The first five are the plain departures; a departure names the kind of move and rules on the game side settle where it points. The two after them are the same kinds with the choice a rule used to make handed to the layer instead: how far a withdrawal commits, and which enemy a concentration goes onto. The eighth is a kind of move the set did not have at all, and it is the one the measurement asked for. They are appended rather than inserted so that a network trained on the five keeps the meaning of every value it already learnt, and so that the byte the wire carries needs no wider field.
+
+    Widening the set is the answer to what the pinned arms measured, which is that the whole of this layer's choice was worth about what the measurement floor is: taking every departure away and always holding costs 0.013 to 0.026 of a fight, and always breaking off 0.014 to 0.023, so whatever is left above the rule ladder is smaller than the floor and no amount of training reaches it. A choice that small is not a choice a policy can be judged on, and the way to make it larger is to give the layer a move that decides fights rather than trims them.
     """
 
     HOLD = 0
@@ -62,6 +64,10 @@ class Deviation(enum.IntEnum):
     WITHDRAW_FAR = 5
     #: Concentrate on the longest-ranged enemy in reach rather than the weakest FOCUS picks. Which enemy to take out first, which a rule used to fix as the weakest, is the layer's here: the gun that reaches furthest is often worth more dead than the one nearest to dying.
     FOCUS_THREAT = 6
+    #: Walk in until the whole squad is inside its own shortest weapon range, which is the mirror of KITE and the departure the set was missing.
+    #:
+    #: The engine halts a unit when it acquires a target, and acquisition happens at sight range while shooting needs weapon range, so two forces walking at each other come to rest in the gap between the two and stay there. A squad that outranges what is shooting at it wins in that gap by staying in it, which is what KITE is for. A squad that is outranged loses in it without ever firing, and the seven departures before this one gave it nothing to do about that: withdrawing leaves the errand, holding leaves the engine's own halt in force, and concentrating is refused because the rule that picks a target only offers what is already inside our reach. The whole of the answer is to close the distance, and it is a move the engine will not make on its own.
+    CLOSE = 7
 
 
 class Status(enum.IntEnum):

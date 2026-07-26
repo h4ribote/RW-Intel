@@ -20,6 +20,9 @@ final class Commander {
     /** How far apart a spreading squad ends up, chosen to clear the radius of an area weapon. */
     private static final float SPREAD = 140f;
 
+    /** How much of its own reach a closing squad walks to, short of the whole of it so that it comes to rest shooting rather than driving through what it came for. Matches CLOSE_SHARE in `rwintel/control/policy/tactics.py`. */
+    private static final float CLOSE_SHARE = 0.8f;
+
     /** Deviations, matching `rwintel/wire/action.py`. */
     private static final int HOLD = 0;
     private static final int WITHDRAW = 1;
@@ -28,6 +31,7 @@ final class Commander {
     private static final int KITE = 4;
     private static final int WITHDRAW_FAR = 5;
     private static final int FOCUS_THREAT = 6;
+    private static final int CLOSE = 7;
 
     /** The stance a squad breaking off contact is put into, so that nothing turns around to fight on the way out. */
     private static final int HOLD_FIRE = 3;
@@ -163,6 +167,7 @@ final class Commander {
         // The whole way out rather than the short step WITHDRAW takes: the distance is bounded to the same limit fallBack backs any withdrawal off to, so this asks for that limit and gets as much of it as the squad has not already used.
         else if (deviation == WITHDRAW_FAR) fallBack(game, self, squad, target, HOLD_FIRE, MAX_WITHDRAWAL);
         else if (deviation == KITE) kite(game, self, squad, target);
+        else if (deviation == CLOSE) close(game, self, squad);
         else if (deviation == HOLD && squad.lastDeviation != HOLD) advance(game, self, squad, target, squad.stance);
         // Holding is the one departure that is issued once and then left to the engine, so it is only recorded when the order actually went out. Recording it after an order that could not be issued would leave the squad believing it was advancing with nothing to advance it.
         if (deviation != HOLD) squad.lastDeviation = deviation;
@@ -295,6 +300,39 @@ final class Commander {
             return;
         }
         fallBack(game, self, squad, target, squad.stance, advantage);
+    }
+
+    /**
+     * Walks in until the whole squad is inside its own shortest weapon range of the nearest thing it is fighting.
+     *
+     * The mirror of kiting and the departure the set was missing. A unit halts when it acquires a target and acquisition happens at sight range, while shooting needs weapon range, so two forces walking at each other come to rest in the gap between the two: the side that reaches further wins there by staying, and the side that does not loses there without ever firing. Nothing else in the set answers that — withdrawing leaves the errand, holding leaves the engine's own halt in force — and the engine will not close on its own.
+     *
+     * Moved rather than attack-moved, exactly as a withdrawal is moved, because an attack-move is the order that halted the squad in the first place. The stance is left as the contract's, since a squad walking in is walking in to shoot. The destination is short of the nearest opponent by a share of our own reach, so the squad stops at shooting distance rather than driving through and out the other side.
+     */
+    private void close(Object game, Object self, World.Squad squad) throws Exception {
+        World.Seen nearest = null;
+        float best = Float.MAX_VALUE;
+        for (World.Seen seen : world.visible) {
+            if (!opposes(squad, seen) || seen.handle == null) continue;
+            float dx = seen.x - squad.x;
+            float dy = seen.y - squad.y;
+            float distance = dx * dx + dy * dy;
+            if (distance < best) {
+                best = distance;
+                nearest = seen;
+            }
+        }
+        if (nearest == null || best > CONTACT * CONTACT) return;
+        float dx = nearest.x - squad.x;
+        float dy = nearest.y - squad.y;
+        float length = (float) Math.sqrt(best);
+        float reach = reachOf(squad) * CLOSE_SHARE;
+        // Already inside our own reach: there is nothing to close, and ordering the walk anyway would march the squad onto the enemy and past it.
+        if (length < 1f || length <= reach) return;
+        Object command = engine.command(game, issuer(game, self, squad));
+        if (!addAll(command, squad)) return;
+        engine.setStance(command, squad.stance);
+        engine.moveTo(command, squad.x + dx / length * (length - reach), squad.y + dy / length * (length - reach));
     }
 
     /** Whether anything on the other side is close enough for this squad to be manoeuvring against it. */
