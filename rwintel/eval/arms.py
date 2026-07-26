@@ -12,6 +12,7 @@ from typing import Callable, List, Optional, Tuple
 
 from ..control.policy import ScriptPolicy, script_policy
 from ..control.policy.contracts import Posture
+from ..control.policy.operations import Concentrated as _Concentrated
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ def parse(name: str) -> Arm:
     key = name.upper()
     if key in Posture.__members__:
         return name.lower(), pinned(Posture[key])
-    raise ValueError(f"no arm named {name!r}: expected 'script', 'ops:<path>', 'strategy:<path>', or one of {', '.join(p.name.lower() for p in Posture)}")
+    raise ValueError(f"no arm named {name!r}: expected 'script', 'ops:<path>', 'strategy:<path>', 'ops-pin', 'ops-concentrate', or one of {', '.join(p.name.lower() for p in Posture)}")
 
 
 def _is_learnt(name: str) -> bool:
@@ -103,6 +104,24 @@ def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tup
     return (os.path.splitext(os.path.basename(path))[0], build), batcher
 
 
+def concentrating(name: str = "ops-concentrate") -> Arm:
+    """The chain with the operational layer's choice of region replaced by the one the strategic layer wants most, for the match runner.
+
+    The arena says this arm is worth measuring in a match. On the constructed board it beats the handwritten ladder by about 0.08 to 0.10 of the side score and takes about a fifth of the discs it could only gain by taking, against the ladder's twentieth — and taking ground is not an arena-shaped skill: income comes from extractors standing on resource points, so ground is upstream of the economy and the economy is where this chain loses. Measured over 480 matches, the chain finishes on 35.5 income against a difficulty-1 opponent's 77.9 and 9,157 credits of standing value against 25,662.
+
+    Whether the arena's advantage carries into a match is exactly what has never been measured, and the design says why it might not: that board scores holding and taking ground and nothing else, while a match asks what the ground was for. No network, so nothing is loaded and nothing has to be torn down.
+    """
+    from ..learn.policy import OPERATIONAL, LearningPolicy
+
+    def build(session) -> LearningPolicy:
+        # The concentrating rule is a script layer, not a decider, so it replaces the operational layer whole rather than answering for it. No rollout: read from, not learnt from.
+        policy = script_policy(session)
+        policy.operations = _Concentrated(session, policy.catalogue)
+        return policy
+
+    return (name, build)
+
+
 def pinned_operational(name: str = "ops-pin") -> Arm:
     """The chain with the operational layer pinned to one legal region and task, for the match runner.
 
@@ -129,6 +148,8 @@ def build_all(names: List[str], device: Optional[str] = None, greedy: bool = Fal
         for name in names:
             if name == "ops-pin":
                 arms.append(pinned_operational(name))
+            elif name == "ops-concentrate":
+                arms.append(concentrating(name))
             elif _is_learnt(name):
                 arm, batcher = learnt(name, device, greedy)
                 arms.append(arm)
