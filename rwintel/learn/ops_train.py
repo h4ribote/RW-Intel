@@ -20,6 +20,7 @@ import logging
 import os
 import sys
 
+from ..control.policy.operations import Concentrated, Operations
 from ..control.session import EpisodeSettings
 from ..eval.journal import Journal, default_path
 from .__main__ import _device, _given, _load, _save, _serve, _warmup
@@ -32,6 +33,13 @@ from .ops_run import _arena_seed, frozen_tactics, pool, report, signal
 from .rollout import FIGHT_DISCOUNT, FIGHT_TRACE, Rollout
 from .train import Trainer
 from .train import Optimiser
+
+#: The layers the other side of the board may be given, and what each teaches by being there.
+#:
+#: `script` is the handwritten chain and is what every measurement on this arena was taken against; it is the default because a run trained against something else is still MEASURED against it, and changing both at once would leave nothing to read the change by. `concentrate` sends every enemy squad at the one region the board wants most, which is the arm that scores best here — against it, ground left unheld is ground lost, where against the script it is very nearly ground kept.
+#:
+#: Which opponent trains the better layer is not something this project has measured. What it is here for is stated plainly: the per-squad reward pays exactly nought for a squad sent at ground the board puts no priority on, less than nought for one sent to hold ground already owned, and something positive only for one that takes. Against an enemy that takes nothing, doing nothing is a stable answer to that arithmetic, and the arena had no way to ask a harder question.
+OPPONENTS = ("script", "concentrate")
 
 log = logging.getLogger(__name__)
 
@@ -58,9 +66,14 @@ def train(arguments) -> int:
         return LearntOperations(session, catalogue, NetworkOperations(net, device, batcher),
                                 rollout, session.instance, discount=FIGHT_DISCOUNT)
 
+    def enemy(session, catalogue):
+        # The other side of the mirror. Built here rather than left to the arena's default so that a run can be trained against something that punishes abandoning ground; it is handed no rollout either way, since only one layer moves in a training run.
+        return Concentrated(session, catalogue) if arguments.opponent == "concentrate" else Operations(session, catalogue)
+
     def arm(session) -> OpsArena:
         # One arm trains, so the board advances with every episode.
-        return OpsArena(session, operations=learnt, tactics=frozen.build, tactics_name=frozen.name,
+        return OpsArena(session, operations=learnt, opponent=enemy,
+                        tactics=frozen.build, tactics_name=frozen.name,
                         # Not a digest, because the parameters this side plays under change with every update: what a training episode was played by is a moving policy and no file names it. Written all the same so that a training journal can never be paired against a measuring run's arm as though it were a fixed one.
                         operations_name="learning",
                         seed=_arena_seed(arguments.seed, session, 1),
@@ -78,8 +91,8 @@ def train(arguments) -> int:
     under = "-under-" + os.path.splitext(os.path.basename(arguments.tactics))[0] if arguments.tactics else ""
     journal = Journal(arguments.record or default_path("ops-train" + under))
     log.info("training the operational layer on the arena over %d episode(s) each on %d instance(s), horizon %ds, "
-             "both sides fighting under the %s tactical layer",
-             arguments.episodes, arguments.instances, arguments.horizon, frozen.name)
+             "against the %s chain, both sides fighting under the %s tactical layer",
+             arguments.episodes, arguments.instances, arguments.horizon, arguments.opponent, frozen.name)
     try:
         sessions = _serve(arguments, [("ops-learn", arm)], episode, journal)
     finally:
@@ -130,6 +143,12 @@ def main(argv=None) -> int:
     parser.add_argument("--max-seconds", type=int, default=0)
     parser.add_argument("--device", default=None)
     parser.add_argument("--load", default=None, help="parameters to start from, an imitation of the script or an earlier run")
+    parser.add_argument("--opponent", choices=OPPONENTS, default=OPPONENTS[0],
+                        help="what the other side of the mirror plays. The script chain is the default and is what "
+                             "every measurement on this arena is taken against; the concentrating arm is the "
+                             "hardest thing here, and against it ground left unheld is ground lost, where against "
+                             "the script it is nearly ground kept. The measuring runner always faces the script, so "
+                             "moving this changes the training and not the instrument")
     parser.add_argument("--tactics", default=None,
                         help="parameters for a trained tactical layer to be put, frozen, under BOTH sides of the board, read at its likeliest action and recording nothing; this is the half of the learning order in which the settled layer is held still and the operational layer alone moves. Left out, both sides fight the handwritten layer, which is what every measurement on this arena so far was made under; given, the run is a different instrument and its journal says so")
     parser.add_argument("--save", default=None, help="where the trained parameters are written")
