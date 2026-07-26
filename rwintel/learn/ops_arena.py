@@ -161,6 +161,10 @@ class OpsStatistics:
     #: `periods` is the operational decisions this side's squads were given over the episode, one per squad per operational frame it held a contract; `errands` is how many distinct contracts those decisions were divided into. Their ratio is the length of an errand in decisions, which is a description of how decisive an arm is — the handwritten ladder holds a squad on the errand it is running while a learnt layer re-draws every period. It is no longer a bound on how far the arena's payment reaches: every period is paid its own movement now, so the whole of the decision mass is reached whatever the ratio comes to. Written down per episode and per arm because the figure differs by arm and cannot be quoted once for the arena.
     periods: int = 0
     errands: int = 0
+    #: Of those decisions, how many named a region the board put a priority on — which on this arena is exactly a region that is scored, since the priorities sit on the contested points alone.
+    #:
+    #: It exists to separate two ways of ending up far from the scored ground, which the reach alone cannot tell apart. A layer that re-draws its errand every few periods never arrives anywhere, and ends mid-board with its contracts pointing at contests it kept leaving. A layer that contracts unscored ground is not going anywhere that counts in the first place — and the reward makes that a real temptation, because a squad sent to a region with no priority is paid exactly nought, while one sent to hold ground it already owns can only be paid less than nought. The first is answered by pricing the re-drawing; the second by the reward's own floor. Nothing in the record said which was happening.
+    on_priority: int = 0
 
     def as_dict(self) -> dict:
         return {"scored": self.scored, "side_score": round(self.side_score, 6),
@@ -175,7 +179,8 @@ class OpsStatistics:
                 "board": self.board, "horizon_ms": self.horizon_ms, "radius": round(self.radius, 1),
                 "squads": self.squads, "pairs": self.pairs, "garrison": round(self.garrison, 1),
                 "tactics": self.tactics, "operations": self.operations,
-                "terminals": self.terminals, "periods": self.periods, "errands": self.errands}
+                "terminals": self.terminals, "periods": self.periods, "errands": self.errands,
+                "on_priority": self.on_priority}
 
 
 class OpsArena(Arena):
@@ -506,6 +511,8 @@ class OpsArena(Arena):
             if contract is None:
                 continue
             self.statistics.periods += 1
+            if self.priorities.get(contract.target_region, 0.0) > 0.0:
+                self.statistics.on_priority += 1
             if self._issued.get(squad.id) != contract.issued_at_ms:
                 self._issued[squad.id] = contract.issued_at_ms
                 self.statistics.errands += 1

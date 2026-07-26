@@ -377,7 +377,9 @@ def signal(sessions, arm: Optional[str] = None) -> None:
 
     The three figures are the decisions the squads were given, the errands those decisions were divided into, and how many horizon payments actually landed on a decision. The last is nought for every arm of this runner and that is not a fault: no arm here is handed a rollout, so no decision is recorded and there is nothing for a payment to land on. It is reported all the same, because it is the figure a training run has to be read by and a measuring run is where the errand lengths it is compared against are taken.
     """
-    periods = errands = terminals = staged = 0
+    periods = errands = terminals = staged = on_priority = 0
+    # Whether the field is there at all, kept apart from its value: an episode written before it existed carries no count, and a missing count read as nought would report an arm as having named no scored ground when nothing had asked.
+    counted = False
     for session in sessions:
         for record in session.records:
             if (arm is not None and record.arm != arm) or not record.statistics.get("scored"):
@@ -386,12 +388,19 @@ def signal(sessions, arm: Optional[str] = None) -> None:
             errands += int(record.statistics.get("errands", 0))
             terminals += int(record.statistics.get("terminals", 0))
             staged += int(record.statistics.get("squads", 0))
+            if "on_priority" in record.statistics:
+                counted = True
+                on_priority += int(record.statistics["on_priority"])
     if not periods or not errands:
         return
     # No share of the decisions is quoted any more. It used to be `min(staged, errands) / errands`, on the ground that the horizon paid each squad's last errand and no other, and that ground is gone: every period is paid its own movement now, so a payment reaches every decision whatever the errands come to, and the old figure would assert the opposite of the truth on every run.
     log.info("this arm's squads took %d operational decision(s) over %d errand(s), so an errand ran %.1f decision(s) "
              "before the arm changed its mind; %d horizon payment(s) landed on a decision out of %d squad(s) staged",
              periods, errands, periods / errands, terminals, staged)
+    # Whether those decisions were even pointed at ground the episode is scored on. An arm can end far from every contest because it kept changing its mind and never arrived, or because it was never sent at a contest at all, and the reach cannot tell those apart while this can: the priorities sit on the contested points alone, so a decision that names no priority names nothing that is scored.
+    if counted:
+        log.info("%d of them named ground the board put a priority on, which is %.0f per cent of this arm's decisions",
+                 on_priority, 100.0 * on_priority / periods)
 
 
 def measure(arguments) -> Dict[str, Summary]:
