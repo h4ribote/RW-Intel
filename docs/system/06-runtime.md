@@ -181,6 +181,12 @@ tools/macos/learn-run.sh --count 8 --speed 10 -- \
 
 **直し方は、落ちた番号でもう一つ繋ぐことである。** セッションは番号で識別され、再接続の経路がもともとある。同じ番号のエージェントを 1 個立てると、そのセッションは残りのエピソードを続きから走らせ、実行は正常に終わって保存まで通る。
 
+**無人で回すなら、これは見張りに任せる。** `tools/macos/watch-instances.sh` は実行のログを見て、他のインスタンスが書き続けているあいだ黙り込んだ番号を見つけ、その番号でエージェントを 1 個立てる。実行の終わりを表すファイルが現れたら見張りは止まり、**立てたエージェントを片付ける**——残しておくと次の実行にその番号で入り、一つのセッションに二つのエージェントが乗る。
+
+```bash
+./tools/macos/watch-instances.sh local/strategy-s1.log local/strategy-s1.done &
+```
+
 ```bash
 docker run -d --name rw-rescue-0 --platform linux/amd64 \
   --add-host=host.docker.internal:host-gateway \
