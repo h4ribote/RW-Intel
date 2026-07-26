@@ -171,6 +171,28 @@ tools/macos/learn-run.sh --count 8 --speed 10 -- \
 
 `docker image inspect <名前>` は名前をホストのプラットフォームのマニフェストに照らして解決するので、arm64 ホストでは amd64 のイメージを「無い」と報告する。`docker run` はそれでも見つけて走らせる。`tools/macos/_common.sh` の存在確認は `docker images -q` で、タグの実体を直接読んで存在すれば id を、なければ何も返さない。これがこの確認が本来問うている存在の問いである。
 
+## インスタンスが一つ落ちると実行は終われない
+
+**ゲームプロセスは落ちることがある。** 実測で一度、480 試合の実行の途中でインスタンス 1 個が `malloc(): unsorted double linked list corrupted` を出して死んだ(2026-07-26、マップ Lake、300 秒の試合)。エンジン側のネイティブヒープの破壊であり、こちら側から防げるものではない。
+
+**そのとき実行は終わらない。** 制御プロセスは全インスタンスが自分のエピソードを走り終えるまで待つので、7 個が終わっても 1 個が欠けたままだと待ち続ける。
+
+**そして中断も効かない。** `learn-run.sh` はホストのコマンドを非対話シェルのバックグラウンドジョブとして起動するので、そのプロセスは **SIGINT を無視する**。`kill -INT` は何も起こさず、`kill` で終わらせるとパラメータの保存を通らずに死ぬ——実行 1 本ぶんが消える。
+
+**直し方は、落ちた番号でもう一つ繋ぐことである。** セッションは番号で識別され、再接続の経路がもともとある。同じ番号のエージェントを 1 個立てると、そのセッションは残りのエピソードを続きから走らせ、実行は正常に終わって保存まで通る。
+
+```bash
+docker run -d --name rw-rescue-0 --platform linux/amd64 \
+  --add-host=host.docker.internal:host-gateway \
+  -v "$PWD/local/RustedWarfare_Linux":/game:ro -v "$PWD/agent":/agent:ro \
+  -v "$PWD/tools/macos/rw-run.sh":/rw-run.sh:ro -v "$PWD/local/agent-logs-rescue":/tmp/rw-logs \
+  -e RW_INSTANCES=1 -e RW_AGENT=/agent/rwagent.jar \
+  -e RW_AGENT_OPTS="host=host.docker.internal,port=8642,instance=0,speed=10,tactical=200,operational=2000" \
+  -e RW_DURATION=0 rw-linux:latest bash /rw-run.sh
+```
+
+**落ちたインスタンスの番号は、ログのどれが「自分のエピソードを走り終えた」と言っていないかで分かる。** 復帰したエージェントは自分のエピソードを 1 から数え直すので、記録の episode 欄はその実行の中で重複する。**セッションが数えているのは記録の本数なので、終わりの判定は正しい。**
+
 ## 再現性のための注意
 
 - **mod は無効化する。** 導入済み mod はユニット定義を書き換えるため、`-nomods` を付けないと条件が揃わない。実測環境には利用者が導入した mod が存在した。
