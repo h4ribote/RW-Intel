@@ -30,6 +30,7 @@ from rwintel.control.policy.contracts import (
     ALLOCATION,
     Doctrine,
     FrontReport,
+    OperationsOrders,
     Posture,
     SquadRecord,
     TaskContract,
@@ -99,6 +100,7 @@ from rwintel.learn.reward import (
     OperationalReward,
     Outcome,
     SPENDING_WEIGHT,
+    StrategicReward,
     TacticalReward,
     WIPED_REWARD,
 )
@@ -778,6 +780,57 @@ def test_the_engagement_arena_anchors_each_side_where_it_was_put_down():
     assert their_place == (2 * site[0] - our_place[0], 2 * site[1] - our_place[1])
 
 
+def test_the_board_says_where_the_squad_being_decided_is_already_going():
+    """The one region feature that is about the decision rather than about the board, and why it is there.
+
+    A squad's own row says how long its mission has been running and how much of its budget is gone, and nothing anywhere said WHERE it was going. So a layer could not see the errand it was already on, and the only way it had to keep one was to re-choose the same region from nothing every period. Measured, its errands run about a fifth as long as the handwritten ladder's, and shorten further the longer it is trained while its score falls.
+
+    The flag marks the slot the region sits in rather than the region's own number, which is what keeps it readable from either side of a mirrored board: the slots run outward from each side's own home, so a squad and its mirror mark the same row.
+    """
+    regions = [_region(1, 0.0, 0.0, distance=100.0), _region(2, 600.0, 0.0, distance=700.0)]
+    view = _view([_unit(1, 10.0, 0.0)], regions)
+    squad = _squad(members=(1,))
+
+    def row(state, slot):
+        start = GLOBAL_SIZE + slot * REGION_SIZE
+        return dict(zip(REGION_FEATURES, state[start:start + REGION_SIZE]))
+
+    plain = operational_state(view, None, [squad], 30000)
+    assert row(plain, 0)["contracted"] == 0.0 and row(plain, 1)["contracted"] == 0.0, (
+        "a state built for no particular errand marks nothing")
+
+    near = operational_state(view, None, [squad], 30000, contracted=1)
+    far = operational_state(view, None, [squad], 30000, contracted=2)
+    assert row(near, 0)["contracted"] == 1.0 and row(near, 1)["contracted"] == 0.0
+    assert row(far, 0)["contracted"] == 0.0 and row(far, 1)["contracted"] == 1.0
+    # Nothing else moves: it is one flag on one row, not a re-reading of the board.
+    assert sum(1 for a, b in zip(near, far) if a != b) == 2
+
+
+def test_a_layer_asks_about_each_squad_from_that_squads_own_errand():
+    """Two squads deciding on one board are handed two states, differing in the one feature that says where each is already going. It is built per squad because that is what it is; the rest of the board is read once for the period, since it is the same board for every squad."""
+    regions = [_region(1, 0.0, 0.0, distance=100.0), _region(2, 600.0, 0.0, distance=700.0)]
+    view = _view([_unit(1, 10.0, 0.0), _unit(2, 20.0, 0.0)], regions)
+    first, second = _squad(id=0, members=(1,)), _squad(id=1, members=(2,))
+    first.contract.target_region, second.contract.target_region = 1, 2
+
+    asked = []
+
+    class _Watching:
+        def choose(self, state, slot, region_mask, task_mask):
+            asked.append(list(state))
+            return Choice(action=0, second=0)
+
+    layer = LearntOperations(None, _CATALOGUE, _Watching())
+    orders = OperationsOrders(posture=Posture.ARM, priorities={1: 1.0, 2: 1.0}, offensive=True,
+                              loss_allowance=1000.0)
+    layer.decide(view, orders, [first, second], [], 30000)
+    assert len(asked) == 2, "each squad is asked once"
+    assert asked[0] != asked[1], "two squads on one board were handed the same errand"
+    differ = [index for index, (a, b) in enumerate(zip(*asked)) if a != b]
+    assert len(differ) == 2, "the two states should differ in the contracted flag of two rows and nothing else"
+
+
 def test_the_operational_cut_reads_one_mirrored_board_the_same_way_from_either_side():
     """The property the operations arena depends on at the layer it is actually training: one board laid out as a point reflection has to read identically from the two seats, block for block and number for number.
 
@@ -810,6 +863,12 @@ def test_the_operational_cut_reads_one_mirrored_board_the_same_way_from_either_s
         apart = [name for name, a, b in zip(REGION_FEATURES, rows(mine, slot), rows(yours, slot))
                  if abs(a - b) > 1e-9]
         assert not apart, "region slot %d differs between the sides in %s" % (slot, apart)
+    # The one feature that is about the decision rather than about the board is congruent too. Each squad is marked at the region its own contract names — ours at region one, its mirror at region two — and because the slots run outward from each side's own home, the two marks land in the same row. A mark laid out by the map's numbering would not.
+    marked = operational_state(ours, None, [our_squad], 30000, base=0, contracted=1)
+    theirs_marked = operational_state(theirs, None, [their_squad], 30000, base=1, contracted=2)
+    assert marked == theirs_marked, "the contracted flag is not congruent between the two sides"
+    assert marked != mine, "marking the contracted region changed nothing"
+
     assert mine == yours, (
         "the whole operational cut of a mirrored board should read the same from either side, and the first "
         "of %d numbers to differ is at %s"
@@ -2439,7 +2498,8 @@ class _Ending:
 
 
 def _report(**overrides):
-    fields = dict(income=30.0, credits=1500.0, military_value=4000.0, enemy_value=4000.0,
+    fields = dict(income=30.0, credits=1500.0, military_value=4000.0, enemy_military_value=4000.0,
+                  our_value=7000.0, enemy_value=7000.0,
                   held=3, enemy_held=3, lost_regions=0, enemy_bases=2,
                   units=20, unit_cap=100, under_construction=1)
     fields.update(overrides)
@@ -2478,9 +2538,31 @@ def test_the_strategic_state_is_its_feature_list_and_nothing_leaves_the_range():
     assert dict(zip(STRATEGIC_FEATURES, untouched))["driven_back"] == 0.0
 
     # An empty board is an ordinary board here: the first frames of a match have nothing standing and nothing contacted, and a division by nothing in this cut would end the run before the first decision.
-    empty = strategic_state(_report(military_value=0.0, enemy_value=0.0, held=0, enemy_held=0,
-                                    units=0, unit_cap=0), [], 0)
+    empty = strategic_state(_report(military_value=0.0, enemy_military_value=0.0, our_value=0.0,
+                                    enemy_value=0.0, held=0, enemy_held=0, units=0, unit_cap=0), [], 0)
     assert len(empty) == STRATEGIC_SIZE and all(math.isfinite(value) for value in empty)
+
+
+def test_the_two_pairs_of_values_each_compare_like_with_like():
+    """The defect this pair of fields was split to remove, pinned so that it cannot come back quietly.
+
+    The report used to carry our fighters and their whole side under one pair of names, so anything reading the two as a comparison compared our army with their army plus their buildings plus their builders, and read us as worse off than we were. Nothing read it that way while the transition rule was the only reader; the strategic layer's reward is a comparison, and so is the operational cut's edge.
+
+    So there are two pairs now, and each is tested by moving one side of it. Adding buildings to the enemy moves the whole-standing pair, which is what the match is scored on, and must not move the fighting pair, which is what an edge between two armies means.
+    """
+    lean = _report(military_value=4000.0, enemy_military_value=4000.0, our_value=7000.0, enemy_value=7000.0)
+    built = _report(military_value=4000.0, enemy_military_value=4000.0, our_value=7000.0, enemy_value=12000.0)
+
+    def edge(report):
+        return dict(zip(STRATEGIC_FEATURES, strategic_state(report, _places(), 30000)))["military_edge"]
+
+    assert edge(lean) == edge(built) == 0.5, "the edge feature moved when only the enemy's buildings did"
+
+    reward = StrategicReward(discount=1.0)
+    assert abs(reward._potential(lean)) < 1e-9
+    assert reward._potential(built) < -0.2, (
+        "the potential is the running form of the match score, which counts everything standing, "
+        "so buildings the enemy put up have to move it")
 
 
 def test_the_strategic_layer_is_the_script_with_one_method_replaced():
@@ -2519,7 +2601,7 @@ def test_a_match_returns_its_own_score_and_the_shaping_cancels_whole():
                            instance=0, discount=1.0)
     edges = [(4000.0, 4000.0), (5000.0, 3000.0), (3000.0, 6000.0), (7000.0, 2000.0)]
     for period, (ours, theirs) in enumerate(edges):
-        layer.decide(_report(military_value=ours, enemy_value=theirs), _places(), 10000 * (period + 1))
+        layer.decide(_report(our_value=ours, enemy_value=theirs), _places(), 10000 * (period + 1))
     opening = 2.0 * (4000.0 / 8000.0 - 0.5)
     layer.conclude(0.6, "match")
 
@@ -2530,7 +2612,7 @@ def test_a_match_returns_its_own_score_and_the_shaping_cancels_whole():
 
     # And a second match on the same layer opens a fresh errand rather than continuing the first: the ledger the terminal closed is gone, a new one opens at the new board, and the decision now waiting is not appended to the trajectory that has already been paid.
     assert layer.reward.mission is None and layer.pending is None
-    layer.decide(_report(military_value=1000.0, enemy_value=9000.0), _places(), 10000)
+    layer.decide(_report(our_value=1000.0, enemy_value=9000.0), _places(), 10000)
     assert len(rollout.done) == 1 and not rollout.live
     assert layer.pending is not None
     assert abs(layer.reward.mission.opening - 2.0 * (1000.0 / 10000.0 - 0.5)) < 1e-9
@@ -2546,13 +2628,13 @@ def test_a_posture_a_human_pinned_is_not_recorded_and_its_periods_are_still_carr
                            instance=0, discount=1.0)
     layer.forced = Posture.DEFEND
     for period, (ours, theirs) in enumerate([(4000.0, 4000.0), (6000.0, 2000.0)]):
-        layer.decide(_report(military_value=ours, enemy_value=theirs), _places(), 10000 * (period + 1))
+        layer.decide(_report(our_value=ours, enemy_value=theirs), _places(), 10000 * (period + 1))
     assert layer.posture is Posture.DEFEND
     assert not rollout.live and not rollout.done, "a pinned posture recorded a decision of its own"
     assert layer.owed != 0.0, "the shaping earned while the posture was pinned was dropped"
 
     layer.forced = None
-    layer.decide(_report(military_value=5000.0, enemy_value=3000.0), _places(), 30000)
+    layer.decide(_report(our_value=5000.0, enemy_value=3000.0), _places(), 30000)
     layer.conclude(0.25, "match")
     trajectory, = rollout.done
     opening = 2.0 * (4000.0 / 8000.0 - 0.5)
@@ -2589,7 +2671,7 @@ def test_the_strategic_trajectory_cannot_collide_with_a_squads():
     tactical = LearntTactics(None, _CATALOGUE, _Fixed(), rollout=rollout, instance=0)
     strategic.decide(_report(), _places(), 10000)
     tactical.decide(_skirmish(), [_squad()], 21000)
-    strategic.decide(_report(military_value=6000.0), _places(), 20000)
+    strategic.decide(_report(our_value=6000.0), _places(), 20000)
     tactical.decide(_skirmish(), [_squad()], 21200)
     assert sorted(rollout.live) == [(0, LearntStrategy.KEY), (0, 0)]
 

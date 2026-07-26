@@ -221,8 +221,11 @@ class StrategicReward:
         return Outcome(reward=reward)
 
     def _potential(self, report) -> float:
-        """The military edge as the score defines it: ours less theirs over their sum, on −1 to +1, which is twice the share less a half. Written as the edge rather than as the share so that it is the same number the terminal is, and so that an even board is nought and carries no constant a discount below one would charge for."""
-        ours = float(getattr(report, "military_value", 0.0))
+        """The military edge as the score defines it: ours less theirs over their sum, on −1 to +1, which is twice the share less a half. Written as the edge rather than as the share so that it is the same number the terminal is, and so that an even board is nought and carries no constant a discount below one would charge for.
+
+        Everything standing on both sides, which is what the game's own standing counts and therefore what the terminal is a ratio of. The report also carries the mobile armed force on both sides, and that is the right pair for a loss allowance and the wrong one here: a potential that left our buildings out of our side and theirs into theirs — which is what the report used to offer as its only pair — is not the running form of anything the match is scored on.
+        """
+        ours = float(getattr(report, "our_value", 0.0))
         theirs = float(getattr(report, "enemy_value", 0.0))
         return self.military_weight * 2.0 * (_share(ours, theirs) - 0.5)
 

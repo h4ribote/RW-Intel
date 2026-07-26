@@ -317,6 +317,8 @@ class LearntOperations(Operations):
         #: What the board a contest is scored on last read for each of this side's squads, handed in from outside before the period's decisions are settled against it. None in a match, where there is no such board and the region block is the only signal there is. The switch is per board and not per squad on purpose: a trajectory whose steps were paid in two different quantities sums to neither.
         self._standing: Optional[Dict[int, float]] = None
         self._state: List[float] = []
+        #: What the period's state was built from, kept so that the one feature which depends on the squad being asked can be written without reading the board a second time.
+        self._view_of = None
         self._regions: List[float] = []
         #: The regions in the order the state was written in, kept from the period they were written so that a chosen slot is decoded against the very list it was offered over. Recomputing it at the decision would read the same view twice and give the same answer, but nothing would say so.
         self._slots: List = []
@@ -343,6 +345,8 @@ class LearntOperations(Operations):
         if squads:
             first = min(squad.id for squad in squads)
             self._base = first if self._base is None else min(self._base, first)
+        # Everything but the one feature that is about the squad being asked. The rest of the board is read once for the period, since it is the same board for every squad and reading it again per squad would be the same answer at four times the cost.
+        self._view_of = (view, orders, squads, game_time_ms)
         self._state = operational_state(view, orders, squads, game_time_ms, self._spawns, self.base)
         self._regions = region_mask(view)
         self._slots = operational_slots(view)
@@ -430,6 +434,13 @@ class LearntOperations(Operations):
         tasks = task_mask(squad.doctrine)
         if not any(tasks) or not any(self._regions):
             return None
+        # The board as this squad sees it, which differs from the period's shared reading in one feature: which region it is already on its way to. Built per squad because that is what it is — a fact about the decision and not about the board — and cheap enough at four squads a period to be built rather than patched.
+        state = self._state
+        contract = squad.contract
+        if contract is not None:
+            view_of, orders_of, squads_of, now_of = self._view_of
+            state = operational_state(view_of, orders_of, squads_of, now_of, self._spawns, self.base,
+                                      contracted=contract.target_region)
         if self.decider is None:
             chosen = super()._pick(view, orders, squad, avoid)
             if chosen is None:
@@ -440,7 +451,7 @@ class LearntOperations(Operations):
                 return chosen
             choice = Choice(action=slot, second=int(chosen[0]))
         else:
-            choice = self.decider.choose(self._state, squad.id - self.base, self._regions, tasks)
+            choice = self.decider.choose(state, squad.id - self.base, self._regions, tasks)
         if choice is None:
             return None
         if not 0 <= choice.action < len(self._slots):
@@ -448,7 +459,7 @@ class LearntOperations(Operations):
         region = self._slots[choice.action]
         if self.rollout is not None:
             self.pending[squad.id] = Step(
-                state=self._state, action=choice.action, mask=list(self._regions),
+                state=state, action=choice.action, mask=list(self._regions),
                 second=choice.second, second_mask=list(tasks),
                 log_prob=choice.total_log_prob, value=choice.value,
                 squad=squad.id, at_ms=view.observation.game_time_ms)

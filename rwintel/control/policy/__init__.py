@@ -23,6 +23,7 @@ from .contracts import (
     FrontReport,
     OperationsOrders,
     Replacement,
+    Role,
     Shortfall,
     SquadRecord,
 )
@@ -205,7 +206,11 @@ class ScriptPolicy:
             income=observation.income,
             credits=observation.credits,
             military_value=sum(s.value for s in view.fighters),
+            # Two pairs, each comparing like with like: the mobile armed force on both sides, and everything standing on both sides. The enemy's roles come off the same catalogue ours do, so what is left out of their fighting strength is what is left out of ours.
+            our_value=sum(s.value for s in view.ours),
             enemy_value=sum(s.value for s in view.enemies),
+            enemy_military_value=sum(s.value for s in view.enemies
+                                     if s.role not in (Role.STRUCTURE, Role.BUILDER)),
             held=sum(r.held_by_us for r in view.regions),
             enemy_held=sum(r.held_by_enemy for r in view.regions),
             lost_regions=len(self._lost_at),

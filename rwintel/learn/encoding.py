@@ -247,8 +247,9 @@ def strategic_state(report, regions: Sequence[RegionState], game_time_ms: int,
     growth = 0.0
     if len(income_history) >= 2 and income_history[0] > 0.0:
         growth = (income_history[-1] - income_history[0]) / max(income_history[0], 1.0)
+    # Fighters against fighters. The report carries both pairs, and the one that belongs in a feature called an edge is the one that compares like with like.
     ours = float(getattr(report, "military_value", 0.0))
-    theirs = float(getattr(report, "enemy_value", 0.0))
+    theirs = float(getattr(report, "enemy_military_value", 0.0))
     held = float(getattr(report, "held", 0))
     enemy_held = float(getattr(report, "enemy_held", 0))
     places = max(1, len(regions))
@@ -302,6 +303,8 @@ GLOBAL_FEATURES: Tuple[str, ...] = (
 REGION_FEATURES: Tuple[str, ...] = (
     "valid", "resources", "held_by_us", "held_by_enemy", "force_edge",
     "enemy_present", "distance", "seen_recently", "priority", "spawn",
+    # Where the squad being decided about is already going. Written per decision rather than per period, which is what makes it the one region feature that differs between two squads reading the same board.
+    "contracted",
 )
 
 SQUAD_FEATURES: Tuple[str, ...] = (
@@ -356,16 +359,20 @@ def squad_slots(squads: Sequence[SquadRecord], base: int = 0) -> Dict[int, int]:
 
 
 def operational_state(view: WorldView, orders, squads: Sequence[SquadRecord],
-                      game_time_ms: int, spawns: Sequence[int] = (), base: int = 0) -> List[float]:
+                      game_time_ms: int, spawns: Sequence[int] = (), base: int = 0,
+                      contracted: Optional[int] = None) -> List[float]:
     """The whole board as the operational layer sees it: aggregates, twenty-four region slots and eight squad slots, always in that order and always that long.
 
     The region slots run outward from this side's own home and the squad slots from this side's own first squad, so that one board read from either side of a mirror puts congruent things in the same rows. See `operational_slots` and `squad_slots`.
 
     Starting positions are passed in rather than read off the observation because the wire's region row does not carry the flag: it comes from the map file, which is read in this process when the region table is built. Which regions are starting positions is the difference between a place with resources on it and the place the enemy came from, and no other feature says it.
+
+    `contracted` is the region the squad this state is being built for is already on its way to, and it is the one thing here that is about the decision rather than about the board. Without it a layer cannot see the errand it is running: a squad's own row carries how long the mission has been going and how much of its budget is gone, and nothing anywhere says WHERE. A policy that cannot see where it is already going cannot decide to keep going there — it re-chooses from nothing every period — and measured, the layer's errands run about a fifth as long as the handwritten ladder's and shorten further the longer it is trained, while its score falls (docs/record/04-operations.md).
     """
     observation = view.observation
     ours = sum(s.value for s in view.fighters)
-    theirs = sum(s.value for s in view.enemies)
+    # Their fighting strength and not their whole side, so that the edge below compares like with like. What `ours` is used for elsewhere in this cut — the allowance it is quoted against, a squad's share of it — is our own commanded fighting strength, which is the same quantity.
+    theirs = sum(s.value for s in view.enemies if s.role not in (Role.STRUCTURE, Role.BUILDER))
     held = sum(region.held_by_us for region in view.regions)
     enemy_held = sum(region.held_by_enemy for region in view.regions)
 
@@ -391,7 +398,7 @@ def operational_state(view: WorldView, orders, squads: Sequence[SquadRecord],
     starts = frozenset(spawns)
     for slot in range(REGION_SLOTS):
         region = ordered[slot] if slot < len(ordered) else None
-        state.extend(_region_row(region, priorities, ours, game_time_ms, starts))
+        state.extend(_region_row(region, priorities, ours, game_time_ms, starts, contracted))
 
     slots = squad_slots(squads, base)
     by_slot = {slots[squad.id]: squad for squad in squads}
@@ -402,7 +409,7 @@ def operational_state(view: WorldView, orders, squads: Sequence[SquadRecord],
 
 
 def _region_row(region: Optional[RegionState], priorities: Dict[int, float], ours: float,
-                game_time_ms: int, spawns: frozenset) -> List[float]:
+                game_time_ms: int, spawns: frozenset, contracted: Optional[int] = None) -> List[float]:
     if region is None:
         return [0.0] * REGION_SIZE
     return [
@@ -416,6 +423,7 @@ def _region_row(region: Optional[RegionState], priorities: Dict[int, float], our
         1.0 if region.enemy_seen_at_ms and game_time_ms - region.enemy_seen_at_ms <= CONTACT_WINDOW_MS else 0.0,
         _clip(priorities.get(region.id, 0.0)),
         1.0 if region.id in spawns else 0.0,
+        1.0 if contracted is not None and region.id == contracted else 0.0,
     ]
 
 

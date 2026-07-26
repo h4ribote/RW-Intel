@@ -221,9 +221,15 @@ class FrontReport:
     """Everything to strategy. The state of the front and of the economy, which is all the strategic layer decides on."""
 
     income: float
-    credits: float
+    #: What this side commands that can fight, which is the scale a loss allowance is quoted against: the mobile armed force, with the buildings and the builders left out because neither is what a mission spends.
     military_value: float
+    #: Everything standing, ours and theirs, which is the quantity the match is scored on at the cut-off — buildings and builders included, since the game's own standing counts them.
+    #:
+    #: There are two pairs here rather than one, and they were one pair that did not match. `military_value` was our fighters and `enemy_value` was everything of theirs, so anything reading the two as a comparison was comparing our army with their whole side and reading us as worse off than we were. Nothing did read it that way while the transition rule was the only reader — it uses income, ground lost and enemy bases — but the strategic layer's reward is the running form of the match's own score, and that is a comparison. So the pairs are named for what they are: fighters against fighters, and everything against everything.
+    our_value: float
     enemy_value: float
+    enemy_military_value: float
+    credits: float
     #: Regions we hold a resource point in, and regions the enemy does.
     held: int
     enemy_held: int
