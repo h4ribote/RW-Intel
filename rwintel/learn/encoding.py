@@ -231,11 +231,13 @@ OPERATIONAL_SIZE = GLOBAL_SIZE + REGION_SLOTS * REGION_SIZE + SQUAD_SLOTS * SQUA
 #: What the operational state is made of, as one list, which is the form a set of parameters and a teacher file are stamped with so that neither can be read back under a feature list it was not written under.
 #:
 #: The three blocks are named once each rather than expanded over their slots, with the slot counts alongside. Everything the stamp has to catch changes this list — a renaming, a reordering, an addition or a removal in any block, and a change to how many slots a block has — while the expansion would be four hundred and thirty-odd names saying the same thing in a file that is read by a machine and printed to a person.
+#:
+#: The last entry names what a slot IS as well as how many there are, because the widths do not move when the layout does. Ordering the rows from this side's own home rather than by the map's numbering leaves every width where it was and changes what every row of the block means, which is precisely the silent failure the stamp exists to refuse.
 OPERATIONAL_FEATURES: Tuple[str, ...] = (
     *(f"global.{name}" for name in GLOBAL_FEATURES),
     *(f"region.{name}" for name in REGION_FEATURES),
     *(f"squad.{name}" for name in SQUAD_FEATURES),
-    f"slots.{REGION_SLOTS}.{SQUAD_SLOTS}",
+    f"slots.from_home.{REGION_SLOTS}.own_first.{SQUAD_SLOTS}",
 )
 
 #: One decision is a region and a task, which is the pair the contract carries and the pair the script layer picks. Kept factorised rather than flattened into 144 because the two are chosen for different reasons — where is worth going, and what to do when you arrive — and because a mask over a product space is far sparser than the product of two masks.
@@ -246,9 +248,29 @@ OPERATIONAL_TASKS = len(TASKS)
 CONTACT_WINDOW_MS = 60000
 
 
+def operational_slots(view: WorldView) -> List[RegionState]:
+    """The regions in the order the operational cut lays them out: outward from this side's own home, nearest first, cut to the number of slots there are.
+
+    Egocentric and not the map's own numbering, and that is the whole of what makes the block readable from either side of a mirrored board. The map numbers a region once for the whole board, so congruent ground sits at a different offset for the two sides and a network reading the block learns the same board twice in two numberings — the frame the tactical cut was freed of, in the layer above it. Ordered from home, the first slot is always this side's own ground and the last always the far side, whichever side is reading and whatever the map.
+
+    The order is the view's own `from_home`, so the layers and the encoder cannot disagree about what a slot means. It breaks an exact tie in distance by the map's number, which is the one place the frame survives: two of a side's own regions at the very same distance from home can be numbered the other way round for the mirror side. What sits in the two rows is then congruent — same distance, and on a mirrored board the same resources and the same standing — so the state a network reads is unchanged by the swap; what can differ is which of two congruent places a chosen slot names.
+    """
+    return view.from_home()[:REGION_SLOTS]
+
+
+def squad_slots(squads: Sequence[SquadRecord], base: int = 0) -> Dict[int, int]:
+    """Which row each of this side's squads is written into: its own number less the first number this side was ever given.
+
+    A match hands squads out from nought, so the offset is nought and a squad's row is its own number, which is what keeps a row meaning the same thing from one period to the next. A constructed arena is one process driving two sides out of one numbering — this side's squads are the first few numbers and the other side's the next few — so without the offset the two sides' congruent squads would be written into different rows and named to the network by different one-hot slots. The offset is fixed once per side rather than recomputed, so a squad dying does not renumber the ones above it.
+    """
+    return {squad.id: squad.id - base for squad in squads}
+
+
 def operational_state(view: WorldView, orders, squads: Sequence[SquadRecord],
-                      game_time_ms: int, spawns: Sequence[int] = ()) -> List[float]:
+                      game_time_ms: int, spawns: Sequence[int] = (), base: int = 0) -> List[float]:
     """The whole board as the operational layer sees it: aggregates, twenty-four region slots and eight squad slots, always in that order and always that long.
+
+    The region slots run outward from this side's own home and the squad slots from this side's own first squad, so that one board read from either side of a mirror puts congruent things in the same rows. See `operational_slots` and `squad_slots`.
 
     Starting positions are passed in rather than read off the observation because the wire's region row does not carry the flag: it comes from the map file, which is read in this process when the region table is built. Which regions are starting positions is the difference between a place with resources on it and the place the enemy came from, and no other feature says it.
     """
@@ -276,14 +298,16 @@ def operational_state(view: WorldView, orders, squads: Sequence[SquadRecord],
     ])
 
     priorities = orders.priorities if orders is not None else {}
-    by_slot = {region.id: region for region in view.regions}
+    ordered = operational_slots(view)
     starts = frozenset(spawns)
     for slot in range(REGION_SLOTS):
-        state.extend(_region_row(by_slot.get(slot), priorities, ours, game_time_ms, starts))
+        region = ordered[slot] if slot < len(ordered) else None
+        state.extend(_region_row(region, priorities, ours, game_time_ms, starts))
 
-    by_id = {squad.id: squad for squad in squads}
+    slots = squad_slots(squads, base)
+    by_slot = {slots[squad.id]: squad for squad in squads}
     for slot in range(SQUAD_SLOTS):
-        state.extend(_squad_row(by_id.get(slot), ours, game_time_ms, view))
+        state.extend(_squad_row(by_slot.get(slot), ours, game_time_ms, view))
 
     return [_finite(value) for value in state]
 
@@ -334,9 +358,10 @@ def _squad_row(squad: Optional[SquadRecord], ours: float, game_time_ms: int,
 # ---- what a layer is allowed to answer --------------------------------------------------
 
 def region_mask(view: WorldView) -> List[float]:
-    """Which region slots exist on this map. A slot with no region behind it is not a target a policy may choose, and masking is how that is said rather than hoping the policy learns it."""
-    live = {region.id for region in view.regions}
-    return [1.0 if slot in live else 0.0 for slot in range(REGION_SLOTS)]
+    """Which region slots exist on this map. A slot with no region behind it is not a target a policy may choose, and masking is how that is said rather than hoping the policy learns it.
+
+    The slots are the egocentric ones the state is written in, so the live ones are the first however many there are and a policy choosing slot k is choosing the k-th region out from its own home. Whoever decodes a choice must read the same order back — `operational_slots` is the one place it is defined."""
+    return [1.0 if slot < len(operational_slots(view)) else 0.0 for slot in range(REGION_SLOTS)]
 
 
 def task_mask(doctrine: Doctrine) -> List[float]:
@@ -345,12 +370,15 @@ def task_mask(doctrine: Doctrine) -> List[float]:
     return [1.0 if int(task) in allowed else 0.0 for task in TASKS]
 
 
-def squad_mask(squads: Sequence[SquadRecord]) -> List[float]:
-    """Which squad slots hold a squad this layer may task: one that exists, has anyone left in it, has a doctrine with tasks, and has not been taken over by somebody else."""
-    by_id = {squad.id: squad for squad in squads}
+def squad_mask(squads: Sequence[SquadRecord], base: int = 0) -> List[float]:
+    """Which squad slots hold a squad this layer may task: one that exists, has anyone left in it, has a doctrine with tasks, and has not been taken over by somebody else.
+
+    Read in the same rows the state is written in, so the offset that puts this side's first squad in the first row has to be handed in here too."""
+    slots = squad_slots(squads, base)
+    by_slot = {slots[squad.id]: squad for squad in squads}
     mask: List[float] = []
     for slot in range(SQUAD_SLOTS):
-        squad = by_id.get(slot)
+        squad = by_slot.get(slot)
         usable = (squad is not None and bool(squad.members) and squad.ours_to_task
                   and bool(DOCTRINES[squad.doctrine].tasks))
         mask.append(1.0 if usable else 0.0)

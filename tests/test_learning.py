@@ -49,8 +49,10 @@ from rwintel.learn.encoding import (
     TACTICAL_FEATURES,
     TACTICAL_SIZE,
     operational_state,
+    operational_slots,
     region_mask,
     squad_mask,
+    squad_slots,
     tactical_state,
     task_mask,
 )
@@ -229,7 +231,11 @@ def test_the_region_block_is_always_twenty_four_rows_whatever_the_map():
 
 
 def test_a_squad_may_only_be_sent_where_a_region_is_and_given_what_its_doctrine_allows():
-    assert region_mask(_view([], [_region(0), _region(3)]))[:4] == [1.0, 0.0, 0.0, 1.0]
+    """The mask runs over the slots the state is written in, which are the regions in order out from this side's own home. So the live slots are the first however many there are, whatever the map numbered them, and a map with two regions offers slots nought and one however far apart their numbers are."""
+    board = _view([], [_region(0, distance=900.0), _region(3, distance=100.0)])
+    assert region_mask(board)[:4] == [1.0, 1.0, 0.0, 0.0]
+    # And the slot a policy would be answering with is the region that distance orders there, not the region the map numbered so.
+    assert [region.id for region in operational_slots(board)] == [3, 0]
     vanguard = task_mask(Doctrine.VANGUARD)
     assert vanguard[int(Task.ATTACK)] == 1.0 and vanguard[int(Task.DEFEND)] == 0.0
     # Engineers are what an escort escorts, not what is sent anywhere: a contract on one would land on top of the placement a builder is walking to.
@@ -623,6 +629,18 @@ def _mirrored_board():
     return observation, ours, theirs, our_squad, their_squad
 
 
+def _contacts(view, now=30000):
+    """The contact record the operations arena writes for each side as it builds its view: an enemy is in contact where an enemy is standing, read off the force totals that the inversion has already turned over.
+
+    Applied to both sides and not only the mirror. The wire's own record is kept for the seat this process occupies and cannot be turned over — the row has no counterpart field — so a mirrored board is congruent here only once both sides' records are written by one rule.
+    """
+    from dataclasses import replace
+
+    view.regions = [replace(region, enemy_seen_at_ms=now if region.enemy_value > 0 else 0)
+                    for region in view.regions]
+    return view
+
+
 def _squad_fight(view, squad):
     """One squad's fight as the tactical layer cuts it out of the board: the members of the squad that are on it, and what is near enough to be shooting at them. The same rule on both sides, so the cut is congruent whenever the board is."""
     members = [s for s in view.ours if s.unit.id in squad.members]
@@ -740,49 +758,60 @@ def test_the_engagement_arena_anchors_each_side_where_it_was_put_down():
     assert their_place == (2 * site[0] - our_place[0], 2 * site[1] - our_place[1])
 
 
-def test_the_operational_region_rows_are_the_same_ground_read_from_either_side():
-    """What holds of the operational cut and what does not, written down so the part that does not cannot rot into folklore.
+def test_the_operational_cut_reads_one_mirrored_board_the_same_way_from_either_side():
+    """The property the operations arena depends on at the layer it is actually training: one board laid out as a point reflection has to read identically from the two seats, block for block and number for number.
 
-    The VALUES of a region row are congruent between the two sides with TWO exceptions, and neither is a rounding. They are not the same kind of defect and they do not have the same remedy, which is the whole reason for naming both.
+    Three things had to be true for that, and each was false in a different way. The rows were laid out by the MAP's numbering, so congruent ground sat at different offsets and the two sides read different rows for the same place; they are laid out from each side's own home now. The squad rows were laid out by the global squad number, and one process drives both sides out of one numbering, so this side's squads were the first few rows and the other side's the next few; each side is offset by its own first squad now. And `distance` and the contact record were the wire's, measured for the seat this process occupies, so the mirror side read our marches and our fog as its own; the arena rewrites both as it builds the two views, which is what this test applies.
 
-    `distance` is the wire's record of how far a region is from home, and the game measures it from THIS process's base for every region on the board. `build(invert=True)` turns the ownership and the force totals over and leaves that measurement pointing where it pointed, so the inverted side reads our marches as its own and finds the ground it is standing beside on the far side of the map. That one IS repaired, though not here and not by the view builder, which cannot: only the arena knows where each side stages from. The operations arena rewrites every region's distance from the side's own staging region as it builds the other side's view, and the second half of this test applies exactly that rewrite and shows the two sides' rows agreeing afterwards.
-
-    `seen_recently` is the exception NOTHING repairs. It reads the wire's record of when the enemy was last run into in that region, and `build(invert=True)` does not exchange it and cannot, because the region row carries no counterpart field — there is no record of when WE were last seen. The inverted side therefore reads this process's own fog record as its own contact record, and in a constructed arena that leans the same way every period: hostiles stand continuously in the regions this process is attacking and never in the ones it garrisons, so the mirror side is told the enemy is standing on the ground it holds and nowhere near the ground it is attacking. No reordering of the rows repairs that — the field travels with its row — so it needs a field on the wire, or an inverted view that rebuilds the record, or an arena that rebuilds it per side as it already rebuilds the distance from home.
-
-    The row INDEXING is not congruent either, and that is a third defect with a third remedy: the encoder lays the regions out by the map's own numbering and the squads by their global slot, so congruent ground sits at different offsets for the two sides. Hence the whole vectors differ even where every value in them is a pair. A learnt operational layer therefore still reads a frame. When somebody makes the ordering egocentric this test is what will fail, which is exactly when they should be made to come back and read the paragraphs above.
+    What is NOT shown here is that the ordering is congruent when two of a side's regions sit at exactly the same distance from its home. The order breaks that tie by the map's number, and the mirror side can number the tied pair the other way round. Their rows are congruent — same distance, and on a mirrored board the same standing — so the state is unchanged by the swap; what can differ is which of two congruent places a chosen slot names.
     """
     _, ours, theirs, our_squad, their_squad = _mirrored_board()
-    mine = operational_state(ours, None, [our_squad], 30000)
-    yours = operational_state(theirs, None, [their_squad], 30000)
 
-    def row(state, slot):
+    def state(view, squad, base):
+        return operational_state(view, None, [squad], 30000, base=base)
+
+    def rows(state_vector, slot):
         start = GLOBAL_SIZE + slot * REGION_SIZE
-        return state[start:start + REGION_SIZE]
+        return state_vector[start:start + REGION_SIZE]
 
-    def differ(ours_view, theirs_view, ours_slot=1, theirs_slot=2):
-        """One mirrored pair of region rows read from the two sides: every feature of the pair, and the names of the ones that disagree."""
-        left = row(operational_state(ours_view, None, [our_squad], 30000), ours_slot)
-        right = row(operational_state(theirs_view, None, [their_squad], 30000), theirs_slot)
-        pairs = dict(zip(REGION_FEATURES, zip(left, right)))
-        return pairs, [name for name, (a, b) in pairs.items() if abs(a - b) > 1e-9]
+    # Unrepaired, the two sides order their rows by the wire's distances, which are both measured from THIS process's base. So they agree about the order and disagree about the ground: slot nought is our own region for us and the enemy's region for them.
+    mine, yours = state(ours, our_squad, 0), state(theirs, their_squad, 1)
+    apart = [name for name, a, b in zip(REGION_FEATURES, rows(mine, 0), rows(yours, 0)) if abs(a - b) > 1e-9]
+    assert "held_by_enemy" in apart and "force_edge" in apart, (
+        "before the arena repairs the two views, slot nought should be different ground for the two sides, "
+        "and here it differs only in %s" % apart)
 
-    pairs, apart = differ(ours, theirs)
-    assert apart == ["distance", "seen_recently"], (
-        "the region rows of one mirrored pair differ in %s, where the distance from home and the contact "
-        "record are the two that should" % apart)
-    assert pairs["seen_recently"] == (1.0, 0.0)
-    assert pairs["distance"][0] < pairs["distance"][1], (
-        "the inverted side should be reading our own distance from home, which on this board is the longer one")
-    assert mine != yours, "the region and squad rows are indexed by the map's numbering, so they cannot agree"
+    # What the arena does as it builds them: each side's distances measured again from the region it stages out of, its anchor put at its own staging point, and its contact record written from what is standing there for that side rather than from this process's own fog.
+    ours = _contacts(rehome(ours, 1, STAGE))
+    theirs = _contacts(rehome(theirs, 2, _reflected(*STAGE)))
+    mine, yours = state(ours, our_squad, 0), state(theirs, their_squad, 1)
 
-    # Now the repair the operations arena applies as it builds the two views, which is the only one of the two defects that has one: each side's regions measured again from the region that side stages out of, which here is the mirrored pair of regions themselves, and each side's anchor put at its own staging point.
-    ours, theirs = rehome(ours, 1, STAGE), rehome(theirs, 2, _reflected(*STAGE))
-    pairs, apart = differ(ours, theirs)
-    assert apart == ["seen_recently"], (
-        "once each side measures from its own staging region only the contact record should still differ, "
-        "and these do: %s" % apart)
-    # Both ways round, so that what has been shown is congruent rows and not two noughts: our row for the region we stage from against their row for the one they stage from, and our row for theirs against their row for ours.
-    assert differ(ours, theirs, ours_slot=2, theirs_slot=1)[1] == ["seen_recently"]
+    for slot in (0, 1):
+        apart = [name for name, a, b in zip(REGION_FEATURES, rows(mine, slot), rows(yours, slot))
+                 if abs(a - b) > 1e-9]
+        assert not apart, "region slot %d differs between the sides in %s" % (slot, apart)
+    assert mine == yours, (
+        "the whole operational cut of a mirrored board should read the same from either side, and the first "
+        "of %d numbers to differ is at %s"
+        % (len(mine), next(i for i, (a, b) in enumerate(zip(mine, yours)) if a != b)))
+
+    # The squad offset is load-bearing and not tidying: read the mirror side's squad by its global number, as the cut did before, and its row lands somewhere else entirely.
+    assert state(theirs, their_squad, 0) != yours
+
+
+def test_the_operational_squad_rows_are_offset_by_the_sides_own_first_squad():
+    """Why the offset is fixed once rather than recomputed from whoever is alive.
+
+    A match hands squads out from nought, so the offset is nought and a squad's row is its own number — which is what makes a row mean the same thing from one period to the next. A constructed arena numbers the second side's squads after the first side's, so without the offset the two sides' congruent squads are written into different rows and named to the network by different one-hot slots. Recomputing the offset from the living squads each period would give a third behaviour, worse than both: the first squad of a side dying would renumber every squad above it, and a row would stop meaning one squad.
+    """
+    ours = [_squad(id=0), _squad(id=1)]
+    theirs = [_squad(id=2), _squad(id=3)]
+    assert squad_slots(ours, 0) == {0: 0, 1: 1}
+    assert squad_slots(theirs, 2) == {2: 0, 3: 1}
+    # A death does not renumber what is left, because the offset is the side's first squad ever and not its first squad now.
+    assert squad_slots([theirs[1]], 2) == {3: 1}
+    assert squad_mask(ours, 0)[:2] == [1.0, 1.0]
+    assert squad_mask(theirs, 2)[:2] == [1.0, 1.0]
 
 
 def test_the_two_sides_spawn_orders_are_interleaved_so_neither_leads():

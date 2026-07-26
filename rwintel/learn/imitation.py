@@ -474,10 +474,10 @@ def _distribution(choices: torch.Tensor, width: int) -> List[float]:
 
 
 def _names(layer: str) -> Tuple[List[str], List[str]]:
-    """What to call each action in a line a person reads. Regions are numbered rather than named because a region slot is a place on this map and has no name anywhere else."""
+    """What to call each action in a line a person reads. Region slots are numbered rather than named because a slot is how far out from this side's own home the place sits, which has no name anywhere else — slot nought is home and the last slot is the far side, whatever the map calls them."""
     if layer == TACTICAL:
         return [departure.name.lower() for departure in Deviation], []
-    return [str(index) for index in range(OPERATIONAL_REGIONS)], [task.name.lower() for task in Task]
+    return [f"out{index}" for index in range(OPERATIONAL_REGIONS)], [task.name.lower() for task in Task]
 
 
 def _shares(shares: Sequence[float], names: Sequence[str], most: int = 5) -> str:

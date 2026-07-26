@@ -19,7 +19,7 @@ from ..control.policy.operations import Operations
 from ..control.policy.tactics import Tactics
 from ..control.policy.view import WorldView
 from .deciders import Choice
-from .encoding import operational_state, region_mask, tactical_state, task_mask
+from .encoding import operational_slots, operational_state, region_mask, tactical_state, task_mask
 from .reward import DISCOUNT as REWARD_DISCOUNT, OperationalReward, TacticalReward
 from .rollout import Rollout, Step
 
@@ -193,6 +193,10 @@ class LearntOperations(Operations):
         self._standing: Optional[Dict[int, float]] = None
         self._state: List[float] = []
         self._regions: List[float] = []
+        #: The regions in the order the state was written in, kept from the period they were written so that a chosen slot is decoded against the very list it was offered over. Recomputing it at the decision would read the same view twice and give the same answer, but nothing would say so.
+        self._slots: List = []
+        #: The first squad number this side was ever handed, which is what the squad rows and the one-hot are offset by. Taken once and never raised: one process drives both sides of the constructed arena out of one numbering, so this side's squads are some run of numbers that does not start at nought, and a squad dying must not renumber the ones above it.
+        self._base: Optional[int] = None
         self._view: Optional[WorldView] = None
         self._spawns = tuple(region.id for region in getattr(session, "regions", ()) if region.spawn)
 
@@ -211,9 +215,18 @@ class LearntOperations(Operations):
                reports: List[MissionReport], game_time_ms: int):
         self._view = view
         self._settle(view, orders, squads)
-        self._state = operational_state(view, orders, squads, game_time_ms, self._spawns)
+        if squads:
+            first = min(squad.id for squad in squads)
+            self._base = first if self._base is None else min(self._base, first)
+        self._state = operational_state(view, orders, squads, game_time_ms, self._spawns, self.base)
         self._regions = region_mask(view)
+        self._slots = operational_slots(view)
         return super().decide(view, orders, squads, reports, game_time_ms)
+
+    @property
+    def base(self) -> int:
+        """The offset this side's squad rows are written at, nought until a squad has been seen."""
+        return 0 if self._base is None else self._base
 
     def _settle(self, view: WorldView, orders: OperationsOrders, squads: Sequence[SquadRecord]) -> None:
         """Pays each squad's previous decision from the board that has now arrived, one squad at a time.
@@ -296,14 +309,18 @@ class LearntOperations(Operations):
             chosen = super()._pick(view, orders, squad, avoid)
             if chosen is None:
                 return None
-            choice = Choice(action=int(chosen[1].id), second=int(chosen[0]))
+            # The script picks a region and what is written down has to be the SLOT it sits in, since that is what a policy fitted to this teacher will answer with. A region beyond the last slot — a map with more places on it than the block has rows — is still sent to, because this class is recording what the script does and must not change it, and simply not written down: a label outside the head would be fitted as if it named some other place.
+            slot = next((index for index, region in enumerate(self._slots) if region.id == chosen[1].id), -1)
+            if slot < 0:
+                return chosen
+            choice = Choice(action=slot, second=int(chosen[0]))
         else:
-            choice = self.decider.choose(self._state, squad.id, self._regions, tasks)
+            choice = self.decider.choose(self._state, squad.id - self.base, self._regions, tasks)
         if choice is None:
             return None
-        region = view.region(choice.action)
-        if region is None:
+        if not 0 <= choice.action < len(self._slots):
             return None
+        region = self._slots[choice.action]
         if self.rollout is not None:
             self.pending[squad.id] = Step(
                 state=self._state, action=choice.action, mask=list(self._regions),

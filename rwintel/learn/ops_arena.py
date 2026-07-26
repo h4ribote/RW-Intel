@@ -10,7 +10,7 @@ This module builds the board and runs both command chains over a bounded horizon
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..wire import (
@@ -450,10 +450,10 @@ class OpsArena(Arena):
 
         operational = bool(observation.blocks & BLOCK_REGIONS)  # region force totals ride these frames
         # Each side reads the board from where it stages out of: its regions measured again from its own staging region, since the wire measures every distance from this process's base and the inverted view would otherwise read our marches as its own, and its bearing anchored at the staging POINT rather than at that region's centre. The two staging points are drawn as exact reflections while the region nearest each of them is whatever the map put there, so the regions need not be a pair at all — and on any board whose region table is not itself symmetric, which is every real map, anchoring the layer beneath at a region's centre would make a squad and its mirror read as two different fights. What this cannot repair is physical march distance or region-geometry congruence; that residual is what the self-play mean is watched for.
-        our_view = rehome(view, self.our_home_id, self._our_pt)
-        their_view = rehome(
+        our_view = self._contacts(rehome(view, self.our_home_id, self._our_pt), observation)
+        their_view = self._contacts(rehome(
             build_view(observation, self.catalogue, None, self.last_regions, invert=True),
-            self.their_home_id, self._their_pt)
+            self.their_home_id, self._their_pt), observation)
 
         # What every scored disc reads on the board that has just arrived, taken once for the period and before either side decides, so the two sides are paid off one reading of one board and their figures stay exact negatives of each other. Outside the loop below rather than inside it, because the leader alternation would otherwise hand the two sides boards a decision apart.
         shares = self._shares(observation.unit_states) if operational and self.orders is not None else None
@@ -710,6 +710,18 @@ class OpsArena(Arena):
                     squad.value = sum(self.catalogue.value(by_id[m].type_index) for m in squad.members)
                     squad.x = sum(by_id[m].x for m in squad.members) / len(squad.members)
                     squad.y = sum(by_id[m].y for m in squad.members) / len(squad.members)
+
+    def _contacts(self, view: WorldView, observation: Observation) -> WorldView:
+        """Writes each region's contact record from what is standing there for the side reading it, because the wire's record cannot be turned over and the inverted side would otherwise read this process's own fog as its own contacts.
+
+        The record on the wire is the moment an enemy was last run into in a region, and it is kept for the seat this process occupies. `build(invert=True)` turns the ownership and the force totals over and leaves that field pointing the way it pointed, so the mirror side is told the enemy is standing on the ground it holds and nowhere near the ground it is attacking — and in a constructed arena that leans the same way every period rather than averaging out. The row carries no counterpart field to swap it with, so the choice is between adding one to the protocol and rebuilding the record here; this is the second, and it is confined to this arena because a match has only one seat and its record is right.
+
+        Both sides are rewritten and not only the mirror, since a rule applied to one side and not the other is the same defect in a different place. The rule is the one the agent itself applies with the fog off: an enemy is in contact where an enemy is standing, which the already-inverted force totals say exactly. What it gives up is the memory in the wire's timestamp — a region an enemy left a moment ago reads as clear rather than as recently seen — and that memory is a fog quantity this arena does not run with.
+        """
+        view.regions = [replace(region,
+                                enemy_seen_at_ms=observation.game_time_ms if region.enemy_value > 0 else 0)
+                        for region in view.regions]
+        return view
 
     # ---- geometry ----------------------------------------------------------------------
 

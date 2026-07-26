@@ -13,9 +13,11 @@ from .encoding import (
     OPERATIONAL_TASKS,
     TACTICAL_ACTIONS,
     TACTICAL_SIZE,
+    operational_slots,
     operational_state,
     region_mask,
     squad_mask,
+    squad_slots,
     tactical_state,
     task_mask,
 )
@@ -34,9 +36,11 @@ __all__ = [
     "TACTICAL_SIZE",
     "TacticalReward",
     "Trajectory",
+    "operational_slots",
     "operational_state",
     "region_mask",
     "squad_mask",
+    "squad_slots",
     "tactical_state",
     "task_mask",
 ]
