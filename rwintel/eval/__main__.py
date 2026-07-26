@@ -106,16 +106,18 @@ def report(played: Sequence[Played], weights: Weights) -> None:
                          "", difference, episodes_for(summary.sd, difference))
 
     names = sorted(summaries)
-    for first, second in zip(names, names[1:]):
-        comparison = Comparison.of(summaries[first], summaries[second])
-        if not (signatures.get(first, set()) & signatures.get(second, set())):
-            # The two arms share no settings they were both played under, so the difference between them is confounded by whatever changed about the game and not only by the play. This is the cross-settings comparison the interference caveat says must never happen, reached instead through the settings the default journal name does not distinguish.
-            logging.warning("%s and %s were played under different settings; the difference between them is not a "
-                            "comparison of the two arms but of the two settings, and must not be read as one",
-                            first, second)
-        logging.info("%s against %s: %+.3f, pooled sd %.3f, needs %d per side, %s",
-                     first, second, comparison.difference, comparison.pooled_sd, comparison.needed,
-                     "sufficient" if comparison.sufficient else "NOT yet sufficient")
+    # Every pair rather than neighbouring ones. The arms of a comparison are not on a line: a run of three is a script, a learnt layer and a floor, and which two of them the run was really asked about is not something the alphabet says. Reported in the order the names sort in, so a run and its re-report say the same thing in the same order.
+    for index, first in enumerate(names):
+        for second in names[index + 1:]:
+            comparison = Comparison.of(summaries[first], summaries[second])
+            if not (signatures.get(first, set()) & signatures.get(second, set())):
+                # The two arms share no settings they were both played under, so the difference between them is confounded by whatever changed about the game and not only by the play. This is the cross-settings comparison the interference caveat says must never happen, reached instead through the settings the default journal name does not distinguish.
+                logging.warning("%s and %s were played under different settings; the difference between them is not "
+                                "a comparison of the two arms but of the two settings, and must not be read as one",
+                                first, second)
+            logging.info("%s against %s: %+.3f, pooled sd %.3f, needs %d per side, %s",
+                         first, second, comparison.difference, comparison.pooled_sd, comparison.needed,
+                         "sufficient" if comparison.sufficient else "NOT yet sufficient")
 
     if any(decided(e) for e in played):
         fitted = fit_weights(played)
