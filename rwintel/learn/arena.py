@@ -28,7 +28,7 @@ from ..wire import (
 from ..control.policy.catalogue import Catalogue
 from ..control.policy.contracts import Doctrine, SquadRecord, TaskContract
 from ..control.policy.tactics import Tactics
-from ..control.policy.view import build as build_view
+from ..control.policy.view import build as build_view, rehome
 
 log = logging.getLogger(__name__)
 
@@ -167,6 +167,9 @@ class Engagement:
 
     index: int
     site: Tuple[float, float]
+    #: Where each side was put down, which is the two points the site is the midpoint of. Kept on the fight rather than recomputed because they are what each side's view is anchored to: a constructed fight has no base, and the direction a squad has come from is the one direction its encoding reads that is not read off the fight itself. The two are exact reflections of each other about the site, so a squad and its mirror are measured from mirrored origins and read as one fight; anchoring both sides to one point would put the frame straight back.
+    our_place: Tuple[float, float] = (0.0, 0.0)
+    their_place: Tuple[float, float] = (0.0, 0.0)
     #: What each side was worth when the two squads were formed, which is the worth of what actually arrived rather than of what was ordered. The two differ: placement is per unit and the engine refuses ground it will not build on, so part of an order can be stillborn while the rest of it fights. Scored against the order, a fight in which four of a dozen tanks never appeared would pay a loss nobody suffered.
     our_value: float = 0.0
     their_value: float = 0.0
@@ -361,6 +364,9 @@ class Arena:
 
         view = build_view(observation, self.catalogue, None, self.last_regions)
         self.last_regions = view.regions
+        # Anchored where this side was put down, not where the map says home is. The builder's fallback is the region nearest this process's base, which is one point for the whole board and therefore the same point for both sides — under which a squad and its exact reflection read as two different fights.
+        if self.engagement is not None:
+            rehome(view, point=self.engagement.our_place)
         action = Action()
         now = observation.game_time_ms
 
@@ -420,6 +426,7 @@ class Arena:
         self.known = {unit.id for unit in observation.unit_states}
         # What the sides are worth is left until they are formed, because what is ordered here and what appears there are not always the same units.
         self.engagement = Engagement(index=self.statistics.engagements, site=site,
+                                     our_place=our_place, their_place=their_place,
                                      our_ordered=sum(kind.price for kind in our_force),
                                      their_ordered=sum(kind.price for kind in their_force),
                                      our_count=len(our_force), their_count=len(their_force),
@@ -503,6 +510,9 @@ class Arena:
                                           math.hypot(ours.x - theirs.x, ours.y - theirs.y))
 
         their_view = build_view(observation, self.catalogue, None, self.last_regions, invert=True)
+        # The reflection of this side's anchor, so that the layer fighting from the other seat measures the same fight from the mirrored origin.
+        if self.engagement is not None:
+            rehome(their_view, point=self.engagement.their_place)
         sides = [(self.tactics, ours, view), (self.opponent, theirs, their_view)]
         if not self._ours_leads():
             sides.reverse()

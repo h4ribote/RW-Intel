@@ -10,7 +10,7 @@ This module builds the board and runs both command chains over a bounded horizon
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..wire import (
@@ -24,7 +24,7 @@ from ..wire import (
 from ..control.policy.contracts import Doctrine, OperationsOrders, Posture, SquadRecord
 from ..control.policy.operations import Operations
 from ..control.policy.tactics import Tactics
-from ..control.policy.view import WorldView, build as build_view
+from ..control.policy.view import WorldView, build as build_view, rehome
 from .arena import Arena, MAX_UNITS, MINIMUM_FORCE, OURS, SETTLE_MS, SPAWN_WAIT_MS, THEIRS
 
 #: How long an episode runs the two chains before it is scored, in game milliseconds. Long enough for a staged squad to march to a contest and fight the garrison, short enough that survivors do not wander into a catchment they were not sent to. Measured: at 120 s the staged squads have not resolved the contests — they survive but are still short of the garrisons — and the score is decided by the mirror garrisons alone, which cancel, giving a trivial self-play zero. At 300 s the squads reach and contest, the domination shares spread, and the choice moves the score. Swept as arms and picked by the resolution gate.
@@ -449,10 +449,11 @@ class OpsArena(Arena):
             return
 
         operational = bool(observation.blocks & BLOCK_REGIONS)  # region force totals ride these frames
-        our_view = self._rehome(view, self.our_home_id)
-        their_view = self._rehome(
+        # Each side reads the board from where it stages out of: its regions measured again from its own staging region, since the wire measures every distance from this process's base and the inverted view would otherwise read our marches as its own, and its bearing anchored at the staging POINT rather than at that region's centre. The two staging points are drawn as exact reflections while the region nearest each of them is whatever the map put there, so the regions need not be a pair at all — and on any board whose region table is not itself symmetric, which is every real map, anchoring the layer beneath at a region's centre would make a squad and its mirror read as two different fights. What this cannot repair is physical march distance or region-geometry congruence; that residual is what the self-play mean is watched for.
+        our_view = rehome(view, self.our_home_id, self._our_pt)
+        their_view = rehome(
             build_view(observation, self.catalogue, None, self.last_regions, invert=True),
-            self.their_home_id)
+            self.their_home_id, self._their_pt)
 
         # What every scored disc reads on the board that has just arrived, taken once for the period and before either side decides, so the two sides are paid off one reading of one board and their figures stay exact negatives of each other. Outside the loop below rather than inside it, because the leader alternation would otherwise hand the two sides boards a decision apart.
         shares = self._shares(observation.unit_states) if operational and self.orders is not None else None
@@ -709,18 +710,6 @@ class OpsArena(Arena):
                     squad.value = sum(self.catalogue.value(by_id[m].type_index) for m in squad.members)
                     squad.x = sum(by_id[m].x for m in squad.members) / len(squad.members)
                     squad.y = sum(by_id[m].y for m in squad.members) / len(squad.members)
-
-    def _rehome(self, view: WorldView, home_id: Optional[int]) -> WorldView:
-        """Rewrites each region's distance_from_home from the side's own staging region, because `build(invert=True)` swaps the value and held flags but leaves distance_from_home pointing at this process's base; without this the other side would read every distance and reach from the wrong origin. This fixes only distance_from_home and cannot restore physical march distance or region-geometry congruence — that residual is checked by the self-play mean, not here. The score uses no home term, so it stays antisymmetric regardless."""
-        if home_id is None:
-            return view
-        home = view.region(home_id)
-        if home is None:
-            return view
-        view.regions = [replace(region, distance_from_home=math.hypot(region.x - home.x, region.y - home.y))
-                        for region in view.regions]
-        view.home = view.region(home_id)
-        return view
 
     # ---- geometry ----------------------------------------------------------------------
 

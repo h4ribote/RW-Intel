@@ -81,7 +81,7 @@ TACTICAL_FEATURES: Tuple[str, ...] = (
     *tuple(f"status_{status.name.lower()}" for status in STATUSES),
     *tuple(f"task_{task.name.lower()}" for task in TASKS),
     *tuple(f"stance_{stance.name.lower()}" for stance in STANCES),
-    "target_distance", "target_ahead", "target_abeam", "target_ours", "target_theirs",
+    "target_distance", "target_ahead_of_home", "target_abeam_of_home", "target_ours", "target_theirs",
     "enemies_near", "enemy_weight",
     *tuple(f"enemy_{role.name.lower()}" for role in ROLES),
     *tuple(f"ours_{role.name.lower()}" for role in ROLES),
@@ -116,7 +116,7 @@ def tactical_state(squad: SquadRecord, members: Sequence[Sighting], threats: Seq
     distance = 0.0
     if target is not None and members:
         distance = math.hypot(target.x - squad.x, target.y - squad.y)
-        ahead, abeam = _bearing(squad, target, threats)
+        ahead, abeam = _bearing(squad, target, view.home_point)
 
     reaches = [m.kind.range for m in members if m.kind is not None and m.kind.armed]
     enemy_reaches = [t.kind.range for t in threats if t.kind is not None and t.kind.armed]
@@ -168,26 +168,28 @@ def tactical_state(squad: SquadRecord, members: Sequence[Sighting], threats: Seq
 
 
 def _bearing(squad: SquadRecord, target: Optional[RegionState],
-             threats: Sequence[Sighting]) -> Tuple[float, float]:
-    """Where the errand points, measured against where the fight is rather than against the map's compass: the cosine and the sine of the angle from the direction of what is shooting at the squad to the direction of the region it was sent to.
+             home: Optional[Tuple[float, float]]) -> Tuple[float, float]:
+    """Where the errand points, measured against the way the squad has come rather than against the map's compass: the cosine and the sine of the angle from the direction leading out of our own home through the squad to the direction of the region it was sent to.
 
-    Both are read from the squad's own centre and both are products of two vectors that live on the board, so a board turned, moved or turned end for end gives the same pair. The absolute direction this replaces describes the same situation in the map's frame, so a network reading it answers one fight two ways depending on which way round the board happens to be numbered; and where one process drives both sides of a board laid out as a point reflection, the two sides read exactly opposite directions for congruent situations and the layer stops being one layer.
+    Both are read from the squad's own centre and both are products of two vectors that live on the board, so a board turned, moved or turned end for end gives the same pair. The absolute direction this replaces describes the same situation in the map's frame, so a network reading it answers one fight two ways depending on which way round the board happens to be numbered; and where one process drives both sides of a board laid out as a point reflection, the two sides read exactly opposite directions for congruent situations and the layer stops being one layer. A point reflection carries our home onto the other side's, so the outward direction reflects with everything else and the pair survives the mirror — provided the anchor each side reads is its OWN, which is what `WorldView.home_point` is for.
 
-    The lateral term is kept signed rather than folded to its magnitude. A point reflection is a half turn and so preserves which hand is which, which means the sign survives the mirror and carries something: it says which way round the target lies from the fight, and a squad that can go round one way and not the other is in a different position from one that cannot.
+    The ahead term says whether the errand leads further out or back: a squad sent past where it stands, away from home, reads toward +1 and one recalled toward its own ground reads toward -1. That is the sense a policy needs to tell an advance from a withdrawal, and it is the same sense on both sides of a mirrored board.
 
-    Both are nought where there is nothing shooting or nowhere to be sent, because the angle between a vector and nothing is not a number. Nothing is lost by that: the vector already says which case it is, since the flag for being engaged is nought exactly when there are no threats. Two consequences are behaviour and not tidying, and are written down here rather than found later. A squad whose threats surround it, so that their centre falls on its own centre, reads the same nought pair while still reading as engaged. And a squad marching with nothing shooting at it now carries no direction at all, where before it carried one — which is the frame-dependent part and exactly what is being given up.
+    The lateral term is kept signed rather than folded to its magnitude. A point reflection is a half turn and so preserves which hand is which, which means the sign survives the mirror and carries something: it says which way round the target lies from the way out, and a squad that can go round one way and not the other is in a different position from one that cannot.
+
+    Reading the angle from home rather than from the centre of what is shooting is what makes the pair defined whether or not anything is shooting. A bearing read from the threats leaves a squad with nothing firing at it — a squad marching on a contest is exactly that — carrying no direction at all, and the two readings taken around that form are a layer refitted under it sitting 0.0398 below the handwritten ladder with its interval off nought, against 0.0042 below and holding nought for the frame-carrying form it replaced. Whether the encoding made that difference is not something those two runs can say, since their intervals overlap; what is not in doubt is that home does not come and go with the fighting, and a squad marching on a contest has a direction here.
+
+    The pair is nought in three cases, and they are behaviour rather than tidying. There is no errand, so there is nowhere to point. There is no anchor — no region table has arrived, or in a match nothing has been built yet, so where home is is not yet known. Or the squad is standing on home, where the way out is not a direction; a world unit is far below anything either quantity means, so a separation under one is standing on the spot and its direction is noise rather than a bearing.
     """
-    if target is None or not threats:
+    if target is None or home is None:
         return 0.0, 0.0
     tx, ty = target.x - squad.x, target.y - squad.y
-    fx = sum(threat.unit.x for threat in threats) / len(threats) - squad.x
-    fy = sum(threat.unit.y for threat in threats) / len(threats) - squad.y
-    reach, fight = math.hypot(tx, ty), math.hypot(fx, fy)
-    # A world unit is far below anything either quantity means, so a separation under one is standing on the spot and its direction is noise rather than a bearing.
-    if reach <= 1.0 or fight <= 1.0:
+    ox, oy = squad.x - home[0], squad.y - home[1]
+    reach, out = math.hypot(tx, ty), math.hypot(ox, oy)
+    if reach <= 1.0 or out <= 1.0:
         return 0.0, 0.0
-    tx, ty, fx, fy = tx / reach, ty / reach, fx / fight, fy / fight
-    return fx * tx + fy * ty, fx * ty - fy * tx
+    tx, ty, ox, oy = tx / reach, ty / reach, ox / out, oy / out
+    return ox * tx + oy * ty, ox * ty - oy * tx
 
 
 def _role_shares(sightings: Sequence[Sighting]) -> List[float]:

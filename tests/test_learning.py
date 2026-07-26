@@ -27,7 +27,7 @@ import torch
 
 from rwintel.control.policy.catalogue import Catalogue
 from rwintel.control.policy.contracts import Doctrine, SquadRecord, TaskContract
-from rwintel.control.policy.view import build as build_view
+from rwintel.control.policy.view import build as build_view, rehome
 from rwintel.control.session import UnitType
 from rwintel.learn.arena import (
     BY_HEALTH,
@@ -576,6 +576,10 @@ def _reflected(x, y):
     return (2 * MIRROR_CENTRE[0] - x, 2 * MIRROR_CENTRE[1] - y)
 
 
+#: Where this side is staged from on the constructed board, which is the anchor its bearing is read against. Behind the squad and off the line it is marching on, so that a bearing measured from it has a lateral part on both sides and a test of the sign is a test of something.
+STAGE = (120.0, 180.0)
+
+
 def _mirrored_board():
     """One board laid out as a point reflection about a centre, read once from each side, which is the situation the constructed arenas put a layer in.
 
@@ -586,6 +590,8 @@ def _mirrored_board():
     The fog record is set the way a match sets it and NOT symmetrically: hostiles are standing in the region our squad is attacking, so the enemy has been seen there, and nothing has been seen where our own garrison stands. Setting it recent on both members of a pair is the one setting under which the region row's contact flag cannot disagree between the sides, which would hide a defect this board exists to state.
 
     The two regions are likewise given DIFFERENT distances from home, which is what a real map gives them: the wire measures every region's distance from this process's own base, so a region and its reflection are near and far from it respectively. Giving a mirrored pair the same distance is the one setting under which the row's distance cannot disagree between the sides either, and it would hide the second of the two defects below in the same way.
+
+    Each side is then anchored where it came from, as both arenas anchor theirs: a staging point behind our squad, and its reflection behind the enemy's. That step is the caller's and not the builder's — the builder can only offer the region nearest this process's base, which is ONE point for the whole board, and reading the bearing from one point on a mirrored board is the frame all over again. The anchors are points rather than regions because a pair of exact reflections can sit nearest to two regions that are not a pair, which is what a map with two regions in it and no symmetry gives here.
     """
     members = [(1, 200.0, 300.0, 0), (2, 232.0, 312.0, 0), (3, 214.0, 348.0, 1)]
     threats = [(9, 300.0, 480.0, 0), (10, 340.0, 520.0, 1)]
@@ -605,8 +611,8 @@ def _mirrored_board():
     ours_region.enemy_seen_at_ms, theirs_region.enemy_seen_at_ms = 29000, 0
 
     observation = _observation(units, [ours_region, theirs_region])
-    ours = build_view(observation, _CATALOGUE, None)
-    theirs = build_view(observation, _CATALOGUE, None, invert=True)
+    ours = rehome(build_view(observation, _CATALOGUE, None), point=STAGE)
+    theirs = rehome(build_view(observation, _CATALOGUE, None, invert=True), point=_reflected(*STAGE))
 
     centre = (sum(m[1] for m in members) / len(members), sum(m[2] for m in members) / len(members))
     their_centre = _reflected(*centre)
@@ -665,6 +671,75 @@ def test_a_network_answers_both_sides_of_a_mirrored_board_the_same_way():
         % (float(value[0]), float(value[1])))
 
 
+def test_a_squad_marching_with_nothing_shooting_at_it_still_carries_a_bearing():
+    """What the anchor buys back, and the reason it is home and not the fight.
+
+    A bearing read from the centre of what is shooting is undefined for a squad nobody is shooting at, and a squad marching on a contest is exactly that — which is most of what an operational layer sends squads to do. Measured, that cost was a tactical layer sitting 0.0398 below the handwritten ladder where the frame-carrying encoding it replaced had held nought. Home does not come and go with the fighting, so the pair here is read off a board with no threats on it at all and must still say where the errand points.
+
+    The lateral term is checked to be substantially non-nought as well, because a board on which the anchor, the squad and its target happen to be collinear would give a nought there whatever the code did.
+    """
+    _, ours, _, our_squad, _ = _mirrored_board()
+    ahead = TACTICAL_FEATURES.index("target_ahead_of_home")
+    abeam = TACTICAL_FEATURES.index("target_abeam_of_home")
+
+    members = [s for s in ours.ours if s.unit.id in our_squad.members]
+    alone = tactical_state(our_squad, members, [], 350.0, 200.0, ours, 30000)
+    assert abs(alone[ahead]) > 0.1 and abs(alone[abeam]) > 0.1, (
+        "a squad with nothing shooting at it reads no direction at all: %+.6f, %+.6f"
+        % (alone[ahead], alone[abeam]))
+    # And it is the same direction whether or not anything is shooting, since what it is measured from has not moved.
+    fought = tactical_state(our_squad, *_squad_fight(ours, our_squad), 350.0, 200.0, ours, 30000)
+    assert abs(fought[ahead] - alone[ahead]) < 1e-12 and abs(fought[abeam] - alone[abeam]) < 1e-12
+
+    # Nowhere to have come from is the one case that still reads nought, and it is honest: before anything is built there is no home to measure from.
+    ours.home_point = None
+    unanchored = tactical_state(our_squad, members, [], 350.0, 200.0, ours, 30000)
+    assert (unanchored[ahead], unanchored[abeam]) == (0.0, 0.0)
+
+
+def test_an_anchor_the_two_sides_share_puts_the_frame_straight_back():
+    """The requirement the anchor lays on whoever builds the views, stated as a failure rather than as a comment.
+
+    The bearing is invariant because the anchor reflects along with everything else, which is true of each side's OWN staging point and false of any single point on the board. The view builder can only offer the latter — the wire measures every distance from this process's base, so an inverted view has nothing in it that says where the other side came from — and an arena that forgets to anchor the mirror side would leave both sides reading from one point. That does not fail loudly anywhere else: the features stay finite, the run trains, and the only symptom is the arena leaning toward the side the process plays.
+    """
+    _, ours, theirs, our_squad, their_squad = _mirrored_board()
+    theirs.home_point = ours.home_point  # the mistake: one anchor for a board with two sides
+
+    mine = tactical_state(our_squad, *_squad_fight(ours, our_squad), 350.0, 200.0, ours, 30000)
+    yours = tactical_state(their_squad, *_squad_fight(theirs, their_squad), 350.0, 200.0, theirs, 30000)
+    apart = [name for name, a, b in zip(TACTICAL_FEATURES, mine, yours) if abs(a - b) > 1e-9]
+    assert apart == ["target_ahead_of_home", "target_abeam_of_home"], (
+        "sharing one anchor between the sides should move the bearing and nothing else, and it moved %s" % apart)
+
+
+def test_the_engagement_arena_anchors_each_side_where_it_was_put_down():
+    """The wiring the property above depends on, at the arena that trains the tactical layer.
+
+    A constructed fight has no base: both sides are put down beside a site, and the two staging points are its exact reflections through it. So they are what each side's view is anchored to, and this is the test that the arena hands each layer its own rather than leaving both on the builder's fallback, which is the region nearest THIS process's base and therefore one point for the whole board.
+    """
+    from rwintel.learn.arena import Engagement, OURS_FIRST
+
+    observation = _observation(units=[_unit(1, 100.0, 100.0), _unit(2, 120.0, 100.0),
+                                      _unit(3, 140.0, 100.0), _unit(9, 300.0, 120.0, hostile=1)],
+                               regions=[_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)])
+    view = build_view(observation, _CATALOGUE, None)
+
+    site = (220.0, 110.0)
+    our_place, their_place = (100.0, 60.0), (2 * site[0] - 100.0, 2 * site[1] - 60.0)
+    arena = _arena_at(OURS_FIRST, [])
+    arena.engagement = Engagement(index=0, site=site, our_place=our_place, their_place=their_place)
+    # The fight has just moved, so that this period is fought rather than called off as stalled before either layer is asked.
+    arena._changed_ms = 21000
+    view.home_point = our_place  # as `decide` sets it, before the period reaches the fighting
+    arena._fight(observation, view, Action(), 21000)
+
+    assert arena.tactics.board.home_point == our_place
+    assert arena.opponent.board.home_point == their_place
+    assert arena.tactics.board.home_point != arena.opponent.board.home_point
+    # The pair is the half turn about the site, which is what makes the two anchors a mirror rather than merely two points.
+    assert their_place == (2 * site[0] - our_place[0], 2 * site[1] - our_place[1])
+
+
 def test_the_operational_region_rows_are_the_same_ground_read_from_either_side():
     """What holds of the operational cut and what does not, written down so the part that does not cannot rot into folklore.
 
@@ -700,9 +775,8 @@ def test_the_operational_region_rows_are_the_same_ground_read_from_either_side()
         "the inverted side should be reading our own distance from home, which on this board is the longer one")
     assert mine != yours, "the region and squad rows are indexed by the map's numbering, so they cannot agree"
 
-    # Now the arena's own repair, which is the only one of the two that exists: each side's regions measured again from the region that side stages out of, which here is the mirrored pair of regions themselves. Called off the class because it reads nothing from an arena but the view it is handed, and building a whole arena to prove that would obscure it.
-    rehome = OpsArena.__new__(OpsArena)._rehome
-    ours, theirs = rehome(ours, 1), rehome(theirs, 2)
+    # Now the repair the operations arena applies as it builds the two views, which is the only one of the two defects that has one: each side's regions measured again from the region that side stages out of, which here is the mirrored pair of regions themselves, and each side's anchor put at its own staging point.
+    ours, theirs = rehome(ours, 1, STAGE), rehome(theirs, 2, _reflected(*STAGE))
     pairs, apart = differ(ours, theirs)
     assert apart == ["seen_recently"], (
         "once each side measures from its own staging region only the contact record should still differ, "
@@ -1445,10 +1519,10 @@ def test_a_teacher_written_by_a_different_feature_list_is_refused_rather_than_fi
         refusal = _refusal(TeacherMismatch, read_teacher, _teacher(folder, decision))
         assert "line 1" in refusal and "does not state the feature list" in refusal
 
-        renamed = dict(stated, encoding=["target_dx" if name == "target_ahead" else name
+        renamed = dict(stated, encoding=["target_dx" if name == "target_ahead_of_home" else name
                                          for name in TACTICAL_FEATURES])
         refusal = _refusal(TeacherMismatch, read_teacher, _teacher(folder, renamed, decision))
-        assert "'target_dx'" in refusal and "'target_ahead'" in refusal
+        assert "'target_dx'" in refusal and "'target_ahead_of_home'" in refusal
 
         short = {"state": [0.0] * (TACTICAL_SIZE + 1), "action": 0}
         assert "line 3" in _refusal(TeacherMismatch, read_teacher, _teacher(folder, stated, decision, short))
@@ -1487,11 +1561,11 @@ def test_an_operational_teacher_is_refused_by_the_block_that_moved_and_not_by_a_
 
         # And the tactical list, whose names are one per number, is quoted as features.
         head = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES)}
-        renamed = dict(head, encoding=["target_dx" if name == "target_ahead" else name
+        renamed = dict(head, encoding=["target_dx" if name == "target_ahead_of_home" else name
                                        for name in TACTICAL_FEATURES])
         refusal = _refusal(TeacherMismatch, read_teacher,
                            _teacher(folder, renamed, {"state": [0.0] * TACTICAL_SIZE, "action": 0}))
-        assert f"feature {TACTICAL_FEATURES.index('target_ahead')}" in refusal
+        assert f"feature {TACTICAL_FEATURES.index('target_ahead_of_home')}" in refusal
 
 
 def test_two_collecting_runs_joined_into_one_teacher_are_read_and_re_checked_at_the_join():
@@ -1505,7 +1579,7 @@ def test_two_collecting_runs_joined_into_one_teacher_are_read_and_re_checked_at_
         joined = _teacher(folder, head, decision, decision, head, decision, decision)
         assert len(read_teacher(joined)) == 4, "a teacher joined from two collecting runs lost decisions"
 
-        renamed = dict(head, encoding=["target_dx" if name == "target_ahead" else name
+        renamed = dict(head, encoding=["target_dx" if name == "target_ahead_of_home" else name
                                        for name in TACTICAL_FEATURES])
         refusal = _refusal(TeacherMismatch, read_teacher,
                            _teacher(folder, head, decision, renamed, decision))
@@ -1693,6 +1767,8 @@ class _Recorder:
 
     def decide(self, view, squads, game_time_ms):
         self.calls.append(self.name)
+        #: The last board this side was handed, which is how a test can ask what a layer was actually shown rather than what the arena meant to show it.
+        self.board = view
         return [SquadDeviation(squad=squad.id, deviation=Deviation.HOLD) for squad in squads], []
 
 
@@ -2009,10 +2085,10 @@ def test_parameters_fitted_to_a_different_feature_list_are_refused_by_the_featur
         path = os.path.join(directory, "stale.pt")
         state = TacticalNet().state_dict()
         state[ENCODING_KEY] = encoding_stamp(
-            ["target_dx" if name == "target_ahead" else name for name in TACTICAL_FEATURES])
+            ["target_dx" if name == "target_ahead_of_home" else name for name in TACTICAL_FEATURES])
         torch.save(state, path)
         refusal = _refusal(SystemExit, frozen_tactics, path)
-        assert path in refusal and "'target_dx'" in refusal and "'target_ahead'" in refusal
+        assert path in refusal and "'target_dx'" in refusal and "'target_ahead_of_home'" in refusal
 
         older = os.path.join(directory, "unstamped.pt")
         state = TacticalNet().state_dict()
@@ -2099,7 +2175,7 @@ def test_an_avowal_cannot_be_made_over_a_stated_list_or_for_a_layer_the_file_is_
 
         stale = TacticalNet().state_dict()
         stale[ENCODING_KEY] = encoding_stamp(
-            ["target_dx" if name == "target_ahead" else name for name in TACTICAL_FEATURES])
+            ["target_dx" if name == "target_ahead_of_home" else name for name in TACTICAL_FEATURES])
         refusal = _refusal(EncodingRefused, avowed, stale, TacticalNet(), words)
         assert "already states the feature list" in refusal
         # Nor twice, which is the same refusal reached from the other side: a file that has been avowed states a list like any other and is protected by it like any other.

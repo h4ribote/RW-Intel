@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ...wire import NO_SQUAD, Observation, RegionState, UnitState
 from .catalogue import Catalogue
@@ -39,6 +39,10 @@ class WorldView:
     #: Ours, able to fight or build, and in no squad. This is what the organisation layer forms and reinforces from.
     unassigned: List[Sighting] = field(default_factory=list)
     home: Optional[RegionState] = None
+    #: Where this side's own ground begins, as a point on the board rather than as a row of the region table. It is the anchor the tactical bearing is measured against, and it is a point because the two situations that need it do not both have a region to offer: a match has a base and this follows the home region's centre, while a constructed engagement has none and its arena sets this to the side's own staging point, which is exactly the reflection of the other side's while the region nearest each of them need not be.
+    #:
+    #: Whatever sets it must set it PER SIDE. An anchor the two sides of a mirrored board share makes one fight read as two, which is the frame the encoding exists to be free of, and the view builder cannot set it for the inverted side on its own: the wire measures every distance from this process's base, so nothing in an inverted view says where the other side came from.
+    home_point: Optional[Tuple[float, float]] = None
     #: The region table, which is the last one that arrived rather than necessarily this frame's. Regions ride the operational frame and the tactical layer runs ten times as often, so a view built on a frame without one would report a board with no places on it — and a policy reading that would see every distance and every balance of force fall to nothing every period and come back two hundred milliseconds later. What is a period out of date about a region is its force totals, which move at the rate an army walks.
     regions: List[RegionState] = field(default_factory=list)
 
@@ -100,11 +104,39 @@ def build(observation: Observation, catalogue: Catalogue, home_id: Optional[int]
         view.home = view.region(home_id)
     if view.home is None and view.regions:
         view.home = min(view.regions, key=lambda r: r.distance_from_home)
+    if view.home is not None:
+        view.home_point = (view.home.x, view.home.y)
+    return view
+
+
+def rehome(view: WorldView, home_id: Optional[int] = None,
+           point: Optional[Tuple[float, float]] = None) -> WorldView:
+    """Puts a view's origin where the side reading it actually came from, which the builder cannot do for the inverted side.
+
+    Two things move together and both are wrong for that side otherwise. Every region's distance from home is the wire's, measured from this process's base for the whole board, so an inverted view reads our marches as its own; and the anchor the tactical bearing is read against is that same base, so a squad and its exact reflection would be measured from one point instead of from two reflected ones and would read as two different fights.
+
+    The point is taken as given rather than from the home region because a constructed engagement has no base to name a region by, and because two staging points that are exact reflections can sit nearest to regions that are not. Where a region is named as well, its distances are rewritten and it becomes the view's home; where only a point is given, the region table is left as the map wrote it, since nothing in the tactical cut reads a distance from home.
+    """
+    if point is not None:
+        view.home_point = point
+    if home_id is None:
+        return view
+    home = view.region(home_id)
+    if home is None:
+        return view
+    view.regions = [replace(region, distance_from_home=math.hypot(region.x - home.x, region.y - home.y))
+                    for region in view.regions]
+    view.home = view.region(home_id)
+    if point is None:
+        view.home_point = (view.home.x, view.home.y) if view.home is not None else None
     return view
 
 
 def home_region_id(observation: Observation) -> Optional[int]:
-    """The region our own buildings sit in, which is the origin the others are ordered from. Taken from where the buildings actually are rather than from the starting position, because a base that has grown outward is where home is now."""
+    """The region our own ground begins in, which is the origin the others are ordered from and the anchor a squad's bearing is read against.
+
+    Read off where our units actually stand rather than off the starting position the map declares, and read from ALL of them rather than from the buildings alone — at the moment the chain asks, which is the first board it is handed, the army is the base and nothing has marched anywhere. The caller keeps the answer rather than asking again, so this is where home was when the match opened and not where a base that has grown outward has got to; an origin that moved under the layers would renumber every region and swing every bearing while nothing on the board had changed.
+    """
     ours = [u for u in observation.unit_states if not u.hostile]
     if not ours or not observation.regions:
         return None
