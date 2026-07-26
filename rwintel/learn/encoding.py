@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..wire import REGION_SLOTS, SQUAD_SLOTS, Deviation, RegionState, Stance, Status, Task
 from ..control.policy.contracts import DOCTRINES, Doctrine, Posture, Role, SquadRecord
+from ..control.policy.strategy import INCOME_PLATEAU_FLOOR
 from ..control.policy.view import Sighting, WorldView
 
 #: World units a distance is quoted against. Regions are agglomerated at 400 and a match is fought over a few thousand, so this puts an ordinary march near one.
@@ -200,6 +201,94 @@ def _role_shares(sightings: Sequence[Sighting]) -> List[float]:
     for sighting in sightings:
         by_role[sighting.role] = by_role.get(sighting.role, 0.0) + sighting.value
     return [by_role.get(role, 0.0) / total for role in ROLES]
+
+
+# ---- the strategic cut -----------------------------------------------------------------
+
+#: What the strategic features are, in order. The layer decides one thing every ten seconds — which posture the match is in — and everything else it emits is that posture read through a table, so this is the cut for that one choice.
+#:
+#: The materials are what the script layer is handed when it makes the same choice: the front report, the region table, the elapsed match time, what has been in contact, and the two histories the layer keeps for itself. The histories are here because the script's own rule is written on them — "income has levelled off" and "ground keeps being taken" are not properties of a number but of a run of them — and a learnt layer denied them would be answering a strictly harder question than the rule it is measured against.
+#:
+#: Nothing here is a raw credit total or a raw world coordinate, by the same rule the other two cuts follow, and nothing carries the map's frame: every quantity is a share, a ratio against a stated scale, or a flag. There are no directions in this cut at all, so the mirror question the tactical and operational cuts had to answer does not arise here.
+STRATEGIC_FEATURES: Tuple[str, ...] = (
+    "credits", "income", "income_growth", "income_started",
+    "supply", "under_construction",
+    "military_edge", "region_edge", "held", "enemy_held", "contested",
+    "lost_regions", "losing_periods", "enemy_bases", "driven_back",
+    "elapsed",
+    *tuple(f"posture_{posture.name.lower()}" for posture in POSTURES),
+    *tuple(f"contact_{role.name.lower()}" for role in ROLES),
+    "bias",
+)
+
+STRATEGIC_SIZE = len(STRATEGIC_FEATURES)
+
+#: The postures, which are the whole strategic action space whether the rule or a network is choosing. All five are always legal and there is no mask: the script's rule never selects TECH, and that is a property of the rule rather than of the game — a mask that forbade it would be the rule written again in the mask's clothing, which is what the tactical space refuses masks for.
+STRATEGIC_ACTIONS = len(POSTURES)
+
+#: Fresh losses over the window a strategic decision looks back on, quoted against this. The rule reacts at two, so a couple of periods of ground going reads near the top of the range.
+LOSS_SCALE = 3.0
+
+#: Enemy footholds quoted against this. A skirmish map gives a side one to begin with and a few more as it expands.
+BASE_SCALE = 4.0
+
+
+def strategic_state(report, regions: Sequence[RegionState], game_time_ms: int,
+                    income_history: Sequence[float] = (), loss_history: Sequence[int] = (),
+                    most_enemy_bases: int = 0, contact: Optional[Dict[Role, float]] = None,
+                    posture: Posture = Posture.EXPAND) -> List[float]:
+    """The whole match as an aggregate, which is the only abstraction this layer is given.
+
+    The two histories arrive as they stand rather than as the rule's verdict on them. `income_growth` is the growth across the whole window as a share of its oldest sample, which is the quantity the rule thresholds, and it is handed over as a number so that a policy can decide for itself where the threshold is — where the rule can only answer the question it was written with. The same goes for the losses: what is here is how many of the last few periods saw ground go, not whether that is enough to defend.
+
+    `driven_back` is the one feature that is a verdict, and it has to be: the rule's condition is that the enemy held more bases at some point and holds one now, so a policy given only the present count could not tell an opponent driven back to their last base from one that started with a single base and has not been touched. It is the peak that carries that, and the peak is meaningless as a bare count.
+    """
+    income = float(getattr(report, "income", 0.0))
+    growth = 0.0
+    if len(income_history) >= 2 and income_history[0] > 0.0:
+        growth = (income_history[-1] - income_history[0]) / max(income_history[0], 1.0)
+    ours = float(getattr(report, "military_value", 0.0))
+    theirs = float(getattr(report, "enemy_value", 0.0))
+    held = float(getattr(report, "held", 0))
+    enemy_held = float(getattr(report, "enemy_held", 0))
+    places = max(1, len(regions))
+    contested = sum(1 for region in regions if region.our_value > 0.0 and region.enemy_value > 0.0)
+    bases = float(getattr(report, "enemy_bases", 0))
+
+    features: List[float] = [
+        _clip(float(getattr(report, "credits", 0.0)) / CREDIT_SCALE),
+        _clip(income / INCOME_SCALE),
+        # Signed, because income falling is a different match from income levelling off, and the rule cannot tell them apart.
+        _clip(growth, -1.0, 1.0),
+        # Whether there is an economy to read a plateau off at all. The opening is flat and near nothing, and a policy without this would have to learn that a flat nought means "not started" while a flat forty means "levelled off".
+        1.0 if income >= INCOME_PLATEAU_FLOOR else 0.0,
+        _clip(float(getattr(report, "units", 0)) / getattr(report, "unit_cap", 0)) if getattr(report, "unit_cap", 0) else 0.0,
+        _clip(float(getattr(report, "under_construction", 0)) / 8.0),
+        _share(ours, theirs),
+        _share(held, enemy_held),
+        _clip(held / places),
+        _clip(enemy_held / places),
+        _clip(contested / places),
+        _clip(float(getattr(report, "lost_regions", 0)) / LOSS_SCALE),
+        _clip(sum(1 for lost in loss_history if lost > 0) / LOSS_SCALE),
+        _clip(bases / BASE_SCALE),
+        1.0 if bases == 1 and most_enemy_bases > 1 else 0.0,
+        _clip(game_time_ms / MATCH_SCALE),
+    ]
+    features.extend(_one_hot(posture, POSTURES))
+    features.extend(_contact_shares(contact))
+    features.append(1.0)
+    return [_finite(value) for value in features]
+
+
+def _contact_shares(contact: Optional[Dict[Role, float]]) -> List[float]:
+    """What has been run into, by role, as shares of the worth contacted. All nought where nothing has been seen, which is the opening of every match and is not the same statement as an even mix."""
+    if not contact:
+        return [0.0] * len(ROLES)
+    total = sum(contact.values())
+    if total <= 0.0:
+        return [0.0] * len(ROLES)
+    return [contact.get(role, 0.0) / total for role in ROLES]
 
 
 # ---- the operational cut ---------------------------------------------------------------

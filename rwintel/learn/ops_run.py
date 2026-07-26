@@ -20,8 +20,8 @@ import logging
 import math
 import os
 import sys
-from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from dataclasses import dataclass, replace
+from typing import Callable, Dict, List, Optional, Sequence
 
 import torch
 
@@ -140,8 +140,23 @@ def frozen_tactics(path: Optional[str], device_name: Optional[str] = None) -> Fr
     return FrozenTactics(build=build, batcher=batcher, name=name)
 
 
-def _arm(arguments, our: str, arms: int = 1, net=None, device=None, batcher=None,
-         frozen: FrozenTactics = FrozenTactics()):
+@dataclass(frozen=True)
+class Arm:
+    """One operational arm of a run: which layer it puts on our side, what the run calls it, and what identifies it in a journal.
+
+    `kind` is the rule — the script chain, the pin, the massed ablation, the concentrating arm, or a learnt network. `label` is what the run and the journal call it, which is the kind itself for every handwritten arm and carries the parameter file's stem for a learnt one, since a run may hold several learnt arms and two of them under one name would pair with each other. `name` is the identity rather than the nickname: a digest of the parameters for a learnt arm, exactly as the frozen tactical layer is named by its content, so that two runs whose arms share a label but not a policy can be refused rather than silently pooled.
+    """
+
+    kind: str
+    label: str
+    name: str
+    path: Optional[str] = None
+    net: object = None
+    device: object = None
+    batcher: object = None
+
+
+def _arm(arguments, arm: "Arm", arms: int = 1, frozen: FrozenTactics = FrozenTactics()):
     """One `OpsArena` per episode of one arm, seeded so that every arm of the run meets the same boards.
 
     `script` on our side is the self-play zero: the same chain on both sides of the mirror, whose pooled score must be nought. `pin` is a layer that sends every squad to the lowest-numbered legal region and task, making no operational choice at all; subtracting it from the script arm board by board cancels the enemy and the board lean and leaves how much the script's careful deployment beat making no choice, which is the resolution the arena exists to produce. The enemy is always the script, so every arm is measured against one fixed opponent.
@@ -152,30 +167,96 @@ def _arm(arguments, our: str, arms: int = 1, net=None, device=None, batcher=None
 
     `concentrate` is the arm that does what the massed arm was supposed to do. It keeps the doctrine's own choice of task and overrides only the region, sending every squad at the single region the strategic layer wants most. On this arena the priorities sit on the contested regions alone, so that is every squad at one contest — concentration in the plain sense, made by replacing the choice rather than by removing a term from it.
 
-    `learnt` is a trained network read from a file.
+    `learnt` is a trained network read from a file. A run may carry several of them at once, each with its own parameters, which is what puts two generations of one training line on the same boards: the length of a training run is the thing an arm comparison most often has to resolve, and taking the two generations in separate runs pays the arena's board scatter twice over and has to assume two runs on a machine doing different things were otherwise alike.
 
     Whatever the arm, the tactical layer under both sides is whatever `frozen` carries: the handwritten ladder by default, and trained parameters where the run named some. Every arm of a run fights under the same one, which is what keeps the arms comparable to each other and what makes the run as a whole one instrument.
     """
-    if our == "pin":
+    if arm.kind == "pin":
         operations = lambda session, catalogue: LearntOperations(session, catalogue, PinnedRegion(), None, -1)
-    elif our == "massed":
+    elif arm.kind == "massed":
         operations = lambda session, catalogue: Operations(session, catalogue, crowding=0.0)
-    elif our == "concentrate":
+    elif arm.kind == "concentrate":
         operations = lambda session, catalogue: Concentrated(session, catalogue)
-    elif our == "learnt":
-        # The trained layer read greedily — its most probable region and task, not a draw — since this measures the policy rather than trains it, and with no rollout it records nothing.
+    elif arm.kind == "learnt":
+        # The trained layer read greedily — its most probable region and task, not a draw — since this measures the policy rather than trains it, and with no rollout it records nothing. Each learnt arm closes over its own network and its own batching server, so several of them in one run neither share parameters nor queue behind one another's window.
         operations = lambda session, catalogue: LearntOperations(
-            session, catalogue, NetworkOperations(net, device, batcher, greedy=True), None, -1)
+            session, catalogue, NetworkOperations(arm.net, arm.device, arm.batcher, greedy=True), None, -1)
     else:
         operations = None
 
     def build(session) -> OpsArena:
         return OpsArena(session, operations=operations, tactics=frozen.build, tactics_name=frozen.name,
+                        operations_name=arm.name,
                         seed=_arena_seed(arguments.seed, session, arms),
                         horizon_ms=arguments.horizon * 1000, our_squads=arguments.squads,
                         catchment_radius=arguments.radius, contest_pairs=arguments.pairs,
                         garrison_scale=arguments.garrison)
     return build
+
+
+#: The operational arms a run may ask for. A learnt one may be written `learnt:PATH` to give it its own parameters, which is how one run carries several of them.
+ARM_KINDS = ("script", "pin", "massed", "concentrate", "learnt")
+
+
+def arms_of(arguments) -> List[Arm]:
+    """The run's arms, read off the repeated `--our` flags and named, with nothing yet loaded and no thread yet started.
+
+    A learnt arm is written either as the bare word, which takes the run's single `--load`, or as `learnt:PATH`, which carries its own. The second form is what lets one run hold two generations of a training line and pair them board by board; the first is kept because every measurement so far was taken with it and its journals name their arm `ops-learnt`.
+
+    Two arms whose label would be the same are refused rather than run: they would be written into one journal under one name, and a comparison reading that journal cannot tell two arms apart afterwards — it would read them as one arm that played every board twice, which is exactly the repeated board the pairing drops. A missing path is refused here for the reason the duel refuses it: a mistyped path would otherwise leave a freshly initialised network in place, and the run would measure a random policy and journal it under the trained one's name.
+
+    Nothing is loaded here on purpose. This runs before the tactical layer beneath the board is read, so that every refusal this can make is made while the run holds no network, no inference thread and no game.
+    """
+    arms: List[Arm] = []
+    for our in arguments.our:
+        kind, _, path = our.partition(":")
+        if kind not in ARM_KINDS:
+            raise SystemExit("no such operational arm as %s: the arms are %s, and a learnt one may name its own "
+                             "parameters as learnt:PATH" % (kind, ", ".join(ARM_KINDS)))
+        if path and kind != "learnt":
+            raise SystemExit("only a learnt arm carries parameters, and %s named some" % kind)
+        if kind != "learnt":
+            arms.append(Arm(kind=kind, label=kind, name=kind))
+            continue
+        path = path or arguments.load
+        if not path:
+            raise SystemExit("the learnt arm has no parameters to measure: give --load, or write it as learnt:PATH")
+        if not os.path.exists(path):
+            raise SystemExit("no parameters at %s, so there is nothing for the learnt arm to measure" % path)
+        # Named after the file it was read from where a run carries several, and by the bare word where it carries one, so that the journals every measurement so far was written into go on being read under the name they carry. The identity is the digest of the parameters themselves, since a path is a nickname that changes underneath itself.
+        stem = os.path.splitext(os.path.basename(path))[0]
+        label = "learnt" if our == "learnt" else "learnt-" + stem
+        arms.append(Arm(kind=kind, label=label, name=_digest(path), path=path))
+    labels = [arm.label for arm in arms]
+    for label in labels:
+        if labels.count(label) > 1:
+            raise SystemExit("two arms would be journalled as %s, so nothing downstream could tell them apart: give "
+                             "each learnt arm its own parameters as learnt:PATH" % label)
+    names = [arm.name for arm in arms if arm.kind == "learnt"]
+    for name in names:
+        if names.count(name) > 1:
+            # Two labels over one file, which is the bare word and its own path given together. The two arms would be one policy measured twice and the run would report it as differing from itself by the engine's scatter, under two names that look like two policies.
+            raise SystemExit("two learnt arms read the same parameters (%s), so they are one policy under two names" % name)
+    return arms
+
+
+def load_arms(arms: Sequence[Arm], device_name: Optional[str] = None) -> List[Arm]:
+    """Every learnt arm with its network read off its file and its own batching server started; the handwritten arms unchanged.
+
+    One network and one server per learnt arm, shared across every instance of the run, for the reason the training runner builds its network once: the network is what is being measured, and one copy batched across the instances is the whole point of batching the inference. Separate servers rather than one, because two arms are two policies and a batch is one forward pass of one network.
+    """
+    loaded: List[Arm] = []
+    for arm in arms:
+        if arm.kind != "learnt":
+            loaded.append(arm)
+            continue
+        device = _device(device_name)
+        net = OperationalNet().to(device)
+        _load(net, arm.path, device)
+        log.info("the %s arm reads the operational parameters at %s (%s)", arm.label, arm.path, arm.name)
+        loaded.append(replace(arm, net=net, device=device,
+                              batcher=operational_batcher(net, device=device, greedy=True)))
+    return loaded
 
 
 def pool(sessions, arm: Optional[str] = None) -> Summary:
@@ -324,63 +405,54 @@ def measure(arguments) -> Dict[str, Summary]:
         # An arena episode starts with nothing on the board: there is no command that removes a unit, so the only clean board to construct on is one nothing was ever put on.
         starting_units=0, arena=True,
     )
-    # The tactical layer beneath both sides first of all, so that a mistyped path is refused while the run has started nothing: no server, no inference thread and no game connected. It is one loader for both arms and every instance, exactly as the learnt arm's network is.
+    # The arms are named and their files checked first of all, and the tactical layer beneath both sides read next, so that every refusal either can make is made while the run has started nothing: no server, no inference thread and no game connected. Only then is anything loaded.
+    arms = arms_of(arguments)
     frozen = frozen_tactics(arguments.tactics, arguments.device)
-    # A learnt arm reads one network off a file and shares it across every instance, built once here rather than per session for the same reason the training runner does: the network is what is being measured, and one copy batched across the instances is the whole point of batching the inference. The script, pin and massed arms need none of this.
-    net = device = batcher = None
-    if "learnt" in arguments.our:
-        # Refused rather than loaded blind, for the same reason the duel refuses it: a missing or mistyped path leaves a freshly initialised network in place, and the run then measures a random policy and journals it under the trained one's name. Nothing downstream can tell those apart afterwards, and the figure looks like an ordinary measurement.
-        if not arguments.load:
-            raise SystemExit("the learnt arm has no parameters to measure: give --load")
-        if not os.path.exists(arguments.load):
-            raise SystemExit("no parameters at %s, so there is nothing for the learnt arm to measure" % arguments.load)
-        device = _device(arguments.device)
-        net = OperationalNet().to(device)
-        _load(net, arguments.load, device)
-        batcher = operational_batcher(net, device=device, greedy=True)
+    arms = load_arms(arms, arguments.device)
 
-    count = len(arguments.our)
+    count = len(arms)
     # A run made under trained tactical parameters writes to a file of its own, because it is not the same instrument as a run made under the handwritten layer and the two must not land in one journal: a journal is opened for appending, and a board that appears twice in it cannot be told apart afterwards, so every repeated board would be dropped from every comparison. Named after the file the parameters came from, as the duel names its arms, which is a nickname rather than the identity — the identity is the digest each episode carries.
     under = "-under-" + os.path.splitext(os.path.basename(arguments.tactics))[0] if arguments.tactics else ""
-    path = arguments.record or default_path("ops-" + "-".join(arguments.our) + under)
+    path = arguments.record or default_path("ops-" + "-".join(arm.label for arm in arms) + under)
     settings = ServerSettings(
         host=arguments.host, port=arguments.port, instances=arguments.instances,
         episodes=arguments.episodes,
-        arms=[("ops-" + our, _arm(arguments, our, count, net, device, batcher, frozen)) for our in arguments.our],
+        arms=[("ops-" + arm.label, _arm(arguments, arm, count, frozen)) for arm in arms],
         assets=AssetPaths.at(arguments.assets) if arguments.assets else AssetPaths.default(),
         episode=episode,
         journal=Journal(path),
     )
     server = Server(settings)
     log.info("measuring the operations arena %s arm(s) over %d board(s) each on %d instance(s), horizon %ds",
-             ", ".join(arguments.our), arguments.episodes, arguments.instances, arguments.horizon)
+             ", ".join(arm.label for arm in arms), arguments.episodes, arguments.instances, arguments.horizon)
     try:
         sessions = server.serve()
     except KeyboardInterrupt:
         server.stop()
         sessions = server.sessions
     finally:
-        if batcher is not None:
-            batcher.stop()
+        for arm in arms:
+            if arm.batcher is not None:
+                arm.batcher.stop()
         frozen.stop()
         if settings.journal is not None:
             settings.journal.close()
 
     summaries: Dict[str, Summary] = {}
-    for our in arguments.our:
-        log.info("---- %s ----", our)
-        summaries[our] = pool(sessions, "ops-" + our)
-        report(summaries[our], our)
-        diagnose(sessions, "ops-" + our, arguments.radius)
+    for arm in arms:
+        log.info("---- %s ----", arm.label)
+        summaries[arm.label] = pool(sessions, "ops-" + arm.label)
+        report(summaries[arm.label], arm.label)
+        diagnose(sessions, "ops-" + arm.label, arguments.radius)
     if count > 1:
         # Every arm met every board, so the run is its own paired comparison and there is no reason to make anyone assemble it by hand from the journal afterwards. Read back off the file that was just written rather than off the sessions, so that what is reported is what was recorded. Imported here rather than at the top because the comparison reads this module for the stride that names a board, and the two would otherwise import each other.
         from .ops_compare import compare
 
         # Every pair rather than neighbouring ones: the arms are not on a line, and which two of them the run was really asked about is not something the order they were typed in says.
-        for index, first in enumerate(arguments.our):
-            for second in arguments.our[index + 1:]:
-                log.info("---- %s against %s, board by board ----", first, second)
-                compare(path, path, first_arm="ops-" + first, second_arm="ops-" + second)
+        for index, first in enumerate(arms):
+            for second in arms[index + 1:]:
+                log.info("---- %s against %s, board by board ----", first.label, second.label)
+                compare(path, path, first_arm="ops-" + first.label, second_arm="ops-" + second.label)
     if frozen.batcher is not None:
         # Under a frozen tactical layer the fighting is the dominant inference load of the run and nothing else reports it: every squad of both sides asks it for a departure every tactical frame, against one operational request a squad a period. How that batches is the first thing to read a run's speed against, so it is said in the same words the engagement arena's runner says it in.
         log.info("the frozen tactical layer's batched inference averaged %.1f per call over %d call(s)",
@@ -409,9 +481,9 @@ def main(argv=None) -> int:
                         help="game seconds the two chains run before the board is scored")
     parser.add_argument("--squads", type=int, default=4, help="assorted-doctrine squads staged per side")
     parser.add_argument("--pairs", type=int, default=2, help="contested offset pairs, so twice this many scored regions")
-    parser.add_argument("--our", choices=("script", "pin", "massed", "concentrate", "learnt"), action="append", default=None,
-                        help="our side's operational layer, repeatable: the script chain (the self-play zero), a pinned deployment that makes no choice, the script with its crowding discount removed, which on this arena decides the same as the script, an arm that sends every squad at the single region the strategic layer wants most, or a learnt network read from --load. Give it more than once and every arm plays every board and the run reports the paired difference between every pair of arms itself; --episodes is per arm")
-    parser.add_argument("--load", default=None, help="parameters for the learnt arm, read greedily")
+    parser.add_argument("--our", action="append", default=None,
+                        help="our side's operational layer, repeatable: the script chain (the self-play zero), a pinned deployment that makes no choice, the script with its crowding discount removed, which on this arena decides the same as the script, an arm that sends every squad at the single region the strategic layer wants most, or a learnt network read from --load. A learnt arm may instead be written learnt:PATH and carry its own parameters, so that one run holds two generations of a training line and pairs them board by board. Give it more than once and every arm plays every board and the run reports the paired difference between every pair of arms itself; --episodes is per arm")
+    parser.add_argument("--load", default=None, help="parameters for a learnt arm written as the bare word, read greedily")
     parser.add_argument("--tactics", default=None,
                         help="parameters for a trained tactical layer to be put, frozen, under BOTH sides of the board, read at its likeliest action and recording nothing; left out, both sides fight the handwritten layer, which is what every measurement so far was made under; given, the run is a different instrument and its journal says so, so it pairs only with runs made under the same parameters")
     parser.add_argument("--device", default=None)

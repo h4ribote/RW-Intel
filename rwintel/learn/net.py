@@ -24,6 +24,9 @@ from .encoding import (
     OPERATIONAL_SIZE,
     OPERATIONAL_TASKS,
     SQUAD_SLOTS,
+    STRATEGIC_ACTIONS,
+    STRATEGIC_FEATURES,
+    STRATEGIC_SIZE,
     TACTICAL_ACTIONS,
     TACTICAL_FEATURES,
     TACTICAL_SIZE,
@@ -239,6 +242,32 @@ class OperationalNet(nn.Module):
         if task_mask is not None:
             tasks = tasks.masked_fill(task_mask <= 0, MASKED)
         return regions, tasks, self.value(hidden).squeeze(-1)
+
+
+class StrategicNet(nn.Module):
+    """The match as an aggregate to one of the five postures, with a value for it.
+
+    The smallest of the three and by a wide margin the cheapest to run: one decision every ten seconds for a whole side, against five a second per squad for the tactical layer. Nothing about the throughput budget that fixed the other two widths reaches this one, so the width here is the width of the problem — a few dozen aggregates into a choice of five — and it is kept at the tactical layer's rather than raised, because a wider body over a thirty-wide input with one label per ten seconds of match is a body fitted to the noise in the few thousand decisions a training run can afford.
+
+    Its own feature list rides with its parameters for the reason the other two carry one.
+    """
+
+    #: What one entry of this network's feature list stands for: one number of the state per name, as the tactical list is.
+    ENTRY = "feature"
+
+    def __init__(self, width: int = 64) -> None:
+        super().__init__()
+        self.body = _initialise(_trunk(STRATEGIC_SIZE, width), gain=2.0 ** 0.5)
+        self.action = _initialise(nn.Linear(width, STRATEGIC_ACTIONS), gain=0.01)
+        self.value = _initialise(nn.Linear(width, 1), gain=1.0)
+        self.register_buffer(ENCODING_KEY, encoding_stamp(STRATEGIC_FEATURES))
+
+    def forward(self, state: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        hidden = self.body(state)
+        logits = self.action(hidden)
+        if mask is not None:
+            logits = logits.masked_fill(mask <= 0, MASKED)
+        return logits, self.value(hidden).squeeze(-1)
 
 
 def one_hot_slot(slot: int, device=None) -> torch.Tensor:

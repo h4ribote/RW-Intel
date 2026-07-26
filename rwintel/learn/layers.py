@@ -16,11 +16,13 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from ..wire import Deviation, RegionState, Status, Task
 from ..control.policy.contracts import DOCTRINES, MissionReport, OperationsOrders, SquadRecord
 from ..control.policy.operations import Operations
+from ..control.policy.strategy import Strategy
 from ..control.policy.tactics import Tactics
 from ..control.policy.view import WorldView
 from .deciders import Choice
-from .encoding import operational_slots, operational_state, region_mask, tactical_state, task_mask
-from .reward import DISCOUNT as REWARD_DISCOUNT, OperationalReward, TacticalReward
+from .encoding import (POSTURES, operational_slots, operational_state, region_mask, strategic_state,
+                       tactical_state, task_mask)
+from .reward import (DISCOUNT as REWARD_DISCOUNT, OperationalReward, StrategicReward, TacticalReward)
 from .rollout import Rollout, Step
 
 log = logging.getLogger(__name__)
@@ -168,6 +170,129 @@ class LearntTactics(Tactics):
 
     def close(self) -> None:
         """Ends every open errand and releases this episode's trajectories to the trainer. The tactical arena has no intruder, so there is nothing to taint between the flush and the seal; the two are one call here and split only where an intruder sits above the layer."""
+        self.flush()
+        if self.rollout is not None:
+            self.rollout.seal(self.instance)
+
+
+class LearntStrategy(Strategy):
+    """The strategic layer with the choice of posture taken from a decider instead of from the transition rule.
+
+    One decision every ten seconds for the whole side, and everything else this layer emits — the allocation, the technology cap, the target mix, the region priorities, the loss allowance, whether the posture presses — is that posture read through the inherited tables. Replacing the rule and inheriting the tables is what makes this substitutable for the script in the sense the comparison needs: a learnt posture that beats the script's is a better posture and not a different layer.
+
+    There is one errand and it is the match. Nothing keys a mission by squad here, nothing is re-issued, and the terminal arrives from outside through `conclude` when the match is over — which is the same shape the arenas' `finish` has, and for the same reason: whoever runs the match knows how it ended, and the layer only ever sees periods.
+
+    A human pinning the posture stops this layer deciding at all, exactly as it stops the script's rule, because the inherited `decide` reads `forced` first. No decision is then recorded and none is paid, which is right: the design says the results of what somebody else commanded are to be kept out of the learning signal, and a pinned posture is precisely that.
+    """
+
+    def __init__(self, session, catalogue, decider, rollout: Optional[Rollout] = None,
+                 instance: int = -1, discount: float = REWARD_DISCOUNT) -> None:
+        super().__init__(session, catalogue)
+        self.decider = decider
+        self.rollout = rollout
+        self.instance = instance
+        self.reward = StrategicReward(discount=discount)
+        #: The one decision awaiting payment, held until the next period says what the board did under it.
+        self.pending: Optional[Step] = None
+        #: Shaping earned in a period where no decision was waiting to be paid, carried to the next one that has, for the reason the other two layers' ledgers of the same name give. It fires here whenever a human has the posture pinned: the board goes on moving and this layer is not the one moving it, so the term is carried rather than dropped and the sum still telescopes.
+        self.owed = 0.0
+        self.terminals: Counter = Counter()
+        self._regions: List = []
+        self._contact: Optional[Dict] = None
+        self._now = 0
+
+    #: What a trajectory of this layer's decisions is keyed by within its instance. Not a squad — this layer commands no squad — and negative so that it can never collide with one, since the buffer is shared with whichever other layer a run happens to be collecting from.
+    KEY = -1
+
+    def decide(self, report, regions, game_time_ms: int, contact=None):
+        # Held on the instance because the method this class exists to override is handed only the front report, and what a network needs is the board the report was taken from. Overriding the caller instead would mean copying the half of the layer that turns a posture into orders, which is the half that has to stay identical.
+        self._regions = list(regions)
+        self._contact = contact
+        self._now = game_time_ms
+        self._settle(report)
+        return super().decide(report, regions, game_time_ms, contact)
+
+    def _settle(self, report) -> None:
+        """Pays the decision still waiting from the board that has just arrived.
+
+        Before the inherited `decide` samples the histories, so that the payment is made from the board this period brought rather than from the board plus this period's own sample. The two would give the same potential — the potential reads the report and not the histories — and the order is the one the other two layers keep: settle what is outstanding, then decide.
+        """
+        if self.rollout is None:
+            return
+        outcome = self.reward.step(report)
+        step, self.pending = self.pending, None
+        if step is not None:
+            step.reward = outcome.reward + self.owed
+            self.owed = 0.0
+            step.done = outcome.done
+            self.rollout.add((self.instance, self.KEY), step)
+        else:
+            self.owed += outcome.reward
+
+    def _transition(self, report):
+        """Which posture, from the decider rather than from the rule.
+
+        With no decider this falls through to the inherited rule and writes down what it chose, which is how the script becomes a teacher for this layer: what comes out is a state and an action of exactly the form a learnt layer emits.
+
+        Every posture is legal and there is no mask. The rule never selects TECH and that is a property of the rule — the design says so outright and gives a human the way to select it — so a mask forbidding it would be the rule written again in the mask's clothing, which is what the tactical space refuses masks for.
+        """
+        state = strategic_state(report, self._regions, self._now, self.income_history,
+                                self.loss_history, self.most_enemy_bases, self._contact, self.posture)
+        mask = [1.0] * len(POSTURES)
+        if self.decider is None:
+            choice = Choice(action=int(super()._transition(report)))
+        else:
+            choice = self.decider.choose_many([(state, mask)])[0]
+        if not 0 <= choice.action < len(POSTURES):
+            return super()._transition(report)
+        if self.rollout is not None:
+            self.pending = Step(state=state, action=choice.action, mask=mask,
+                                log_prob=choice.log_prob, value=choice.value,
+                                squad=self.KEY, at_ms=self._now)
+        return POSTURES[choice.action]
+
+    def conclude(self, terminal: float, reason: str = "match") -> None:
+        """Ends the match's errand from outside, paying the decision still waiting on it as the last of the trajectory.
+
+        The match's own result, which is the only terminal this design ever pays a strategic decision and the only place a layer is paid the match at all. The payment is the result handed in plus the last shaping term taken against a terminal potential of nought, so the shaping over the match telescopes away and cannot change which policy is best.
+
+        The three cases are the ones the other two layers' finishers handle. An errand already paid its terminal has its still-waiting decision cut rather than paid twice. A match that ended with no decision waiting — the posture was pinned through its last period, or the match was called between periods — has the payment added to the last step there was. And a match that took no strategic decision at all has nothing to pay and nothing to cut.
+        """
+        if self.rollout is None:
+            return
+        if self.reward.ended():
+            self.pending = None
+            self.owed = 0.0
+            self.rollout.cut((self.instance, self.KEY), reason="spent")
+            self.reward.forget()
+            return
+        payment = terminal + (0.0 - self.reward.close()) + self.owed
+        self.owed = 0.0
+        step, self.pending = self.pending, None
+        if step is None:
+            if self.rollout.close_with((self.instance, self.KEY), payment):
+                self.terminals[reason] += 1
+            return
+        step.reward = payment
+        step.done = True
+        self.terminals[reason] += 1
+        self.rollout.add((self.instance, self.KEY), step)
+
+    def flush(self) -> None:
+        """Ends the match's errand at the end of an episode without yet releasing it, for the reason the other two layers' flush is split from their close: the chain marks the episode's interference in between.
+
+        A match that reached `conclude` has nothing left here. What this is for is the episode that ended some other way — a run stopped by hand, an instance that dropped — where the decision still waiting belongs to no result and is bootstrapped rather than paid.
+        """
+        if self.rollout is None:
+            return
+        if self.pending is not None:
+            self.rollout.add((self.instance, self.KEY), self.pending)
+            self.pending = None
+        self.owed = 0.0
+        self.rollout.cut_all(owner=self.instance, reason="episode")
+        self.reward.reset()
+
+    def close(self) -> None:
         self.flush()
         if self.rollout is not None:
             self.rollout.seal(self.instance)

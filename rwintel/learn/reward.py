@@ -170,6 +170,63 @@ class TacticalReward:
         return None, ""
 
 
+class StrategicReward:
+    """Pays the strategic layer the match, which is the one layer in this design that is paid the match at all.
+
+    Everything below it is paid for meeting the contract handed down to it and never sees the result; this is where that stops. The rule's whole point is that credit assignment does not cross a layer boundary, and it does not have to here, because there is nothing above this layer to hand it a contract — what it is asked for IS the match, so what it is paid is the match.
+
+    One errand per match and not one per squad. The layer decides one thing about the whole side every ten seconds, so there is nothing to key a mission by: the errand opens with the match and closes with it, and `close`/`ended` are here for the outside terminal to telescope against exactly as the operational layer's are.
+
+    The potential is the running form of the very quantity the match is scored on. An episode that was cut off is scored on the military edge — the value standing on our side against the strongest opponent's, as a ratio — and that same edge can be read off any board in flight, so the shaping points exactly where the terminal points. That is the property the tactical layer's exchange term was chosen for and the one the operational layer's per-region potential had to be rewritten to get: a dense term that disagrees with the terminal teaches the opening of an episode to do the opposite of what the ending pays for.
+
+    Two limits on that alignment, and both are honest rather than incidental. **The economy term cannot be read in flight at all**: the score's economy component compares our income with the enemy's, and the enemy's income is not observable from inside a match (only our own aggregates are, and the design says so). So the potential carries the military weight alone, and if the score's weights are ever fitted away from military-only, this potential answers a different question than the terminal and has to be revisited. **And the military edge here is read from what this side commands against what it can see**, where the terminal's is read from the standing the game reports for every team at the end. With the fog off those are the same board; with it on, the potential is a partial reading of the quantity the terminal settles.
+    """
+
+    def __init__(self, discount: float = DISCOUNT, military_weight: float = 1.0) -> None:
+        #: One errand for the whole match, so this is one mission and not a dictionary of them.
+        self.mission: Optional[_Mission] = None
+        # The factor the shaping telescopes with, handed in for the reason the other two layers' is: whoever builds the layer knows how long the errand is. A match is one whole errand from this layer's seat, which is the case discounted at nothing.
+        self.discount = discount
+        # What share of the score the potential is the running form of. The blend the episodes are scored with is military-only today, and this is that weight rather than a one so that the two cannot silently disagree.
+        self.military_weight = military_weight
+
+    def forget(self) -> None:
+        self.mission = None
+
+    def ended(self) -> bool:
+        """Whether this match's errand has already been paid its terminal, which a caller ending it from outside asks before paying another."""
+        return self.mission is not None and self.mission.ended
+
+    def close(self) -> float:
+        """Hands back everything this errand has already been paid — the last valuation less the one it opened at — and forgets it, so that a caller ending it from outside pays `terminal − that` and the match's whole return comes to the terminal exactly. Nought where nothing is held, which is a match that ended before a first decision was taken."""
+        mission, self.mission = self.mission, None
+        return mission.potential - mission.opening if mission is not None else 0.0
+
+    def reset(self) -> None:
+        self.mission = None
+
+    def step(self, report) -> Outcome:
+        """One strategic period's shaping, paid to the decision the period before it left waiting.
+
+        The first period opens the errand and pays nothing: the potential is read there and paid from the next period, so the decision that merely started the match is not paid for the board it started on.
+        """
+        potential = self._potential(report)
+        if self.mission is None:
+            self.mission = _Mission(issued_at_ms=0, potential=potential, opening=potential)
+            return Outcome()
+        if self.mission.ended:
+            return Outcome()
+        reward = self.discount * potential - self.mission.potential
+        self.mission.potential = potential
+        return Outcome(reward=reward)
+
+    def _potential(self, report) -> float:
+        """The military edge as the score defines it: ours less theirs over their sum, on −1 to +1, which is twice the share less a half. Written as the edge rather than as the share so that it is the same number the terminal is, and so that an even board is nought and carries no constant a discount below one would charge for."""
+        ours = float(getattr(report, "military_value", 0.0))
+        theirs = float(getattr(report, "enemy_value", 0.0))
+        return self.military_weight * 2.0 * (_share(ours, theirs) - 0.5)
+
+
 class OperationalReward:
     """Pays the operational layer for meeting the strategic layer's orders, one squad at a time.
 

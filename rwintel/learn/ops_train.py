@@ -61,6 +61,8 @@ def train(arguments) -> int:
     def arm(session) -> OpsArena:
         # One arm trains, so the board advances with every episode.
         return OpsArena(session, operations=learnt, tactics=frozen.build, tactics_name=frozen.name,
+                        # Not a digest, because the parameters this side plays under change with every update: what a training episode was played by is a moving policy and no file names it. Written all the same so that a training journal can never be paired against a measuring run's arm as though it were a fixed one.
+                        operations_name="learning",
                         seed=_arena_seed(arguments.seed, session, 1),
                         horizon_ms=arguments.horizon * 1000, our_squads=arguments.squads,
                         catchment_radius=arguments.radius, contest_pairs=arguments.pairs,

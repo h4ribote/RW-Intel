@@ -26,7 +26,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 
 from rwintel.control.policy.catalogue import Catalogue
-from rwintel.control.policy.contracts import Doctrine, SquadRecord, TaskContract
+from rwintel.control.policy.contracts import (
+    ALLOCATION,
+    Doctrine,
+    FrontReport,
+    Posture,
+    SquadRecord,
+    TaskContract,
+)
+from rwintel.control.policy.strategy import (
+    LOSS_ALLOWANCE_FLOOR,
+    LOSS_ALLOWANCE_SHARE,
+    OFFENSIVE,
+    Strategy,
+)
 from rwintel.control.policy.view import build as build_view, rehome
 from rwintel.control.session import UnitType
 from rwintel.learn.arena import (
@@ -45,6 +58,8 @@ from rwintel.learn.encoding import (
     REGION_FEATURES,
     REGION_SIZE,
     SQUAD_FEATURES,
+    STRATEGIC_FEATURES,
+    STRATEGIC_SIZE,
     TACTICAL_ACTIONS,
     TACTICAL_FEATURES,
     TACTICAL_SIZE,
@@ -53,23 +68,27 @@ from rwintel.learn.encoding import (
     region_mask,
     squad_mask,
     squad_slots,
+    strategic_state,
     tactical_state,
     task_mask,
 )
 from rwintel.learn.imitation import Sample, TeacherMismatch, fit, read_teacher
-from rwintel.learn.layers import LearntOperations, LearntTactics
+from rwintel.learn.frozen import frozen_layers
+from rwintel.learn.layers import LearntOperations, LearntStrategy, LearntTactics
 from rwintel.learn.net import (
     AVOWAL_KEY,
     ENCODING_KEY,
     EncodingRefused,
     OperationalNet,
+    StrategicNet,
     TacticalNet,
     avowed,
     encoding_avowal,
     encoding_stamp,
 )
 from rwintel.learn.ops_arena import SCRIPT_TACTICS, OpsArena
-from rwintel.learn.ops_run import frozen_tactics
+from rwintel.learn.ops_run import arms_of, frozen_tactics, load_arms
+from rwintel.learn.policy import STRATEGIC, TACTICAL, LearningPolicy
 from rwintel.learn.reward import (
     COMPLETE_REWARD,
     DISCOUNT,
@@ -88,6 +107,7 @@ from rwintel.learn.train import Optimiser, Trainer
 from rwintel.control.policy.tactics import Tactics, _Track
 from rwintel.eval import arms as eval_arms
 from rwintel.eval.sampling import Summary
+from rwintel.eval.scoring import score
 from rwintel.wire import (
     BLOCK_REGIONS,
     BLOCK_SQUADS,
@@ -1960,6 +1980,94 @@ def test_a_learnt_operational_arm_loads_and_names_itself_after_its_file():
                 batcher.stop()
 
 
+class _Chained:
+    """A session as far as the whole script chain reads one when it is built: the type table, no asset tree, no regions and no map. The chain's constructor makes its own catalogue out of the first two and the economy layer works its resource points out of the last, which is everything the five layers ask of a session before a board has arrived."""
+
+    types = list(_TYPES)
+    assets = None
+    regions = ()
+    map_content = None
+
+
+def test_a_learnt_strategic_arm_is_built_the_same_way_and_can_be_read_either_way():
+    """The strategic layer is measured on whole matches like the operational one, through the same wiring: one network read off a file, one batching server, and the rest of the chain left the script it is measured against.
+
+    How the policy is read is the run's to say. Drawing is the default because every match measurement so far was taken that way, and `--greedy` makes every learnt arm take its likeliest action instead — which is how the arena's measuring runner reads its own learnt arm, so the flag is what makes a number from one place comparable with a number from the other.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "strategy.pt")
+        torch.save(StrategicNet().state_dict(), path)
+        arms, batchers = eval_arms.build_all(["script", "defend", f"strategy:{path}"])
+        try:
+            assert [name for name, _ in arms] == ["script", "defend", "strategy"]
+            assert len(batchers) == 1, "only the learnt arm needs an inference server"
+        finally:
+            for batcher in batchers:
+                batcher.stop()
+
+        # A freshly built policy is nearly uniform on purpose, so a server that drew from it would not answer alike twenty times running; one that takes the likeliest posture will.
+        request = ([0.0] * STRATEGIC_SIZE, [1.0] * len(Posture))
+        for greedy, alike in ((True, True), (False, False)):
+            _, batcher = eval_arms.learnt(f"strategy:{path}", greedy=greedy)
+            try:
+                answers = {batcher.submit(request).action for _ in range(20)}
+            finally:
+                batcher.stop()
+            assert (len(answers) == 1) is alike
+
+
+def test_a_layer_frozen_beneath_the_one_being_trained_records_nothing():
+    """The other half of what the design means by learning one layer against frozen neighbours.
+
+    A training run has always frozen the script beneath itself, which is what a `LearningPolicy` is; what had no wiring at all in a match was freezing the TRAINED layers beneath it, so the second half of the learning order could only ever be run against the handwritten layers it was supposed to have improved on. A frozen layer is built by the very same code as the layer being trained and differs in exactly one thing: it is handed no rollout, so with nowhere to record a decision it records none.
+
+    Freezing the layer the run is training is refused rather than allowed to mean something: it would leave the gradient going to a network nothing reads.
+    """
+    session = _Chained()
+    training, held = _Fixed(action=0), _Fixed(action=1)
+    rollout = Rollout()
+    policy = LearningPolicy(session, STRATEGIC, training, rollout, 0, frozen={TACTICAL: held})
+    assert isinstance(policy.strategy, LearntStrategy) and policy.strategy.rollout is rollout
+    assert isinstance(policy.tactics, LearntTactics) and policy.tactics.rollout is None
+    assert policy.tactics.decider is held and policy.strategy.decider is training
+    # The layers not named are the script's own, unchanged.
+    assert type(policy.operations).__name__ == "Operations"
+
+    assert "cannot be both trained and frozen" in _refusal(
+        ValueError, LearningPolicy, session, STRATEGIC, training, rollout, 0, {STRATEGIC: held})
+
+
+def test_freezing_a_layer_names_the_parameters_and_refuses_what_it_cannot_read():
+    """A frozen layer is part of the instrument, so it is named by a digest of the parameters themselves rather than by the path they came from — a path is a nickname that a later training run overwrites. What cannot be read is refused before any inference thread exists, for the reason the arena refuses a mistyped tactical path: an instrument built from noise is a whole run measured against nothing and journalled under a trained layer's name."""
+    threads = threading.active_count()
+    with tempfile.TemporaryDirectory() as directory:
+        tactics = os.path.join(directory, "tactics.pt")
+        operations = os.path.join(directory, "operations.pt")
+        torch.save(TacticalNet().state_dict(), tactics)
+        torch.save(OperationalNet().state_dict(), operations)
+
+        frozen = frozen_layers(f"tactics:{tactics},operations:{operations}", training=STRATEGIC)
+        try:
+            assert sorted(frozen.deciders) == ["operations", "tactics"]
+            assert len(frozen.batchers) == 2
+            assert all(name.startswith("sha256:") for name in frozen.names.values())
+            assert frozen.names["tactics"] != frozen.names["operations"]
+            built = frozen.build()
+            assert sorted(built) == ["operations", "tactics"] and built["tactics"].greedy
+        finally:
+            frozen.stop()
+
+        assert "there are no parameters at" in _refusal(
+            ValueError, frozen_layers, f"tactics:{os.path.join(directory, 'absent.pt')}")
+        assert "cannot be frozen as the tactics layer" in _refusal(
+            ValueError, frozen_layers, f"tactics:{operations}")
+        assert "was named twice" in _refusal(
+            ValueError, frozen_layers, f"tactics:{tactics},tactics:{tactics}")
+        assert "layer:path" in _refusal(ValueError, frozen_layers, tactics)
+        # Nothing is left running behind any of those refusals.
+        assert threading.active_count() == threads
+
+
 def test_a_missing_operational_file_is_refused_rather_than_started_from_nothing():
     """A duel refuses to measure parameters that are not there rather than starting from a fresh policy, because a plausible number about a policy nobody asked about is worse than an error. The match arm refuses for the same reason, and before it stands up any inference thread."""
     try:
@@ -2251,6 +2359,249 @@ def test_the_tactical_width_is_read_off_the_file_rather_than_asked_for_as_a_flag
             assert layer.decider.net.body[0].in_features == TACTICAL_SIZE
         finally:
             frozen.stop()
+
+
+# ---- the strategic layer, which is the one layer paid the match --------------------------------
+
+class _Ending:
+    """An episode as far as the score reads one, which is what the session hands the policy when a match ends."""
+
+    def __init__(self, winner, team, timeout, standing):
+        self.winner, self.team, self.timeout, self.standing = winner, team, timeout, standing
+
+
+def _report(**overrides):
+    fields = dict(income=30.0, credits=1500.0, military_value=4000.0, enemy_value=4000.0,
+                  held=3, enemy_held=3, lost_regions=0, enemy_bases=2,
+                  units=20, unit_cap=100, under_construction=1)
+    fields.update(overrides)
+    return FrontReport(**fields)
+
+
+def _places():
+    return [_region(1, 0.0, 0.0, ours=800.0, theirs=0.0),
+            _region(2, 900.0, 0.0, ours=0.0, theirs=900.0),
+            _region(3, 400.0, 400.0, ours=200.0, theirs=200.0)]
+
+
+def test_the_strategic_state_is_its_feature_list_and_nothing_leaves_the_range():
+    """The same three rules the other two cuts follow, checked the same way. A vector one slot out of step fits every width and trains without complaint, so the length is pinned against the names rather than against a number written twice; and every entry is a share, a ratio against a stated scale or a flag, so a match with a hundred times the credits of another cannot produce a feature a hundred times larger."""
+    state = strategic_state(_report(), _places(), 300000, income_history=[20.0, 22.0, 25.0],
+                            loss_history=[0, 1, 1], most_enemy_bases=3, posture=Posture.ARM)
+    assert len(state) == STRATEGIC_SIZE == len(STRATEGIC_FEATURES)
+    assert all(math.isfinite(value) for value in state)
+    assert all(-1.0 <= value <= 1.0 for value in state)
+
+    named = dict(zip(STRATEGIC_FEATURES, state))
+    # An even board reads nought on the edge, whatever the armies are worth, which is what makes the potential the same number the score is.
+    assert named["military_edge"] == 0.5, "the edge feature is a share and an even board is a half of it"
+    assert named["posture_arm"] == 1.0 and named["posture_expand"] == 0.0
+    # The growth across the window as a share of its oldest sample, which is the quantity the rule thresholds — handed over as the number rather than as the rule's verdict on it, so that a policy can put the threshold where it likes.
+    assert abs(named["income_growth"] - (25.0 - 20.0) / 20.0) < 1e-9
+    # Two of the last three periods saw ground go, which is exactly what the rule reacts at, and it is reported as the count rather than as the reaction.
+    assert abs(named["losing_periods"] - 2.0 / 3.0) < 1e-9
+    assert named["driven_back"] == 0.0
+    assert named["bias"] == 1.0
+
+    # Driven back is a verdict and has to be: an enemy on their last base reads the same count as one that only ever had one.
+    driven = strategic_state(_report(enemy_bases=1), _places(), 300000, most_enemy_bases=3)
+    untouched = strategic_state(_report(enemy_bases=1), _places(), 300000, most_enemy_bases=1)
+    assert dict(zip(STRATEGIC_FEATURES, driven))["driven_back"] == 1.0
+    assert dict(zip(STRATEGIC_FEATURES, untouched))["driven_back"] == 0.0
+
+    # An empty board is an ordinary board here: the first frames of a match have nothing standing and nothing contacted, and a division by nothing in this cut would end the run before the first decision.
+    empty = strategic_state(_report(military_value=0.0, enemy_value=0.0, held=0, enemy_held=0,
+                                    units=0, unit_cap=0), [], 0)
+    assert len(empty) == STRATEGIC_SIZE and all(math.isfinite(value) for value in empty)
+
+
+def test_the_strategic_layer_is_the_script_with_one_method_replaced():
+    """What makes a learnt posture comparable with the rule's: everything except which posture is chosen is the same code.
+
+    With no decider the layer falls through to the inherited rule and writes down what the rule chose, which is how the script becomes this layer's teacher. With one, the posture is the decider's and the orders that come out are the inherited tables read at that posture — the allocation, whether it presses, the loss allowance and the priorities are not re-decided anywhere.
+    """
+    script = Strategy(None, _CATALOGUE)
+    teacher = LearntStrategy(None, _CATALOGUE, None, rollout=Rollout(), instance=0)
+    report, regions = _report(), _places()
+    for now in (10000, 20000, 30000):
+        expected = script.decide(report, regions, now)
+        written = teacher.decide(report, regions, now)
+        assert teacher.posture is script.posture, "the layer with no decider is not deciding as the rule does"
+        assert written[0].allocation == expected[0].allocation
+        assert written[1].priorities == expected[1].priorities
+    assert teacher.pending is not None and teacher.pending.action == int(script.posture)
+
+    # Handed a decider, the posture is the decider's answer and everything downstream is that posture's own row of the inherited tables.
+    learnt = LearntStrategy(None, _CATALOGUE, _Fixed(action=int(Posture.DECIDE)), rollout=Rollout(), instance=0)
+    economy, operations = learnt.decide(report, regions, 10000)
+    assert learnt.posture is Posture.DECIDE
+    assert economy.allocation == ALLOCATION[Posture.DECIDE]
+    assert operations.offensive is OFFENSIVE[Posture.DECIDE]
+    assert operations.loss_allowance == max(LOSS_ALLOWANCE_FLOOR,
+                                            LOSS_ALLOWANCE_SHARE[Posture.DECIDE] * report.military_value)
+
+
+def test_a_match_returns_its_own_score_and_the_shaping_cancels_whole():
+    """The property every layer here is built around, on the layer that is paid the match.
+
+    The shaping is only harmless if it telescopes over the errand, and an errand's return has to be the terminal alone. So a match's decisions must sum to the score that match came to, less the potential it opened at — whatever the board did in between, and however many periods it took. Checked at a discount of one, which is what a match is discounted at from this layer's seat, over a board that moves both ways.
+    """
+    rollout = Rollout(discount=1.0, trace=1.0)
+    layer = LearntStrategy(None, _CATALOGUE, _Fixed(action=int(Posture.ARM)), rollout=rollout,
+                           instance=0, discount=1.0)
+    edges = [(4000.0, 4000.0), (5000.0, 3000.0), (3000.0, 6000.0), (7000.0, 2000.0)]
+    for period, (ours, theirs) in enumerate(edges):
+        layer.decide(_report(military_value=ours, enemy_value=theirs), _places(), 10000 * (period + 1))
+    opening = 2.0 * (4000.0 / 8000.0 - 0.5)
+    layer.conclude(0.6, "match")
+
+    trajectory, = rollout.done
+    assert trajectory.finished and len(trajectory.steps) == len(edges)
+    assert abs(sum(step.reward for step in trajectory.steps) - (0.6 - opening)) < 1e-9
+    assert layer.terminals["match"] == 1
+
+    # And a second match on the same layer opens a fresh errand rather than continuing the first: the ledger the terminal closed is gone, a new one opens at the new board, and the decision now waiting is not appended to the trajectory that has already been paid.
+    assert layer.reward.mission is None and layer.pending is None
+    layer.decide(_report(military_value=1000.0, enemy_value=9000.0), _places(), 10000)
+    assert len(rollout.done) == 1 and not rollout.live
+    assert layer.pending is not None
+    assert abs(layer.reward.mission.opening - 2.0 * (1000.0 / 10000.0 - 0.5)) < 1e-9
+
+
+def test_a_posture_a_human_pinned_is_not_recorded_and_its_periods_are_still_carried():
+    """A pinned posture is somebody else's decision, so nothing is recorded for it — the design says the results of what another commander decided are kept out of the learning signal, and this is that rule at the one place this layer can be taken over.
+
+    What must not happen is that the shaping earned while it was pinned is dropped. The telescope only closes if every increment reached some decision, so those periods are carried and paid into the next decision this layer does take. The match still returns its terminal less what it opened at.
+    """
+    rollout = Rollout(discount=1.0, trace=1.0)
+    layer = LearntStrategy(None, _CATALOGUE, _Fixed(action=int(Posture.ARM)), rollout=rollout,
+                           instance=0, discount=1.0)
+    layer.forced = Posture.DEFEND
+    for period, (ours, theirs) in enumerate([(4000.0, 4000.0), (6000.0, 2000.0)]):
+        layer.decide(_report(military_value=ours, enemy_value=theirs), _places(), 10000 * (period + 1))
+    assert layer.posture is Posture.DEFEND
+    assert not rollout.live and not rollout.done, "a pinned posture recorded a decision of its own"
+    assert layer.owed != 0.0, "the shaping earned while the posture was pinned was dropped"
+
+    layer.forced = None
+    layer.decide(_report(military_value=5000.0, enemy_value=3000.0), _places(), 30000)
+    layer.conclude(0.25, "match")
+    trajectory, = rollout.done
+    opening = 2.0 * (4000.0 / 8000.0 - 0.5)
+    assert abs(sum(step.reward for step in trajectory.steps) - (0.25 - opening)) < 1e-9
+
+
+def test_the_match_result_reaches_the_layer_through_the_chain_and_only_that_layer():
+    """How the terminal arrives: the session hands the episode to the policy, the policy scores it and hands the number to the layer that is paid the match. Only the strategic layer defines the method, so the same call is a no-op for the other two — which is the design's rule about credit assignment not crossing a layer boundary, made mechanical rather than remembered."""
+    rollout = Rollout(discount=1.0, trace=1.0)
+    layer = LearntStrategy(None, _CATALOGUE, _Fixed(action=int(Posture.EXPAND)), rollout=rollout,
+                           instance=0, discount=1.0)
+    layer.decide(_report(), _places(), 10000)
+
+    # A decided match saturates the score, whatever the board looked like when it ended.
+    won = _Ending(winner=0, team=0, timeout=False,
+                  standing=[{"team": 0, "value": 10.0, "income": 1.0, "killed": 0, "lost": 0},
+                            {"team": 1, "value": 9000.0, "income": 90.0, "killed": 0, "lost": 0}])
+    assert score(won) == 1.0
+    layer.conclude(score(won), "match")
+    trajectory, = rollout.done
+    assert trajectory.steps[-1].done and trajectory.steps[-1].reward == 1.0
+
+    # The same call against a layer that is not paid the match does nothing at all rather than raising.
+    tactical = LearntTactics(None, _CATALOGUE, _Fixed(), rollout=Rollout(), instance=0)
+    assert getattr(tactical, "conclude", None) is None
+
+
+def test_the_strategic_trajectory_cannot_collide_with_a_squads():
+    """One buffer serves a run, and a trajectory is keyed by the instance and the thing it is about. The strategic layer commands no squad, so its key has to be a number the squad pool never issues, or a match's strategic decisions and some squad's errand would be appended into one trajectory and the advantage of each would run into the other."""
+    assert LearntStrategy.KEY < 0
+    rollout = Rollout(discount=1.0, trace=1.0)
+    strategic = LearntStrategy(None, _CATALOGUE, _Fixed(action=int(Posture.ARM)), rollout=rollout,
+                              instance=0, discount=1.0)
+    tactical = LearntTactics(None, _CATALOGUE, _Fixed(), rollout=rollout, instance=0)
+    strategic.decide(_report(), _places(), 10000)
+    tactical.decide(_skirmish(), [_squad()], 21000)
+    strategic.decide(_report(military_value=6000.0), _places(), 20000)
+    tactical.decide(_skirmish(), [_squad()], 21200)
+    assert sorted(rollout.live) == [(0, LearntStrategy.KEY), (0, 0)]
+
+
+# ---- the operational arms a measuring run puts on one set of boards ---------------------------
+
+class _Arms:
+    """Only what `arms_of` reads of a run's arguments."""
+
+    def __init__(self, our, load=None, device=None):
+        self.our = list(our)
+        self.load = load
+        self.device = device
+
+
+def test_two_learnt_arms_carry_their_own_parameters_and_meet_the_same_boards():
+    """Why one run has to be able to hold two learnt arms at once.
+
+    The question an arm comparison most often has to resolve is whether a longer training run produced a stronger layer, and that is two generations of one line. Measured in two separate runs the difference pays the arena's board scatter twice — one arm's episodes scatter by about 0.11 while the differences being looked for are around 0.04 — and it has to assume two runs made at different moments on a machine doing different things were otherwise alike. In one run they alternate on held boards and every difference is paired.
+
+    What makes that safe is naming. Each arm is labelled after the file it reads, since two of them under one name would be written into one journal as one arm that played every board twice, which the pairing drops; and each carries the digest of its own parameters as its identity, because a path is a nickname that a later training run overwrites underneath itself.
+
+    Nothing is loaded and no thread is started while the arms are only being named, so that every refusal below happens before the run holds a network or a game.
+    """
+    threads = threading.active_count()
+    with tempfile.TemporaryDirectory() as directory:
+        first = os.path.join(directory, "ops-arena-c1.pt")
+        second = os.path.join(directory, "ops-arena-c2.pt")
+        torch.save(OperationalNet().state_dict(), first)
+        torch.save(OperationalNet().state_dict(), second)
+
+        arms = arms_of(_Arms(["script", "concentrate", f"learnt:{first}", f"learnt:{second}"]))
+        assert [arm.label for arm in arms] == ["script", "concentrate", "learnt-ops-arena-c1", "learnt-ops-arena-c2"]
+        assert [arm.kind for arm in arms] == ["script", "concentrate", "learnt", "learnt"]
+        # The handwritten arms are named by the rule they run; a learnt one by what its parameters are, which two files never share.
+        assert [arm.name for arm in arms[:2]] == ["script", "concentrate"]
+        assert arms[2].name.startswith("sha256:") and arms[2].name != arms[3].name
+        assert all(arm.net is None and arm.batcher is None for arm in arms)
+        assert threading.active_count() == threads
+
+        # The bare word is the form every measurement so far was taken with, and it keeps the name those journals carry.
+        bare = arms_of(_Arms(["script", "learnt"], load=first))
+        assert [arm.label for arm in bare] == ["script", "learnt"]
+        assert bare[1].name == arms[2].name
+
+        loaded = load_arms(arms)
+        try:
+            assert [arm.label for arm in loaded] == [arm.label for arm in arms]
+            assert all(arm.net is None and arm.batcher is None for arm in loaded[:2])
+            # One network and one batching server per learnt arm: two arms are two policies, and a batch is one forward pass of one network.
+            assert loaded[2].net is not loaded[3].net
+            assert loaded[2].batcher is not None and loaded[2].batcher is not loaded[3].batcher
+        finally:
+            for arm in loaded:
+                if arm.batcher is not None:
+                    arm.batcher.stop()
+
+
+def test_arms_that_could_not_be_told_apart_afterwards_are_refused_before_the_run_starts():
+    """Every way two arms could end up indistinguishable in the journal, refused while the run still holds nothing.
+
+    Two arms under one label would be one name over two policies, which a later comparison reads as one arm that played every board twice and drops. Two labels over one file is the same fault the other way round: one policy under two names, which the run would then report as differing from itself by the engine's own scatter. And parameters that are not there are refused rather than loaded blind, for the reason the duel refuses them — a mistyped path leaves a freshly initialised network in place and the run measures a random policy under the trained one's name.
+    """
+    threads = threading.active_count()
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "ops-arena-c1.pt")
+        torch.save(OperationalNet().state_dict(), path)
+
+        assert "two arms would be journalled as" in _refusal(
+            SystemExit, arms_of, _Arms([f"learnt:{path}", f"learnt:{path}"]))
+        # The bare word and the same file named outright are two labels over one policy.
+        assert "one policy under two names" in _refusal(
+            SystemExit, arms_of, _Arms(["learnt", f"learnt:{path}"], load=path))
+        assert "no such operational arm" in _refusal(SystemExit, arms_of, _Arms(["ladder"]))
+        assert "only a learnt arm carries parameters" in _refusal(
+            SystemExit, arms_of, _Arms([f"script:{path}"]))
+        assert "no parameters at" in _refusal(
+            SystemExit, arms_of, _Arms([f"learnt:{os.path.join(directory, 'absent.pt')}"]))
+        assert "has no parameters to measure" in _refusal(SystemExit, arms_of, _Arms(["learnt"]))
+        assert threading.active_count() == threads
 
 
 # ---- one ask a side, not one a squad ---------------------------------------------------------

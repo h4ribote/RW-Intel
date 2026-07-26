@@ -231,3 +231,7 @@ class FrontReport:
     lost_regions: int
     #: Regions with an enemy base still standing, as far as anything has seen.
     enemy_bases: int
+    #: Units standing against what the room allows, and how many are being built. The design's own list of what this layer observes names both — how much room is left under the cap, and how much is on the way — and the transition rule does not read either. They are here because the report is defined as everything to strategy rather than as everything the present rule happens to branch on, and a layer that decides the posture from the board rather than from the rule is the reader they were missing.
+    units: int = 0
+    unit_cap: int = 0
+    under_construction: int = 0

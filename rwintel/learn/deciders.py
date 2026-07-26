@@ -49,6 +49,39 @@ class NetworkTactics:
         return evaluate_tactical(self.net, batch, self.device, self.greedy)
 
 
+class NetworkStrategy:
+    """Answers the posture from a network, through the batching server when there is one.
+
+    Plural like the tactical decider and for a different reason. One side takes exactly one strategic decision a period, so there is nothing to batch within a side; what meets in a window here is the other instances of the run, which at one decision per ten seconds of game time is the only way this layer's requests are ever more than one at a time. The signature is the tactical one because the question is the same shape — a state, a mask over a categorical head, one choice — and having both go through one form is what lets one batching server implementation serve either.
+    """
+
+    def __init__(self, net, device=None, batcher: Optional[Batcher] = None, greedy: bool = False) -> None:
+        self.net = net
+        self.device = device
+        self.batcher = batcher
+        self.greedy = greedy
+
+    def choose_many(self, requests: Sequence[Tuple[Sequence[float], Sequence[float]]]) -> List[Choice]:
+        batch = [(list(state), list(mask)) for state, mask in requests]
+        if self.batcher is not None:
+            return list(self.batcher.submit_many(batch))
+        return evaluate_strategic(self.net, batch, self.device, self.greedy)
+
+
+class PinnedPosture:
+    """Answers with one posture, whatever board it is shown.
+
+    The strategic analogue of the pinned departure and the pinned region, and it exists for the measurement they exist for: what the posture choice is worth at all is bounded by what happens when there is no choice, and the way to find that bound is to take it away. It is also the arm the evaluation runner already had by another name — a run that pins the strategic layer to `defend` and one that lets the rule transition are two arms of the same question — so a learnt posture has a floor to be read against that is not only the rule.
+    """
+
+    def __init__(self, posture: int) -> None:
+        self.posture = int(posture)
+
+    def choose_many(self, requests: Sequence[Tuple[Sequence[float], Sequence[float]]]) -> List[Choice]:
+        # No log probability and no value: this is not a distribution, and nothing is ever learnt from what it chose.
+        return [Choice(action=self.posture) for _ in requests]
+
+
 class PinnedDeparture:
     """Answers with one departure, whatever it is shown.
 
@@ -114,6 +147,14 @@ def evaluate_tactical(net, requests: Sequence[tuple], device=None, greedy: bool 
             for action, log_prob, value in zip(*answers)]
 
 
+def evaluate_strategic(net, requests: Sequence[tuple], device=None, greedy: bool = False) -> List[Choice]:
+    """One forward pass for a batch of postures.
+
+    The arithmetic is the tactical one — a state, a mask, one categorical head and a value — so it is that function called under this layer's name rather than a second copy of it. Named separately all the same, because the two networks are different objects with different feature lists, and a caller that had to know they happen to share a forward signature would be a caller that stops working quietly the day one of them does not.
+    """
+    return evaluate_tactical(net, requests, device, greedy)
+
+
 def evaluate_operational(net, requests: Sequence[tuple], device=None, greedy: bool = False) -> List[Choice]:
     import torch
 
@@ -149,3 +190,7 @@ def tactical_batcher(net, device=None, greedy: bool = False, **kwargs) -> Batche
 
 def operational_batcher(net, device=None, greedy: bool = False, **kwargs) -> Batcher:
     return Batcher(lambda requests: evaluate_operational(net, requests, device, greedy), **kwargs)
+
+
+def strategic_batcher(net, device=None, greedy: bool = False, **kwargs) -> Batcher:
+    return Batcher(lambda requests: evaluate_strategic(net, requests, device, greedy), **kwargs)

@@ -143,6 +143,8 @@ class OpsStatistics:
     garrison: float = 0.0
     #: Which tactical layer did the fighting beneath both sides: the handwritten ladder, or trained parameters frozen under the arena and named by their content. It belongs with the draw settings above and meets their test word for word — it never reaches the episode settings, and two runs made under different ones are two different arenas. It is a stronger case than the garrison scale rather than a weaker one, because the fighting under an operational choice is the whole of what turns a deployment into a share of a disc: a different fighter moves the disc tallies, the rate at which a garrison holds its own ground through the horizon, the reach a squad ends at, and therefore the horizon and the catchment radius that were both tuned to where an assaulting squad halts.
     tactics: str = SCRIPT_TACTICS
+    #: Which operational layer stood on this side: the rule an arm names, or a digest of the parameters where the arm was a learnt one. Not a draw setting — the arms of one run differ in exactly this and must still pair — but the arm's identity, written down so that two runs whose arms share a nickname and not a policy can be refused rather than pooled. A path is a nickname that changes underneath itself, since a training run overwrites whatever its save names, so the parameters name themselves by their content.
+    operations: str = ""
     #: Diagnostics that say whether the staged squads — the thing whose deployment the arena exists to measure — actually reached and contested the catchments, or whether the score was decided by the pre-placed garrisons alone. If the squads never register in a catchment the self-play zero is trivially met by the mirror garrisons and the arena resolves nothing.
     #:
     #: Recorded for both sides and not only this one, because the mirror is a reflection of the board and not of the ground: this side stages from a site the map was searched for, the other from that site's reflection, which is wherever the reflection lands, with a march the reflection cannot make congruent. The arena's answer to that has always been the script arm's self-play zero, and that zero bounds the asymmetry only under the script — a fighter strong enough to exploit a shorter march would convert it into a score that no arm comparison could tell from an operational difference. The two sides' figures side by side are what says whether both deployments reached their contests alike, which is the evidence that was missing when a frozen fighter first made the two sides read a board differently.
@@ -172,7 +174,7 @@ class OpsStatistics:
                 "their_reach": round(self.their_reach, 1),
                 "board": self.board, "horizon_ms": self.horizon_ms, "radius": round(self.radius, 1),
                 "squads": self.squads, "pairs": self.pairs, "garrison": round(self.garrison, 1),
-                "tactics": self.tactics,
+                "tactics": self.tactics, "operations": self.operations,
                 "terminals": self.terminals, "periods": self.periods, "errands": self.errands}
 
 
@@ -185,7 +187,7 @@ class OpsArena(Arena):
     """
 
     def __init__(self, session, operations=None, opponent=None, tactics=None,
-                 tactics_name: str = SCRIPT_TACTICS, seed: int = 0,
+                 tactics_name: str = SCRIPT_TACTICS, operations_name: str = "", seed: int = 0,
                  horizon_ms: int = HORIZON_MS, our_squads: int = OUR_SQUADS,
                  catchment_radius: float = CATCHMENT_RADIUS, contest_pairs: int = CONTEST_PAIRS,
                  opening_baseline: float = OPENING_BASELINE, credit: str = CREDIT,
@@ -243,7 +245,7 @@ class OpsArena(Arena):
         # The draw's settings are written into the statistics at construction rather than at scoring, so that an episode which never reaches its horizon still says under what instrument it was run. The name of the tactical layer beneath both sides is one of them: whoever builds the arena is the only one who knows which parameters the factory closes over, and the arena cannot read it back off a layer afterwards.
         self.statistics = OpsStatistics(board=seed, horizon_ms=horizon_ms, radius=catchment_radius,
                                         squads=our_squads, pairs=contest_pairs, garrison=garrison_scale,
-                                        tactics=tactics_name)
+                                        tactics=tactics_name, operations=operations_name)
 
     # ---- the one entry point (mirrors Arena.decide) ------------------------------------
 

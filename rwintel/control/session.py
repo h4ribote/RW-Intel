@@ -289,7 +289,6 @@ class Session:
         # The interference is read off the policy's own commanders here, before the policy is put down, for the same reason the statistics are: `_close_policy` sets `self.policy` to None, and `_interference` reads the outside commanders' logs off that policy. Gathered after the put-down it read an empty list every time, so every episode was journalled as undisturbed even when an intruder had been rewriting contracts throughout it — the one confusion this field exists to prevent.
         interference = self._interference()
         self.sync = dict(payload.get("sync", self.sync))
-        self._close_policy()
 
         record = EpisodeRecord(
             episode=int(payload.get("episode", 0)),
@@ -307,6 +306,9 @@ class Session:
             interference=interference,
             wall_seconds=max(0.0, time.time() - self.episode_started_at),
         )
+        # The record is built before the policy is put down, and handed to it, because how the match ended is a statement only this side holds and a layer paid the match has no other way to be told it. That is the same arrangement an arena has with the layer it scores — the runner knows when the work is over and what it came to, the layer only ever sees periods — and it has to happen before the close, since the close is what ends the open trajectory the result is owed to.
+        self._conclude_policy(record)
+        self._close_policy()
         self.records.append(record)
         if self.journal is not None:
             self.journal.write(record)
@@ -317,6 +319,19 @@ class Session:
             self.start_episode()
         else:
             log.info("instance %d has run its episodes", self.instance)
+
+    def _conclude_policy(self, record: EpisodeRecord) -> None:
+        """Tells a policy how the match it has just played came out, where the policy is one that wants to know.
+
+        The script chain does not: no layer of it is paid anything. A learning run whose layer is paid the match — which the design says is the strategic layer and only that one — takes the result here and pays its last decision with it. Anything that goes wrong doing so must not lose the episode that was actually played, exactly as with the close below, so it is reported and the run goes on.
+        """
+        concluded = getattr(self.policy, "conclude", None)
+        if concluded is None:
+            return
+        try:
+            concluded(record)
+        except Exception:
+            log.exception("instance %d failed to hand its policy the result of the episode", self.instance)
 
     def _close_policy(self) -> None:
         """Lets a policy finish with the episode. Nothing the script chain does needs this; a policy that is collecting for a learning run has state that only means anything once it knows no further observation is coming."""

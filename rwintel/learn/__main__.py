@@ -2,6 +2,7 @@
 
     python -m rwintel.learn tactics    --instances 4 --save local/tactics.pt
     python -m rwintel.learn operations --instances 4 --episodes 6 --map Lake --max-seconds 300 --intruder
+    python -m rwintel.learn strategy   --instances 8 --episodes 40 --map Lake --max-seconds 300 --intruder
     python -m rwintel.learn collect    --layer tactics --instances 4 --record local/teacher.jsonl
     python -m rwintel.learn clone      --layer tactics --teacher local/teacher.jsonl --save local/tactics-bc.pt
     python -m rwintel.learn duel       --load local/tactics.pt --instances 8 --max-seconds 600
@@ -13,7 +14,7 @@ The avowal is not part of the order of work below and is run only where a set of
 
 The four make one order of work. The collecting run turns the handwritten layer into a file of decisions, the cloning run fits a network to them, the training run improves that network against the arena while warming its value head first, and the duelling run measures what came out against the handwritten layer it started from. None of the four is required by the others — a policy can be trained from noise and measured without ever having been cloned — but skipping the first two spends the early part of a training run rediscovering a rule ladder that was already written down.
 
-The order the two layers are trained in is not a preference. The tactical layer goes first because it can be trained without playing matches at all — engagements are constructed on an empty board and fought in a minute apiece — while the operational layer needs whole matches and is therefore an order of magnitude more expensive per decision. Settling the cheap layer while the thing it will be frozen against is still cheap is the right way round.
+The order the three layers are trained in is not a preference. The tactical layer goes first because it can be trained without playing matches at all — engagements are constructed on an empty board and fought in a minute apiece — while the operational layer needs whole matches, or the constructed board that stands in for them, and is an order of magnitude more expensive per decision. Settling the cheap layer while the thing it will be frozen against is still cheap is the right way round. The strategic layer goes last and has no constructed board of its own, because what it decides between is how a whole match is to be spent: construct that away and there is nothing left to decide. It is therefore trained on matches and paid the match, which is the one place in this design where a layer sees the result.
 
 Neither training run pauses to update. The games do not stop, so a batch is collected while the parameters that collected it are already moving; that is what the clipped ratio in the optimiser is for, and it is why the batch is small.
 """
@@ -37,14 +38,17 @@ from ..wire import Deviation
 from .arena import BY_HEALTH, BY_KILLS, DECISION_ORDERS, SCORES, Arena
 from .deciders import (
     NetworkOperations,
+    NetworkStrategy,
     NetworkTactics,
     PinnedDeparture,
     operational_batcher,
+    strategic_batcher,
     tactical_batcher,
 )
-from .encoding import OPERATIONAL_SIZE, TACTICAL_SIZE
+from .encoding import OPERATIONAL_SIZE, STRATEGIC_SIZE, TACTICAL_SIZE
+from .frozen import frozen_layers
 from .layers import LearntOperations, LearntTactics
-from .policy import OPERATIONAL, TACTICAL, LearningPolicy, learning_arm
+from .policy import LAYERS, OPERATIONAL, STRATEGIC, TACTICAL, LearningPolicy, learning_arm
 from .rollout import FIGHT_DISCOUNT, FIGHT_TRACE, Rollout
 from .train import Optimiser, Trainer
 
@@ -231,13 +235,13 @@ def avow(arguments) -> int:
 
     import torch
 
-    from .net import EncodingRefused, OperationalNet, TacticalNet, avowed
+    from .net import EncodingRefused, OperationalNet, StrategicNet, TacticalNet, avowed
 
     paths = [path.strip() for path in str(arguments.load or "").split(",") if path.strip()]
     if not paths:
         raise SystemExit("say which parameters to avow, as in --load local/operations.pt")
     words = str(arguments.because or "").strip()
-    net = TacticalNet() if arguments.layer == TACTICAL else OperationalNet()
+    net = {TACTICAL: TacticalNet, OPERATIONAL: OperationalNet, STRATEGIC: StrategicNet}[arguments.layer]()
     for path in paths:
         if not os.path.exists(path):
             raise SystemExit("there are no parameters at %s to avow" % path)
@@ -672,12 +676,15 @@ def train_operations(arguments) -> int:
     trainer = Trainer(rollout, optimiser, **_given(batch=arguments.batch))
     trainer.start()
 
+    # Trained layers held still beneath this one, which is the half of the learning order that had no wiring in a match: the arena could freeze a trained fighter under its board, and an ordinary match could not.
+    frozen = frozen_layers(arguments.frozen, arguments.device, training=OPERATIONAL)
     arm = learning_arm(
         OPERATIONAL,
         lambda session: NetworkOperations(net, device, batcher),
         rollout,
         intruders=(lambda session: Intruder(seed=arguments.seed + session.instance,
                                             instance=session.instance)) if arguments.intruder else None,
+        frozen_for=frozen.build if frozen.deciders else None,
     )
     journal = Journal(arguments.record or default_path("operations"))
     try:
@@ -685,12 +692,103 @@ def train_operations(arguments) -> int:
     finally:
         journal.close()
     report = trainer.finish()
+    frozen.stop()
     batcher.stop()
     _save(net, arguments.save)
     log.info("batched inference averaged %.1f per call", batcher.batch_size)
     if report is not None:
         log.info("last update: %s", report.as_dict())
     return 0
+
+
+# ---- the strategic run --------------------------------------------------------------------
+
+#: Decisions a strategic update is collected from, which is a quarter of what the other two layers use, and the arithmetic says why. This layer decides once per side per ten game seconds, so eight instances running five-minute matches at ten times speed produce about two hundred and forty decisions a minute of wall clock, against the thousands a second the tactical layer produces. At the usual thousand-and-twenty-four a batch would take four minutes to fill and a run of an hour would take fifteen steps; at this figure a batch is about half a minute, which is where the design says to keep it — a batch collected under parameters much older than the ones it updates is what the clipped ratio is a safety valve for, and it is a safety valve rather than a licence.
+STRATEGIC_BATCH = 256
+
+
+def train_strategy(arguments) -> int:
+    """Trains the strategic layer in ordinary matches, which is the only board its choice is made on.
+
+    There is no arena here and there is not going to be one. The other two layers got constructed boards because what they decide can be cut out of a match and staged — one engagement, one deployment — and because the thing that buried their choice was the economy. The strategic layer's choice IS the economy, and what it decides between is how a whole match is to be spent: a posture pays off in ground taken twenty periods later or in an army that exists at minute twelve. Construct that and what is left is the match.
+
+    So the match's own result is the terminal, and this is the one layer in the design that is paid it. It arrives from outside through the session, which knows how the episode ended, exactly as an arena's terminal arrives from the runner: the layer sees periods and cannot see an ending.
+
+    The errand is the whole match, so it is discounted at nothing by default, for the arithmetic the constructed fight is discounted at nothing by: it is one bounded errand with a real terminal, and there is no reason to make the terminal reach the opening of a match at less than its own weight. What that costs is variance — every decision of a match shares one terminal and the advantage of one is separated from another's only by the critic — and what a discount below one would buy instead is the shaping reaching the policy at all, since at one it is an action-independent offset. Both are `--discount` and `--trace` so that the choice can be swept rather than argued.
+    """
+    from .net import StrategicNet
+
+    device = _device(arguments.device)
+    net = StrategicNet(**_given(width=arguments.width)).to(device)
+    _load(net, arguments.load, device)
+    log.info("strategic policy on %s: %d features, %d parameters",
+             device, STRATEGIC_SIZE, sum(p.numel() for p in net.parameters()))
+
+    # One figure discounts the returns and telescopes the shaping, stated once so the two cannot drift apart.
+    discount = arguments.discount if arguments.discount is not None else FIGHT_DISCOUNT
+    trace = arguments.trace if arguments.trace is not None else FIGHT_TRACE
+    log.info("paying the match's own score, discounting a match at %.4f with a trace of %.4f", discount, trace)
+
+    rollout = Rollout(discount=discount, trace=trace)
+    optimiser = Optimiser(net, device=device, warmup=_warmup(arguments),
+                          **_given(entropy_weight=arguments.entropy, learning_rate=arguments.learning_rate))
+    batcher = strategic_batcher(net, device=device, guard=optimiser.lock)
+    trainer = Trainer(rollout, optimiser, batch=arguments.batch or STRATEGIC_BATCH)
+    trainer.start()
+
+    # Trained layers held still beneath this one. The design's order puts the strategic layer last precisely so that what is below it can be the layers already improved rather than the handwritten ones; without any named, the layers below are the script, which is also what this layer is measured against.
+    frozen = frozen_layers(arguments.frozen, arguments.device, training=STRATEGIC)
+
+    def build(session) -> LearningPolicy:
+        policy = LearningPolicy(session, STRATEGIC, NetworkStrategy(net, device, batcher),
+                                rollout, session.instance,
+                                frozen=frozen.build() if frozen.deciders else None)
+        # The layer's shaping has to telescope with the discount the returns are taken at, so the run's one figure reaches it too.
+        policy.strategy.reward.discount = discount
+        if arguments.intruder:
+            intruder = Intruder(seed=arguments.seed + session.instance, instance=session.instance)
+            intruder.organisation = policy.organisation
+            policy.outside.append(intruder)
+        return policy
+
+    journal = Journal(arguments.record or default_path("strategy"))
+    try:
+        sessions = _serve(arguments, [("strategy", build)], _episode(arguments, arena=False), journal)
+    finally:
+        journal.close()
+    report = trainer.finish()
+    frozen.stop()
+    batcher.stop()
+    _save(net, arguments.save)
+    log.info("batched inference averaged %.1f per call over %d call(s)", batcher.batch_size, batcher.calls)
+    if report is not None:
+        log.info("last update: %s", report.as_dict())
+    _report_matches(sessions)
+    return 0
+
+
+def _report_matches(sessions) -> None:
+    """What the matches this run played came to, in the quantity the strategic layer is paid: the project's own episode score, pooled over the run and over its later half.
+
+    Halved within each instance rather than across the run, exactly as the arena's training report is halved, because the instances finish different numbers of episodes and the second half of every instance is the second half of the run.
+
+    It is a training figure and not a measurement. The policy moved while it was collected and the opponent is whatever the room put there, so what it says is whether the run went anywhere; what says whether the layer is better than the rule is a separate run of arms against the same opponents (`python -m rwintel.eval`).
+    """
+    from ..eval.scoring import score as episode_score
+
+    records = [record for session in sessions for record in session.records]
+    if not records:
+        return
+    later = [record for session in sessions for record in session.records[len(session.records) // 2:]]
+    for name, subset in (("whole run", records), ("later half", later)):
+        if not subset or (name == "later half" and len(subset) >= len(records)):
+            continue
+        summary = Summary.of([episode_score(record) for record in subset])
+        interval = 2.0 * summary.sd / math.sqrt(summary.n) if summary.n > 1 else 0.0
+        log.info("match score, %s: %d episode(s), %+.4f, 2 standard errors %.4f",
+                 name, summary.n, summary.mean, interval)
+    decided = sum(1 for record in records if record.winner >= 0)
+    log.info("%d of %d match(es) were decided rather than cut off by the clock", decided, len(records))
 
 
 # ---- collecting what the script does -------------------------------------------------------
@@ -715,7 +813,7 @@ def collect(arguments) -> int:
         episode = _episode(arguments, arena=True)
     else:
         def arm(session):
-            return LearningPolicy(session, OPERATIONAL, None, rollout, session.instance)
+            return LearningPolicy(session, arguments.layer, None, rollout, session.instance)
 
         episode = _episode(arguments, arena=False)
 
@@ -769,11 +867,16 @@ def clone(arguments) -> int:
     Nothing is connected to and no game is started: the teacher is a file, and the whole of this is a few minutes of arithmetic on the processor. What comes out has a policy worth measuring and a value head that is still random, which is what the training run's warm-up is for.
     """
     from .imitation import EPOCHS, PATIENCE, SMOOTHING, fit, read_teacher, report
-    from .net import OperationalNet, TacticalNet
+    from .net import OperationalNet, StrategicNet, TacticalNet
 
     device = _device(arguments.device)
-    net = (TacticalNet(**_given(width=arguments.width)) if arguments.layer == TACTICAL
-           else OperationalNet()).to(device)
+    if arguments.layer == TACTICAL:
+        net = TacticalNet(**_given(width=arguments.width))
+    elif arguments.layer == STRATEGIC:
+        net = StrategicNet(**_given(width=arguments.width))
+    else:
+        net = OperationalNet()
+    net = net.to(device)
     _load(net, arguments.load, device)
     samples = read_teacher(arguments.teacher or "local/teacher.jsonl", arguments.layer,
                            keep_tainted=arguments.keep_tainted)
@@ -796,8 +899,8 @@ def main(argv=None) -> int:
             stream.reconfigure(errors="replace")
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("what", choices=["tactics", "operations", "collect", "clone", "duel", "avow"])
-    parser.add_argument("--layer", default=None, choices=[TACTICAL, OPERATIONAL],
+    parser.add_argument("what", choices=["tactics", "operations", "strategy", "collect", "clone", "duel", "avow"])
+    parser.add_argument("--layer", default=None, choices=list(LAYERS),
                         help="which layer to collect, to clone or to avow. Collecting and cloning default to "
                              "the tactical layer; avowing has no default and must be told, because the width "
                              "a file reads is the only thing that can refuse one layer's parameters offered as "
@@ -824,6 +927,13 @@ def main(argv=None) -> int:
     parser.add_argument("--pin", default=None,
                         help="departures to measure a layer pinned to, comma separated, as arms of a duel. "
                              "This is the ablation the band a policy plays inside is read from")
+    parser.add_argument("--frozen", default=None,
+                        help="trained layers to hold still beneath the one being trained, written "
+                             "layer:path and separated by commas, as in "
+                             "tactics:local/tactics.pt,operations:local/operations.pt. They are read at their "
+                             "likeliest action and record nothing. Left out, the layers below are the handwritten "
+                             "script, which is what every run so far was trained against; given, the run is a "
+                             "different environment and pairs only with runs made under the same one")
     parser.add_argument("--save", default=None, help="where to write the parameters afterwards")
     parser.add_argument("--batch", type=int, default=None,
                         help="rows in one gradient step: the steps that make a reinforcement update when "
@@ -906,11 +1016,11 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.DEBUG if arguments.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
     if arguments.max_seconds <= 0:
-        arguments.max_seconds = ARENA_SECONDS if arguments.what != "operations" else 300
+        arguments.max_seconds = 300 if arguments.what in ("operations", "strategy") else ARENA_SECONDS
     if arguments.what == "avow" and arguments.layer is None:
         # No default here, where every other command has one. An avowal writes one layer's feature list into a file on a person's word, and a default would let the wrong layer's list be written by saying nothing at all — which is the one accident this command has to be safe against, since a file avowed under the wrong list afterwards loads in silence.
-        parser.error("say which layer's parameters are being avowed, with --layer %s or --layer %s"
-                     % (TACTICAL, OPERATIONAL))
+        parser.error("say which layer's parameters are being avowed, with --layer and one of %s"
+                     % ", ".join(LAYERS))
     if arguments.layer is None:
         arguments.layer = TACTICAL
 
@@ -920,6 +1030,8 @@ def main(argv=None) -> int:
         return train_tactics(arguments)
     if arguments.what == "operations":
         return train_operations(arguments)
+    if arguments.what == "strategy":
+        return train_strategy(arguments)
     if arguments.what == "clone":
         return clone(arguments)
     if arguments.what == "duel":

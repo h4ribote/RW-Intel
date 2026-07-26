@@ -103,6 +103,9 @@ def compare(first_path: str, second_path: Optional[str] = None, *, first_arm: Op
                     "and a paired comparison of them is not a comparison of the arms at all")
         return None
 
+    for name, boards in ((first_name, first_boards), (second_name, second_boards)):
+        if not _one_policy(name, boards, shared):
+            return None
     signatures = {signature(first_boards[board]) for board in shared} | {signature(second_boards[board]) for board in shared}
     if len(signatures) > 1:
         for entry in sorted(signatures):
@@ -118,6 +121,24 @@ def compare(first_path: str, second_path: Optional[str] = None, *, first_arm: Op
     report(comparison, first_name, second_name,
            unpaired=(len(first_boards) - len(shared), len(second_boards) - len(shared)))
     return comparison
+
+
+def _one_policy(name: str, boards: Dict[int, dict], shared: Sequence[int]) -> bool:
+    """Whether one side of a comparison was one operational policy throughout.
+
+    The instrument check above asks whether two arms met the same arena; this asks whether each arm was one thing. They are separate questions and cannot be one test: the arms of a run differ in exactly this field and must still pair, so it cannot join the draw settings. What it catches is the other way round — one arm name over two policies. An arm is named by the rule it runs, and a learnt arm by the file its parameters were read from, which is a nickname that changes underneath itself: a training run overwrites whatever its save names, so two runs a week apart write `ops-learnt` into two journals and mean two networks. Pairing those reports the change of policy as a difference between two arms that are the same arm.
+
+    A record that carries no operations field says nothing rather than disagreeing, so journals written before the field existed go on pairing exactly as they did.
+    """
+    policies = {(boards[board].get("statistics") or {}).get("operations") for board in shared}
+    policies.discard(None)
+    policies.discard("")
+    if len(policies) <= 1:
+        return True
+    log.error("%s: the paired episodes were played by %d different operational policies (%s), so this is one arm name "
+              "over more than one policy and the difference would be the change of policy rather than a difference "
+              "between the arms", name, len(policies), ", ".join(sorted(policies)))
+    return False
 
 
 def _of_arm(entries: Sequence[dict], arm: Optional[str]) -> List[dict]:

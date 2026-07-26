@@ -26,12 +26,14 @@ class _Session:
 
 def _entry(instance=0, episode=1, seed=60001, score=0.0, scored=True, arm="ops-learnt",
            map_name="Hills", horizon_ms=300000, radius=400.0, squads=4, pairs=2, board=0,
-           tactics=None):
+           tactics=None, operations=None):
     statistics = {"scored": scored, "side_score": score, "board": board, "horizon_ms": horizon_ms,
                   "radius": radius, "squads": squads, "pairs": pairs}
     if tactics is not None:
         # Left out of the record entirely rather than written as nothing, because that is what a journal from before the tactical layer was written down actually looks like, and reading those is the case the default exists for.
         statistics["tactics"] = tactics
+    if operations is not None:
+        statistics["operations"] = operations
     return {
         "arm": arm, "instance": instance, "episode": episode,
         "settings": {"map": map_name, "opponents": 1, "difficulty": 1, "credits": 0,
@@ -174,6 +176,33 @@ def test_two_runs_at_different_seeds_share_no_board(tmp_path):
     first = _journal(tmp_path, "first.jsonl", [_entry(instance=0, episode=e, seed=60001) for e in (1, 2, 3)])
     second = _journal(tmp_path, "second.jsonl", [_entry(instance=0, episode=e, seed=70001, arm="ops-pin") for e in (1, 2, 3)])
     assert compare(first, second) is None
+
+
+def test_one_arm_name_over_two_policies_is_refused(tmp_path):
+    """An arm is named by the rule it runs, and a learnt arm by the file its parameters came from — a nickname that changes underneath itself, since a training run overwrites whatever its save names. Two runs a week apart therefore write `ops-learnt` into two journals and mean two networks, and pairing them board by board would report the change of policy as a difference between two arms that are the same arm.
+
+    This is not the instrument check and cannot be folded into it. The arms of one run differ in exactly this field and must still pair; what is refused is one arm whose own episodes were played by more than one policy.
+    """
+    first = _journal(tmp_path, "first.jsonl",
+                     [_entry(instance=0, episode=e, board=1000 + e, operations="sha256:aaaaaaaaaaaaaaaa")
+                      for e in (1, 2, 3)])
+    second = _journal(tmp_path, "second.jsonl",
+                      [_entry(instance=0, episode=e, board=1000 + e, arm="ops-pin", operations="pin")
+                       for e in (1, 2, 3)])
+    # Two different policies under two different arm names is the ordinary comparison and is reported.
+    assert compare(first, second) is not None
+
+    # The same arm name over two policies is not: half the boards were played by one network and half by another.
+    mixed = _journal(tmp_path, "mixed.jsonl",
+                     [_entry(instance=0, episode=1, board=1001, operations="sha256:aaaaaaaaaaaaaaaa"),
+                      _entry(instance=0, episode=2, board=1002, operations="sha256:bbbbbbbbbbbbbbbb"),
+                      _entry(instance=0, episode=3, board=1003, operations="sha256:bbbbbbbbbbbbbbbb")])
+    assert compare(mixed, second) is None
+
+    # And a journal written before the field existed says nothing rather than disagreeing, so it pairs exactly as it did.
+    older = _journal(tmp_path, "older.jsonl",
+                     [_entry(instance=0, episode=e, board=1000 + e) for e in (1, 2, 3)])
+    assert compare(older, second) is not None
 
 
 def test_the_signature_ignores_the_seed_and_the_arm():

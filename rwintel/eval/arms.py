@@ -17,8 +17,9 @@ log = logging.getLogger(__name__)
 
 Arm = Tuple[str, Callable]
 
-#: How a learnt-layer arm names the file it loads, as in `ops:local/operations.pt`. The prefix is what tells a path from a posture, and it names the layer because the operational layer is the only one a match measures — the tactical layer is measured on the arena, off any match at all.
+#: How a learnt-layer arm names the file it loads, as in `ops:local/operations.pt` or `strategy:local/strategy.pt`. The prefix is what tells a path from a posture, and it names the layer because two of the three are measured on a match: the operational layer, whose deployment is read against the script's, and the strategic layer, whose posture is read against the rule's and against a posture pinned for the whole match. The tactical layer is not among them — it is measured on the engagement arena, off any match at all.
 OPERATIONAL_PREFIXES = ("ops", "operations")
+STRATEGIC_PREFIXES = ("strategy", "strat")
 
 
 def pinned(posture: Posture) -> Callable:
@@ -39,43 +40,48 @@ def parse(name: str) -> Arm:
     key = name.upper()
     if key in Posture.__members__:
         return name.lower(), pinned(Posture[key])
-    raise ValueError(f"no arm named {name!r}: expected 'script', 'ops:<path>', or one of {', '.join(p.name.lower() for p in Posture)}")
+    raise ValueError(f"no arm named {name!r}: expected 'script', 'ops:<path>', 'strategy:<path>', or one of {', '.join(p.name.lower() for p in Posture)}")
 
 
-def _is_operational(name: str) -> bool:
+def _is_learnt(name: str) -> bool:
     prefix, separator, _ = name.partition(":")
-    return bool(separator) and prefix in OPERATIONAL_PREFIXES
+    return bool(separator) and prefix in OPERATIONAL_PREFIXES + STRATEGIC_PREFIXES
 
 
-def operational(name: str, device: Optional[str] = None) -> Tuple[Arm, object]:
-    """A learnt operational layer, loaded from a file, as an arm of a match comparison.
+def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tuple[Arm, object]:
+    """A learnt layer, loaded from a file, as an arm of a match comparison.
 
     Everything but the operational decision is the script it is measured against, exactly as a training run holds it, and the layer is handed no rollout, so with nowhere to record a decision it records none: this reads the network, it does not learn it. One network is loaded and one batching server answers every instance's decisions through it, the same arrangement the duel uses for the tactical layer; the server is returned for the run to stop, because a `(name, build)` pair has nowhere to keep it.
 
     Refused rather than started from nothing when the file is not there, which is what the duel does and for the same reason: a comparison that quietly scored a freshly initialised policy would produce a perfectly plausible number about a policy nobody asked about.
 
     The intruder the design requires under evaluation is not built in here. It is attached uniformly to every arm by the session from the run's `--intrude`, so building one into this arm alone would disturb the learnt side and not the script it is measured against.
+
+    How the policy is read — drawn from, or taken at its likeliest action — is the run's to say and is said out loud, because it is a real difference and one this project has an open question about. Every match measurement recorded so far was taken drawn, which is why that is the default; the arena's measuring runner reads its learnt arm greedily, and a number taken one way is not a number taken the other.
     """
     import os
 
-    _, _, path = name.partition(":")
+    prefix, _, path = name.partition(":")
     path = path.strip()
     if not path:
-        raise ValueError(f"an operational arm needs a path, as in 'ops:local/operations.pt', not {name!r}")
+        raise ValueError(f"a learnt arm needs a path, as in 'ops:local/operations.pt', not {name!r}")
     if not os.path.exists(path):
         raise ValueError(f"there are no parameters at {path} to measure")
 
     # Imported here rather than at the top of the module so that a control process running only script and posture arms never loads the tensor library, which is the same discipline the deciders keep.
     import torch
 
-    from ..learn.deciders import NetworkOperations, operational_batcher
-    from ..learn.net import EncodingRefused, OperationalNet, load_encoded
-    from ..learn.policy import OPERATIONAL, LearningPolicy
+    from ..learn.deciders import (NetworkOperations, NetworkStrategy, operational_batcher,
+                                  strategic_batcher)
+    from ..learn.net import EncodingRefused, OperationalNet, StrategicNet, load_encoded
+    from ..learn.policy import OPERATIONAL, STRATEGIC, LearningPolicy
 
+    strategic = prefix in STRATEGIC_PREFIXES
+    layer = STRATEGIC if strategic else OPERATIONAL
     # The games this process is scored beside run on these cores; a library that helps itself to all of them turns every inference into a fight with the simulation it is measuring.
     torch.set_num_threads(2)
     where = torch.device(device) if device else torch.device("cpu")
-    net = OperationalNet().to(where)
+    net = (StrategicNet() if strategic else OperationalNet()).to(where)
     state = torch.load(path, map_location=where)
     # Refused for the same reason a missing file is: a number about parameters that read the board differently from the way they were fitted to read it is a plausible number about nothing, and the shapes all match, so nothing later in the run would notice.
     try:
@@ -85,11 +91,14 @@ def operational(name: str, device: Optional[str] = None) -> Tuple[Arm, object]:
     if avowal:
         # Said out loud beside the arm it is about, because a number is only worth keeping if what produced it is written down beside it, and what produced this one is parameters whose feature list nothing in the file could prove.
         log.warning("the feature list at %s is a person's word and not a fit's record: %s", path, avowal)
-    batcher = operational_batcher(net, device=where)
+    batcher = (strategic_batcher if strategic else operational_batcher)(net, device=where, greedy=greedy)
+    log.info("the %s arm reads the %s layer at %s %s", os.path.splitext(os.path.basename(path))[0], layer, path,
+             "at its likeliest action" if greedy else "by drawing from it")
 
     def build(session) -> LearningPolicy:
-        # A fresh decider per session because it answers for one instance; the network behind it is shared, which is the whole point of batching the inference across instances. No rollout, so the layer decides and writes nothing down.
-        return LearningPolicy(session, OPERATIONAL, NetworkOperations(net, where, batcher), None, session.instance)
+        # A fresh decider per session because it answers for one instance; the network behind it is shared, which is the whole point of batching the inference across instances. No rollout, so the layer decides and writes nothing down. The decider carries the same reading as the server, since one of them answers when there is a server and the other when there is not.
+        decider = (NetworkStrategy if strategic else NetworkOperations)(net, where, batcher, greedy=greedy)
+        return LearningPolicy(session, layer, decider, None, session.instance)
 
     return (os.path.splitext(os.path.basename(path))[0], build), batcher
 
@@ -109,7 +118,7 @@ def pinned_operational(name: str = "ops-pin") -> Arm:
     return (name, build)
 
 
-def build_all(names: List[str], device: Optional[str] = None) -> Tuple[List[Arm], List[object]]:
+def build_all(names: List[str], device: Optional[str] = None, greedy: bool = False) -> Tuple[List[Arm], List[object]]:
     """Every arm of a comparison, and the inference servers any of them started.
 
     Script and pinned-posture arms need nothing torn down and start no server. A learnt operational arm loads a network once and answers every instance's decisions through one batching server, so the server is returned alongside the arms for the run to stop when it is done. Two arms of a comparison cannot share a name: journalled and reported under one name they would merge into one, and the run would silently measure half of what it was asked for.
@@ -120,8 +129,8 @@ def build_all(names: List[str], device: Optional[str] = None) -> Tuple[List[Arm]
         for name in names:
             if name == "ops-pin":
                 arms.append(pinned_operational(name))
-            elif _is_operational(name):
-                arm, batcher = operational(name, device)
+            elif _is_learnt(name):
+                arm, batcher = learnt(name, device, greedy)
                 arms.append(arm)
                 batchers.append(batcher)
             else:

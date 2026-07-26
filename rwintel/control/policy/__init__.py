@@ -210,6 +210,9 @@ class ScriptPolicy:
             enemy_held=sum(r.held_by_enemy for r in view.regions),
             lost_regions=len(self._lost_at),
             enemy_bases=enemy_bases,
+            units=observation.units,
+            unit_cap=observation.unit_cap,
+            under_construction=observation.under_construction,
         )
 
 

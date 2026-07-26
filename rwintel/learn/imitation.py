@@ -23,17 +23,21 @@ import torch
 from torch import nn
 
 from ..wire import Deviation, Task
+from ..control.policy.contracts import Posture
 from .encoding import (
     OPERATIONAL_FEATURES,
     OPERATIONAL_REGIONS,
     OPERATIONAL_SIZE,
     OPERATIONAL_TASKS,
+    STRATEGIC_ACTIONS,
+    STRATEGIC_FEATURES,
+    STRATEGIC_SIZE,
     TACTICAL_ACTIONS,
     TACTICAL_FEATURES,
     TACTICAL_SIZE,
 )
-from .net import OperationalNet, TacticalNet, entropy, one_hot_slot
-from .policy import OPERATIONAL, TACTICAL
+from .net import OperationalNet, StrategicNet, TacticalNet, entropy, one_hot_slot
+from .policy import LAYERS, OPERATIONAL, STRATEGIC, TACTICAL
 
 log = logging.getLogger(__name__)
 
@@ -125,13 +129,19 @@ class Cloning:
                 "training": self.training.as_dict(), "validation": self.validation.as_dict()}
 
 
+def _no_such_layer(layer: str) -> str:
+    return "no layer named %r: expected one of %s" % (layer, ", ".join(repr(name) for name in LAYERS))
+
+
 def widths(layer: str) -> Tuple[int, int, int]:
     """How long a state, a first choice and a second choice are for one layer. The second is nought for the tactical layer, which chooses one thing."""
     if layer == TACTICAL:
         return TACTICAL_SIZE, TACTICAL_ACTIONS, 0
     if layer == OPERATIONAL:
         return OPERATIONAL_SIZE, OPERATIONAL_REGIONS, OPERATIONAL_TASKS
-    raise ValueError(f"no layer named {layer!r}: expected {TACTICAL!r} or {OPERATIONAL!r}")
+    if layer == STRATEGIC:
+        return STRATEGIC_SIZE, STRATEGIC_ACTIONS, 0
+    raise ValueError(_no_such_layer(layer))
 
 
 def feature_names(layer: str) -> Tuple[str, ...]:
@@ -143,7 +153,9 @@ def feature_names(layer: str) -> Tuple[str, ...]:
         return TACTICAL_FEATURES
     if layer == OPERATIONAL:
         return OPERATIONAL_FEATURES
-    raise ValueError(f"no layer named {layer!r}: expected {TACTICAL!r} or {OPERATIONAL!r}")
+    if layer == STRATEGIC:
+        return STRATEGIC_FEATURES
+    raise ValueError(_no_such_layer(layer))
 
 
 def feature_entry(layer: str) -> str:
@@ -155,7 +167,9 @@ def feature_entry(layer: str) -> str:
         return "feature"
     if layer == OPERATIONAL:
         return "block"
-    raise ValueError(f"no layer named {layer!r}: expected {TACTICAL!r} or {OPERATIONAL!r}")
+    if layer == STRATEGIC:
+        return "feature"
+    raise ValueError(_no_such_layer(layer))
 
 
 def read_teacher(path: str, layer: str = TACTICAL, keep_tainted: bool = False) -> List[Sample]:
@@ -208,7 +222,7 @@ def fit(samples: Sequence[Sample], layer: str = TACTICAL, net: Optional[nn.Modul
         _check(sample, layer, f"decision {index}")
 
     if net is None:
-        net = TacticalNet() if layer == TACTICAL else OperationalNet()
+        net = {TACTICAL: TacticalNet, OPERATIONAL: OperationalNet, STRATEGIC: StrategicNet}[layer]()
     net = net.to(device)
     log.info("fitting the %s layer to %d decision(s): %d feature(s), %d parameter(s)",
              layer, len(samples), state_size, sum(p.numel() for p in net.parameters()))
@@ -411,7 +425,7 @@ def _tensors(samples: Sequence[Sample], layer: str, device) -> _Tensors:
 
 def _heads(net: nn.Module, layer: str, tensors: _Tensors):
     """The logits of both heads, the second being nothing for a layer that chooses one thing. The value the networks also return is discarded here, which is the whole of what it means to say the critic is not cloned."""
-    if layer == TACTICAL:
+    if layer in (TACTICAL, STRATEGIC):
         logits, _ = net(tensors.states, tensors.masks)
         return logits, None
     regions, tasks, _ = net(tensors.states, tensors.slots, tensors.masks, tensors.second_masks)
@@ -477,6 +491,8 @@ def _names(layer: str) -> Tuple[List[str], List[str]]:
     """What to call each action in a line a person reads. Region slots are numbered rather than named because a slot is how far out from this side's own home the place sits, which has no name anywhere else — slot nought is home and the last slot is the far side, whatever the map calls them."""
     if layer == TACTICAL:
         return [departure.name.lower() for departure in Deviation], []
+    if layer == STRATEGIC:
+        return [posture.name.lower() for posture in Posture], []
     return [f"out{index}" for index in range(OPERATIONAL_REGIONS)], [task.name.lower() for task in Task]
 
 

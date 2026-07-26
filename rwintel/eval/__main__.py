@@ -166,7 +166,14 @@ def main(argv=None) -> int:
     parser.add_argument("--arm", action="append", default=None,
                         help="an arm of the comparison: 'script', a posture name to pin the strategic layer to, "
                              "'ops:<path>' to load a learnt operational layer with the rest of the chain left "
-                             "script, or 'ops-pin' to pin that layer to one legal region and task. Repeatable")
+                             "script, 'strategy:<path>' to load a learnt strategic layer the same way, or "
+                             "'ops-pin' to pin that layer to one legal region and task. Repeatable")
+    parser.add_argument("--greedy", action="store_true",
+                        help="read every learnt arm at its likeliest action instead of drawing from it. Drawing "
+                             "is the default because every match measurement recorded so far was taken that way, "
+                             "and it is a real difference: the arena's measuring runner reads its learnt arm "
+                             "greedily, and whether drawing costs a policy anything is an open question this flag "
+                             "is how to answer")
     parser.add_argument("--device", default=None,
                         help="where a learnt arm's network runs. The default is the processor, which at these "
                              "sizes beats the card")
@@ -202,7 +209,8 @@ def main(argv=None) -> int:
         return 0
 
     try:
-        arms, batchers = arm_names.build_all(arguments.arm or ["script"], device=arguments.device)
+        arms, batchers = arm_names.build_all(arguments.arm or ["script"], device=arguments.device,
+                                             greedy=arguments.greedy)
     except ValueError as refusal:
         # A named arm that cannot be built — a posture that is not one, a learnt file that is not there, two arms sharing a name — is refused before any game connects, with the reason rather than a traceback. A comparison that quietly measured the wrong thing is worse than one that never started.
         logging.error("%s", refusal)

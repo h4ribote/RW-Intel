@@ -1060,6 +1060,21 @@ def test_an_episode_says_which_tactical_layer_it_was_made_under_before_it_has_sc
     assert OpsArena(session, seed=5).statistics.as_dict()["tactics"] == SCRIPT_TACTICS
 
 
+def test_an_episode_says_which_operational_policy_played_it():
+    """An arm's name is a nickname and the policy is the identity, so the episode carries the identity.
+
+    A learnt arm is named after the file its parameters were read from, and that file changes underneath itself: a training run overwrites whatever its save names. Two runs a week apart therefore write one arm name over two networks, and a comparison pairing them would report the change of policy as a difference between two arms that are the same arm. Carried from construction, exactly as the tactical layer beneath the board is, so an episode cut off before its horizon still says what played it.
+    """
+    session = _Session(_grid())
+    arena = OpsArena(session, operations_name="sha256:fedcba9876543210", seed=5)
+    assert not arena.statistics.scored
+    assert arena.statistics.as_dict()["operations"] == "sha256:fedcba9876543210"
+
+    # A run that named nothing carries nothing, which is what every journal written before the field existed looks like, and a comparison has to read that as saying nothing rather than as disagreeing.
+    assert OpsStatistics().operations == ""
+    assert OpsArena(session, seed=5).statistics.as_dict()["operations"] == ""
+
+
 def _tactical_board():
     """A board with two regions and one enemy in front of one of our units, which is the least that makes both layers decide: the operational one needs somewhere legal to send a squad, and the tactical one needs something to depart from its contract about."""
     regions = [
