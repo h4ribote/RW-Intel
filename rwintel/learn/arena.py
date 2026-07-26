@@ -263,6 +263,11 @@ class Statistics:
     #: The same fights scored on health rather than on bodies. Kept beside rather than instead, because every ceiling this project has quoted was measured on the sparse reading and a run that reported only the other could not be read against any of them.
     health_outcomes: List[float] = field(default_factory=list)
     #: How many errands were closed for each reason, summed over both sides. Present so that a run can be asked directly whether its terminals fired, which is otherwise only inferable by reading the code and guessing.
+    #: How the fights of this episode were drawn: how far apart the two sides were put down, how long a fight may go without a casualty before it is called, the weaker side's smallest share of the stronger, and which reading of a fight was paid as the terminal. Journalled with the episode for the reason the constructed operations arena journals its own draw — none of them reaches the episode settings, and two runs drawn under different ones are two different instruments, so a comparison that pooled them would be reading the change of instrument as a difference between the arms. The separation is the sharpest of them: it decides how much of a fight the departures can still decide at all.
+    separation: float = SEPARATION
+    stall_ms: int = STALL_MS
+    imbalance_floor: float = IMBALANCE[0]
+    score: str = BY_HEALTH
     terminals: Dict[str, int] = field(default_factory=dict)
     #: Every fight of the episode, one row each, and all of them.
     #:
@@ -299,6 +304,8 @@ class Statistics:
                 "outcome_sd": round(self.outcome_sd, 4),
                 "health_outcome_mean": round(self.health_outcome_mean, 4),
                 "health_outcome_sd": round(self.health_outcome_sd, 4),
+                "separation": round(self.separation, 1), "stall_ms": self.stall_ms,
+                "imbalance_floor": round(self.imbalance_floor, 4), "score": self.score,
                 "terminals": dict(self.terminals), "history": self.history}
 
 
@@ -315,7 +322,8 @@ class Arena:
                  stall_ms: int = STALL_MS,
                  imbalance_floor: float = IMBALANCE[0],
                  decision_order: str = OURS_FIRST,
-                 score: str = BY_HEALTH) -> None:
+                 score: str = BY_HEALTH,
+                 separation: float = SEPARATION) -> None:
         self.session = session
         self.outcome_weight = outcome_weight
         if score not in SCORES:
@@ -326,6 +334,8 @@ class Arena:
         self.stall_ms = stall_ms
         # The weaker side's smallest share of the stronger. An argument rather than the constant because how lopsided the draw is decides how many fights end with a side destroyed and how widely the score scatters, and whether that trade is worth taking is a question only a run of both settings answers.
         self.imbalance_floor = imbalance_floor
+        # How far apart the two sides are put down. An argument rather than the constant for the reason the stall is one, and it is the sharpest of the three: this distance is what decides how much of a fight the departures can still decide. Inside the reach of everything drawn, both sides are shooting from the first frame and what is left to choose is small; outside it, whether a squad closes, backs off or stands is the whole fight. The figure the constant states was measured against the engine's halting behaviour and is the one every recorded measurement was taken at, so a run that moves it is a different instrument and its numbers do not pair with theirs.
+        self.separation = separation
         if decision_order not in DECISION_ORDERS:
             raise ValueError(f"no decision order named {decision_order!r}: expected one of {', '.join(DECISION_ORDERS)}")
         self.decision_order = decision_order
@@ -334,7 +344,9 @@ class Arena:
         # The layers are built here rather than handed in already made, because both sides have to read the same type catalogue as the arena that spawns their units: a layer classifying a unit from a different table would sort the same tank into a different role.
         self.tactics = tactics(session, self.catalogue) if tactics else Tactics(session, self.catalogue)
         self.opponent = opponent(session, self.catalogue) if opponent else Tactics(session, self.catalogue)
-        self.statistics = Statistics()
+        # The draw is written into the statistics at construction rather than at scoring, so that an episode which produced no fight at all still says under what instrument it was run.
+        self.statistics = Statistics(separation=separation, stall_ms=stall_ms,
+                                     imbalance_floor=imbalance_floor, score=score)
         self.enemy_slot = enemy_slot
 
         self.squads: Dict[int, SquadRecord] = {}
@@ -410,7 +422,7 @@ class Arena:
         their_budget = budget * weaker if ours_first else budget
 
         angle = self.random.uniform(0, 2 * math.pi)
-        offset = (math.cos(angle) * SEPARATION / 2, math.sin(angle) * SEPARATION / 2)
+        offset = (math.cos(angle) * self.separation / 2, math.sin(angle) * self.separation / 2)
         our_place = (site[0] - offset[0], site[1] - offset[1])
         their_place = (site[0] + offset[0], site[1] + offset[1])
 

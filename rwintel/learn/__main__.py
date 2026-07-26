@@ -109,7 +109,8 @@ def _arena_options(arguments, order: Optional[str] = None, floor: Optional[float
                    stall: Optional[int] = None) -> dict:
     """The arena settings a run actually asked for, as keywords, so that everything unasked for stands at the figure the arena states rather than at a copy of it kept here."""
     options = _given(stall_ms=stall * 1000 if stall else None, imbalance_floor=floor,
-                     score=getattr(arguments, "score", None))
+                     score=getattr(arguments, "score", None),
+                     separation=getattr(arguments, "separation", None))
     if order is not None:
         options["decision_order"] = order
     return options
@@ -941,6 +942,12 @@ def main(argv=None) -> int:
     parser.add_argument("--stall-seconds", default=None,
                         help="game seconds a fight may go without a casualty before the arena calls it, "
                              "which is how decisive its fights are. Comma separated, they run as arms")
+    parser.add_argument("--separation", type=float, default=None,
+                        help="world units between the two sides when a fight is put down. The arena's own figure "
+                             "is inside the gap the engine halts two converging forces in, which is what makes a "
+                             "fight begin at all; a larger one puts the departures rather than the exchange in "
+                             "charge of the fight, and is how much of the score the tactical choice can move at "
+                             "all is asked. A run that moves it is a different instrument")
     parser.add_argument("--imbalance-floor", default=None,
                         help="the weaker side's smallest share of the stronger when a fight is drawn. Lower "
                              "draws more lopsided fights, which are more decisive. Comma separated, they run "

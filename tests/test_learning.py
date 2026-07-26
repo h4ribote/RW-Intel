@@ -1980,6 +1980,25 @@ def test_a_learnt_operational_arm_loads_and_names_itself_after_its_file():
                 batcher.stop()
 
 
+def test_an_engagement_episode_says_how_its_fights_were_drawn():
+    """Two runs drawn under different settings are two different instruments, and a comparison that pooled them would read the change of instrument as a difference between the arms. The constructed operations arena writes its draw into every episode for that reason; the engagement arena wrote none of its own, so a journal of it could not say what it was measuring.
+
+    The separation is the sharpest of the four. It is how far apart the two sides are put down, and the arena's own figure is deliberately inside the gap the engine halts two converging forces in — which is what makes a fight begin at all, and also what leaves the departures a small share of the fight to decide. It has to be movable to ask how much of the score the tactical choice can move, and once it is movable it has to be written down.
+    """
+    from rwintel.learn.arena import IMBALANCE, SEPARATION, STALL_MS, Arena, Statistics
+
+    plain = Statistics().as_dict()
+    assert plain["separation"] == SEPARATION and plain["stall_ms"] == STALL_MS
+    assert plain["imbalance_floor"] == IMBALANCE[0] and plain["score"] == BY_HEALTH
+
+    # Written at construction rather than at scoring, so an episode that produced no fight at all still says what it was run under.
+    arena = Arena(_Chained(), separation=600.0, stall_ms=8000, imbalance_floor=0.3, score=BY_KILLS)
+    drawn = arena.statistics.as_dict()
+    assert drawn["separation"] == 600.0 and drawn["stall_ms"] == 8000
+    assert drawn["imbalance_floor"] == 0.3 and drawn["score"] == BY_KILLS
+    assert arena.separation == 600.0, "the figure the fights are actually placed at is the one asked for"
+
+
 class _Chained:
     """A session as far as the whole script chain reads one when it is built: the type table, no asset tree, no regions and no map. The chain's constructor makes its own catalogue out of the first two and the economy layer works its resource points out of the last, which is everything the five layers ask of a session before a board has arrived."""
 
