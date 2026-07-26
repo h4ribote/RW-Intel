@@ -42,10 +42,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Job control, and it is not a convenience. A non-interactive shell sets SIGINT and SIGQUIT to be IGNORED in the processes it starts in the background, and that disposition is inherited: without this, the host command cannot be interrupted at all. Measured the hard way — a run whose game instance had died sat waiting for episodes that would never come, took no notice of an interrupt, and could only be killed, which loses the parameters because the save is past the point where the run would have returned. With job control on, the background job keeps the default disposition and an interrupt reaches it, so it unwinds through its own shutdown and saves what it has.
+set -m
+
 # The host command comes up first and binds its port, then the container's agents dial in. They retry until it answers, so the order is not strict, but starting the listener first spares the first connection its back-off.
 echo "[learn-run] host: $*" >&2
 "$@" &
 host_pid=$!
+
+# An interrupt or a termination of this script is passed on to the run rather than only tearing the container down under it. Without this, stopping the launcher would leave the host command listening for agents that no longer exist.
+forward() {
+    [ -n "$host_pid" ] && kill -INT "$host_pid" 2>/dev/null
+}
+trap forward INT TERM
 
 echo "[learn-run] starting $count game instance(s) as container $name" >&2
 docker run -d --name "$name" --platform linux/amd64 \
