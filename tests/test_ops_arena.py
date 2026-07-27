@@ -140,7 +140,7 @@ _CORNERS = [(4000.0, 4000.0), (4000.0, -4000.0), (-4000.0, 4000.0), (-4000.0, -4
 
 
 def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pairs=CONTEST_PAIRS,
-           sites=None):
+           sites=None, credit=CREDIT):
     """An arena assembled field by field, as everywhere the arena is exercised without a game. The heavy constructor builds command layers from the type catalogue the game sent at HELLO, which is not what the geometry and the scoring need."""
     arena = OpsArena.__new__(OpsArena)
     arena.session = session
@@ -151,7 +151,7 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena.contest_pairs = pairs
     arena.horizon_ms = HORIZON_MS
     arena.opening_baseline = OPENING_BASELINE
-    arena.credit = CREDIT
+    arena.credit = credit
     arena.garrison_scale = GARRISON_SCALE
     arena.enemy_slot = None
     arena.phase = "opening"
@@ -472,7 +472,7 @@ def test_a_scored_episode_says_how_far_each_side_ended_from_its_contests():
 
     Here they plainly did not: our squad ended inside the catchment and theirs a long way outside it, which is what a non-congruent march looks like in the record.
     """
-    arena = _arena(seed=11)
+    arena = _arena(seed=11, credit="region")
     _contested(arena, 4, (0.0, 0.0), 1.0)
     arena.our_ops = arena.their_ops = None
     arena.squads = {0: SquadRecord(id=0, doctrine=Doctrine.VANGUARD, members=[1])}
@@ -494,7 +494,7 @@ def test_a_terminal_is_read_from_where_its_disc_started_and_not_from_the_neutral
 
     A garrison keeps its own disc through the horizon about eighty-eight times in a hundred whether or not a squad is sent to stand with it, and even four squads massed on an enemy's disc take it only about four times in ten. Read from the neutral half, those two rates pay a redundant defence about +0.38 of a priority and an assault about −0.10, so the most profitable errand a squad can be given is one that was going to be won without it, and the first layer trained on this arena duly learnt to attack nothing and lose nothing. Read from the disc's own opening, the same two rates pay the assault about +0.40 and the redundant defence about nothing, which is the quantity the side score is a priority-weighted mean of.
     """
-    arena = _arena(seed=11)
+    arena = _arena(seed=11, credit="region")
     _contested(arena, 4, (0.0, 0.0), 0.8)                 # the enemy's garrison stands here, so this disc has to be taken
     _contested(arena, 9, (2000.0, 0.0), 0.5)              # ours stands here, so this one only has to be kept
     arena.garrison_share = {4: 0.0, 9: 1.0}
@@ -750,9 +750,12 @@ def test_the_terminal_is_what_the_ground_came_to_against_where_it_opened_and_not
 
 # ---- the reading the periods are paid off ---------------------------------------------------
 
-def _standing_board():
-    """An arena with two discs of opposite ownership, which is the pair every property here needs: one this side has to take from the enemy's garrison and one it only has to keep."""
-    arena = _arena(seed=23)
+def _standing_board(credit="region"):
+    """An arena with two discs of opposite ownership, which is the pair every property here needs: one this side has to take from the enemy's garrison and one it only has to keep.
+
+    Built on the reading that pays the domination of the named region unless a caller asks otherwise, because the properties written about the hand-off — that a figure is read once per board, that it is total over a side's squads, that the two sides' figures are negatives — were all stated about that reading and are checked against its arithmetic by hand.
+    """
+    arena = _arena(seed=23, credit=credit)
     _contested(arena, 4, (0.0, 0.0), 0.8)              # the enemy's garrison opened here
     _contested(arena, 9, (2000.0, 0.0), 0.5)           # ours opened here
     arena.garrison_share = {4: 0.0, 9: 1.0}
@@ -801,7 +804,8 @@ def test_a_squads_standing_is_antisymmetric_between_the_sides():
     for trial in range(60):
         seed = random.Random(trial)
         for baseline in (0.0, 0.4, 1.0):
-            arena = _arena(seed=trial)
+            # The property under test belongs to the reading that pays the whole domination of one named region, so the reading is named rather than taken from whatever the default happens to be.
+            arena = _arena(seed=trial, credit="region")
             arena.opening_baseline = baseline
             _contested(arena, 4, (0.0, 0.0), seed.uniform(0.3, 1.0))
             _contested(arena, 9, (2000.0, 0.0), seed.uniform(0.3, 1.0))
@@ -821,7 +825,7 @@ def test_a_squads_standing_is_antisymmetric_between_the_sides():
                 theirs = arena._standing(squad, shares, -1.0, units)
                 worst = max(worst, abs(ours + theirs))
                 # And read the long way round, as the mirror actually reads it: the other side's own share of the disc is one less ours and its own opening is one less ours, which is what the sign stands in for.
-                mirror = _arena(seed=trial)
+                mirror = _arena(seed=trial, credit="region")
                 mirror.opening_baseline = baseline
                 mirror.contests = list(arena.contests)
                 mirror.priorities = dict(arena.priorities)
@@ -1276,3 +1280,37 @@ def test_the_two_seats_departures_are_counted_apart():
     assert any("close 50.0%/50.0%" in line for line in said), said
     assert any("of 200 and 200 departure(s)" in line for line in said), said
     assert not any("spread" in line for line in said), "another arm's episodes were pooled in"
+
+
+def test_the_board_reading_cannot_be_changed_by_renaming_the_errand():
+    """The hole the board reading exists to close, stated as the property that closes it.
+
+    Both older readings take the region the CONTRACT names, and a region the board put no priority on moves no figure, so a squad's figure goes to nought the moment its layer points it at worthless ground. Re-contracting costs nothing. A squad losing a disc therefore carries a figure below nought and can take it to nought by naming an unwanted region, which is paid as a positive movement: the layer is paid for walking away from what it is losing. The per-period payments telescope to the last figure, so whoever picks the last region picks the total, and the layer picks the last region.
+
+    Under the board reading the contract is not read at all. The same units in the same places are paid the same figure whatever errand they hold, including no errand, so there is nothing to abstain into.
+    """
+    arena = _standing_board(credit="board")
+    units = [_unit(1, 0.0, 0.0), _unit(2, 20.0, 0.0, hostile=1), _unit(3, 2000.0, 0.0)]
+    shares = arena._shares(units)
+
+    # One squad standing in the disc it is losing, asked for under four different errands and under none.
+    figures = []
+    for region in (4, 9, 7, None):
+        squad = _tasked(1, region, [1])
+        figures.append(arena._standing(squad, shares, +1.0, units))
+    assert max(figures) - min(figures) < 1e-12, (
+        "renaming the errand moved the pay by %.3e, so the layer can still choose its own terminal"
+        % (max(figures) - min(figures)))
+
+    # And the figure is not merely constant: it is what this squad's units account for across the scored board, so a squad that is holding something is paid and a squad standing nowhere is not.
+    idle = arena._standing(_tasked(2, 4, [9]), shares, +1.0, units)
+    assert abs(idle) < 1e-12, "a squad with nothing inside any catchment is paid for standing nowhere"
+    assert abs(figures[0]) > 1e-6, "a squad inside a contested catchment is paid nothing at all"
+
+    # The older reading is the one that has the hole, and the test says so rather than assuming it: the same squad's pay moves when the errand is renamed.
+    named = _standing_board(credit="region")
+    named.garrison_share = dict(arena.garrison_share)
+    on_disc = named._standing(_tasked(1, 4, [1]), shares, +1.0, units)
+    off_disc = named._standing(_tasked(1, 7, [1]), shares, +1.0, units)
+    assert abs(on_disc - off_disc) > 1e-6 and off_disc == 0.0, (
+        "the region reading no longer pays differently for renaming the errand, so this record is stale")

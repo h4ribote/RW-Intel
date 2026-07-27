@@ -66,11 +66,17 @@ MAX_PAIR_ATTEMPTS = 400
 #: Unlike the engagement arena's strength slope this is NOT policy-invariant, and it is not a control variate: the squad chooses which region it is measured against and therefore chooses which opening it is read from. That is the point rather than a flaw — an errand is worth what it changed, and what it changed cannot be read without knowing where the ground started. It stays antisymmetric at every value, because the two sides' opening shares of one disc sum to one exactly as their final shares do, so the self-play zero remains a statement about the board and says nothing about this.
 OPENING_BASELINE = 1.0
 
-#: How a squad's terminal is read off the scored board. `region` pays the whole domination of the region the squad's contract named, which several squads on one region then each take in full; `marginal` pays only the part of it that squad's own surviving units account for. See `OpsArena._finish_side` for what each teaches and what each costs.
-CREDITS = ("region", "marginal")
+#: How a squad's terminal is read off the scored board. `region` pays the whole domination of the region the squad's contract named, which several squads on one region then each take in full; `marginal` pays only the part of it that squad's own surviving units account for; `board` pays that same marginal part summed over every scored disc, and reads no contract at all.
+#:
+#: The first two share a hole that the third exists to close, and it is the layer's own terminal that goes through it. Both read the region the CONTRACT names, and a region the board put no priority on moves no figure, so a squad pays nothing and earns nothing the moment its layer points it at worthless ground. Re-contracting is free. A squad standing on a disc it is losing therefore carries a figure below nought, and naming an unwanted region takes that figure to nought, which is paid as a POSITIVE movement — the layer is paid for walking away from what it is losing, and paid again by ending the episode with a figure it chose rather than one it earned. The per-period payments telescope to the last figure, so whoever picks the last region picks the total.
+#:
+#: Measured, and this is what it looks like from outside. Trained 150 episodes the layer names priority-bearing ground in 47 per cent of its decisions and scores +0.1597; trained 150 more from there it names it in 17 per cent, ends a median 348 world units from a contest against the first generation's 253, stands in no catchment at all in 64 episodes of 155 against 25, and scores +0.0584. The difference between the two generations is +0.1013 with two standard errors of 0.0297 on an instrument that passes its own self-play gate. Longer training walks the layer off the scored board, and it does so because the reward pays it to.
+#:
+#: `board` closes the hole by making the contract irrelevant to pay. A squad is paid what its own surviving units account for across every scored disc, wherever they are standing and whatever errand they were given, so no choice of region can raise or lower the figure and there is nothing to abstain into. It keeps what the marginal reading was built for — a squad is paid in the quantity the arena is measured by, and in no part of it another squad produced — and gives up the one thing the region reading had, which is that the errand names what it is judged on. That was never worth the hole: an errand nobody can be paid for abandoning is a better definition of an errand than one whose pay stops when it is abandoned.
+CREDITS = ("region", "marginal", "board")
 
-#: Which of them a run uses unless it says otherwise. The region reading is the one every measurement so far was taken under, so it stays the default until the marginal one has been measured against it on the same boards.
-CREDIT = "region"
+#: Which of them a run uses unless it says otherwise. The reading that cannot be abstained out of, since every generation trained under the region reading has walked off the board given enough episodes.
+CREDIT = "board"
 
 #: What a run calls the tactical layer that fought beneath both sides when that layer was the handwritten `Tactics` ladder — which is what the arena builds for itself when nothing else is handed to it, and what every measurement taken on this arena so far was made under. A run that froze trained tactical parameters under the arena instead names them by their content, so the two can never be mistaken for each other afterwards.
 SCRIPT_TACTICS = "script"
@@ -654,6 +660,15 @@ class OpsArena(Arena):
         if not squad.members:
             # A squad with nothing left on the board cannot move the disc it was sent to, so its figure is frozen where its last surviving unit left it and it is paid no further difference. Without this it goes on collecting, period after period, whatever its allies produce on that disc, and the horizon hands it the whole of a domination it took no part in — the free-rider term extended to a squad that no longer exists, which is precisely the misattribution this credit was built to remove. Frozen rather than nought, because a squad that destroyed a garrison and died doing it did move the disc, from the enemy's hands to nobody's, and that movement is in the side score whether or not anything of the squad survived to stand on it. The freeze is read before the contract is, so a dead squad whose layer goes on writing it errands cannot change its figure by naming a different region.
             return self._frozen.get(squad.id, 0.0)
+        if self.credit == "board":
+            # Every scored disc, and no contract read at all. The sum is over the discs rather than over the one a squad was sent to, so a squad that wandered onto a contest it was never given is paid for what it is doing there and a squad that was given one and left is not paid for having been given it.
+            figure = sign * sum(
+                self.priorities.get(contest.region_id, 0.0)
+                * (shares.get(contest.region_id, 0.5)
+                   - self._share_without(unit_states, contest, squad.members))
+                for contest in self.contests)
+            self._frozen[squad.id] = figure
+            return figure
         region = squad.contract.target_region if squad.contract is not None else None
         weight = self.priorities.get(region, 0.0)
         if weight == 0.0:
