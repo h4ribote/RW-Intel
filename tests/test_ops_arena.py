@@ -1028,6 +1028,62 @@ def test_the_massed_arm_is_the_ladder_with_only_its_spreading_term_removed():
     assert Operations(None, _CATALOGUE)._pick(view, orders, squad, None)[1].id == 2
 
 
+def test_the_priority_gates_the_choice_rather_than_being_outvoted_by_it():
+    """The strategic layer's priority narrows what may be targeted at all; the ladder's discounts then rank inside what is left. What they may no longer do is carry a squad off wanted ground and onto ground nobody asked for, which is what measurement caught the ladder doing in more than half of its decisions.
+
+    Two contested regions: a near one the strategic layer said nothing about, and a far one it wants. The march discount is made large enough to prefer the near one on the old scoring, so the two arms are separated by the gate and by nothing else.
+    """
+    priorities = {2: 0.5}
+    regions = [
+        RegionState(id=1, resources=0, held_by_us=0, held_by_enemy=0, x=0.0, y=0.0,
+                    our_value=0.0, enemy_value=1000.0, enemy_seen_at_ms=0, distance_from_home=0.0),
+        RegionState(id=2, resources=0, held_by_us=0, held_by_enemy=0, x=100.0, y=0.0,
+                    our_value=0.0, enemy_value=1000.0, enemy_seen_at_ms=0, distance_from_home=20000.0),
+    ]
+    view = WorldView(observation=_observation(), catalogue=_CATALOGUE, regions=regions)
+    orders = OperationsOrders(posture=Posture.ARM, priorities=priorities, offensive=True, loss_allowance=1000.0)
+    squad = SquadRecord(id=1, doctrine=Doctrine.VANGUARD, value=1000.0)
+
+    gated = Operations(None, _CATALOGUE)._pick(view, orders, squad, None)
+    ungated = Operations(None, _CATALOGUE, gate=False)._pick(view, orders, squad, None)
+    assert gated is not None and ungated is not None
+    assert ungated[1].id == 1, "before the gate the march discount could outvote the priority outright"
+    assert gated[1].id == 2, "the gate leaves only the ground the strategic layer asked for"
+
+    # Behind the gate the discounts still decide, so the rule narrowed the choice without replacing it: with both regions wanted the nearer one is taken again.
+    wanted_both = OperationsOrders(posture=Posture.ARM, priorities={1: 0.5, 2: 0.5}, offensive=True,
+                                   loss_allowance=1000.0)
+    assert Operations(None, _CATALOGUE)._pick(view, wanted_both, squad, None)[1].id == 1
+
+    # And on a board the strategic layer wants nothing on, the gate opens rather than leaving the squad with no errand.
+    barren = OperationsOrders(posture=Posture.ARM, priorities={}, offensive=True, loss_allowance=1000.0)
+    assert Operations(None, _CATALOGUE)._pick(view, barren, squad, None)[1].id == 1
+
+
+def test_the_gate_holds_for_every_doctrine_that_chooses_ground():
+    """A garrison and a raider read the board through different terms from a vanguard's, and each of those terms could outvote a priority on its own. The gate is in front of all three, or the layer goes on spending the decisions of two doctrines out of three on ground nobody asked for."""
+    regions = [
+        RegionState(id=1, resources=6, held_by_us=1, held_by_enemy=0, x=0.0, y=0.0,
+                    our_value=0.0, enemy_value=0.0, enemy_seen_at_ms=0, distance_from_home=0.0),
+        RegionState(id=2, resources=1, held_by_us=1, held_by_enemy=0, x=100.0, y=0.0,
+                    our_value=0.0, enemy_value=0.0, enemy_seen_at_ms=0, distance_from_home=1000.0),
+    ]
+    view = WorldView(observation=_observation(), catalogue=_CATALOGUE, regions=regions)
+    # The garrison ranks by what a region pays and the raider by the same, so the unwanted region wins on resources alone until the gate is in front of it.
+    orders = OperationsOrders(posture=Posture.ARM, priorities={2: 0.5}, offensive=True, loss_allowance=1000.0)
+
+    garrison = SquadRecord(id=1, doctrine=Doctrine.GARRISON, value=1000.0)
+    assert Operations(None, _CATALOGUE, gate=False)._pick(view, orders, garrison, None)[1].id == 1
+    assert Operations(None, _CATALOGUE)._pick(view, orders, garrison, None)[1].id == 2
+
+    # A raider takes ground we do not hold, so the same board is read with both regions in enemy hands.
+    for index, region in enumerate(regions):
+        regions[index] = dataclasses.replace(region, held_by_us=0)
+    raider = SquadRecord(id=2, doctrine=Doctrine.RAID, value=1000.0)
+    assert Operations(None, _CATALOGUE, gate=False)._pick(view, orders, raider, None)[1].id == 1
+    assert Operations(None, _CATALOGUE)._pick(view, orders, raider, None)[1].id == 2
+
+
 # ---- the tactical layer that fights beneath both sides --------------------------------------
 
 class _OneNetwork:

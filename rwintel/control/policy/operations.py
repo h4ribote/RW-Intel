@@ -89,9 +89,12 @@ def _share(part: float, against: float) -> float:
 class Operations:
     """The operational layer. Reads the board, the strategic orders, the squads the organisation layer has formed and what the tactical layer reports back, and answers with contracts and with what it could not do for want of strength."""
 
-    def __init__(self, session, catalogue: Catalogue, crowding: float = CROWDING_COST) -> None:
+    def __init__(self, session, catalogue: Catalogue, crowding: float = CROWDING_COST,
+                 gate: bool = True) -> None:
         self.session = session
         self.catalogue = catalogue
+        #: Whether ground the strategic layer put no priority on may be targeted while wanted ground is available. Held on the instance for the reason the crowding term is, so that the rule can be turned off and what it is worth read off a measurement rather than argued.
+        self.gate = gate
         #: How much our own strength already standing in a region discounts it as a target. Held on the instance rather than read from the constant so that the one term which decides whether the layer spreads or masses can be turned off and measured, which is what the operations arena's massed arm does. What that arm measured is that the term does nothing there: it discounts a region by the strength we already have standing in it, and on the arena the squads are at their staging point rather than in the contested regions when the choice is made, so the discount is already nought and the two arms decide alike on most boards. The term may still be worth something in a match, where squads do stand in the regions they are being re-tasked around; that has not been measured. Nothing in a match changes it; it is a knob for the instrument.
         self.crowding = crowding
         #: Squads a human held as of the last decision. A squad coming back is left alone for one period, because its composition and its position are both unknown to the command chain until it has been seen once under machine command again.
@@ -199,6 +202,7 @@ class Operations:
             contested = [r for r in view.regions if r.id != avoid and not r.held_by_us]
         if not contested:
             return None
+        contested = self._wanted(orders, contested)
 
         def score(region: RegionState) -> float:
             return (self._priority(orders, region)
@@ -220,6 +224,7 @@ class Operations:
             ours = [r for r in view.regions if r.held_by_us] or ([view.home] if view.home is not None else [])
         if not ours:
             return None
+        ours = self._wanted(orders, ours)
 
         def score(region: RegionState) -> float:
             return (self._priority(orders, region)
@@ -238,6 +243,7 @@ class Operations:
             candidates = [r for r in view.regions if r.id != avoid and not r.held_by_us]
         if not candidates:
             return None
+        candidates = self._wanted(orders, candidates)
 
         def score(region: RegionState) -> float:
             return (self._priority(orders, region)
@@ -246,6 +252,22 @@ class Operations:
                     - self._reach(region))
 
         return Task.RAID, max(candidates, key=lambda r: (score(r), -r.distance_from_home))
+
+    def _wanted(self, orders: OperationsOrders, candidates: List[RegionState]) -> List[RegionState]:
+        """The candidates the strategic layer actually asked for, where it asked for any of them at all.
+
+        The priority was written as one term among several and the several outvoted it. Each doctrine's score subtracts what the march costs, what we already have standing there, and what is waiting there, and any of those discounts can carry a squad off wanted ground entirely and onto ground nobody asked for — which is not the discount doing its job. Discounting is for choosing between the things worth having; it is not for deciding that none of them is worth having.
+
+        That this was happening is a measurement rather than a worry. On the constructed operations arena the ladder named priority-bearing ground in forty-four of every hundred decisions it took. The arm that overrides the region choice outright, sending every squad at the single most wanted region, named it in every one of them and beat the ladder by about a ninth of the score's scale over seventy-five shared boards; the trained layer, which is the best arm anything here has measured, named it in eighty-six. The ladder was the only one of the three spending most of its decisions somewhere else.
+
+        So the priority becomes a gate and the discounts keep their job behind it: the candidates narrow to the wanted ones, and reach, crowding, resources and threat then decide which of those a given squad takes. Where nothing on the board is wanted the gate opens and the ladder chooses as it did, which is what keeps a squad from standing still on a board the strategic layer has said nothing about.
+
+        This is deliberately weaker than the arm that beat it. That arm sends everything at one region; this keeps a squad's own reading of which wanted region it should take, and so still spreads across the wanted ground rather than massing on the most wanted piece of it. Which of the two is right is the thing the ablation is for: `gate=False` is the ladder as it was, and the difference between the two arms on shared boards is what the rule is worth.
+        """
+        if not self.gate:
+            return candidates
+        wanted = [region for region in candidates if self._priority(orders, region) > 0.0]
+        return wanted or candidates
 
     @staticmethod
     def _priority(orders: OperationsOrders, region: RegionState) -> float:
