@@ -165,7 +165,7 @@ def _arm(arguments, arm: "Arm", arms: int = 1, frozen: FrozenTactics = FrozenTac
 
     `massed` was meant to be the concentration arm the reading needed, and measurement says it is not one. It is the script ladder with the discount a region takes for the strength we already have standing in it removed — and on this arena that discount is already nought, because the squads are at the staging point and not in the contested regions when the choice is made. Measured: the two arms score identically on 43 of 51 boards at the default garrison and on 37 of 38 at half of it, and the engine does not reproduce, so identical scores mean identical decisions. It is therefore an ablation of one term of the ladder, worth keeping as that, and it is no evidence about concentration. An arm that actually concentrates has to replace the region choice rather than remove a term from it, which is what `concentrate` does. Against the script it says what the spreading rule costs; against the pin it says whether massing on the right ground beats leaving it.
 
-    `spread` is the ladder as it stood before the priority became a gate: the discounts for reach, crowding, resources and threat could outvote the priority and carry a squad onto ground the strategic layer had not asked for, and measurement said that is what they were doing in more than half of the ladder's decisions. Against the present script arm it says what gating the choice on wanted ground is worth; it is kept for that and for nothing else, since a rule adopted on the strength of a diagnostic count and never measured as a difference in score is a rule adopted on an argument.
+    `narrow` is the ladder with each doctrine's candidate set left as its own filter builds it, which is the ladder as it stood before the strategic layer's priority could admit a region to that set. Against the present script arm it says what admission is worth. It replaced an earlier arm that tried the opposite rule - narrowing the candidates to the wanted ones - and that rule is not kept, because measurement said it changed one operational decision in 41508: narrowing cannot move a decision whose candidate set holds no wanted region to begin with.
 
     `concentrate` is the arm that does what the massed arm was supposed to do. It keeps the doctrine's own choice of task and overrides only the region, sending every squad at the single region the strategic layer wants most. On this arena the priorities sit on the contested regions alone, so that is every squad at one contest — concentration in the plain sense, made by replacing the choice rather than by removing a term from it.
 
@@ -177,8 +177,8 @@ def _arm(arguments, arm: "Arm", arms: int = 1, frozen: FrozenTactics = FrozenTac
         operations = lambda session, catalogue: LearntOperations(session, catalogue, PinnedRegion(), None, -1)
     elif arm.kind == "massed":
         operations = lambda session, catalogue: Operations(session, catalogue, crowding=0.0)
-    elif arm.kind == "spread":
-        operations = lambda session, catalogue: Operations(session, catalogue, gate=False)
+    elif arm.kind == "narrow":
+        operations = lambda session, catalogue: Operations(session, catalogue, admit=False)
     elif arm.kind == "concentrate":
         operations = lambda session, catalogue: Concentrated(session, catalogue)
     elif arm.kind == "learnt":
@@ -199,7 +199,7 @@ def _arm(arguments, arm: "Arm", arms: int = 1, frozen: FrozenTactics = FrozenTac
 
 
 #: The operational arms a run may ask for. A learnt one may be written `learnt:PATH` to give it its own parameters, which is how one run carries several of them.
-ARM_KINDS = ("script", "pin", "massed", "spread", "concentrate", "learnt")
+ARM_KINDS = ("script", "pin", "massed", "narrow", "concentrate", "learnt")
 
 
 def arms_of(arguments) -> List[Arm]:
