@@ -165,6 +165,9 @@ class OpsStatistics:
     #:
     #: It exists to separate two ways of ending up far from the scored ground, which the reach alone cannot tell apart. A layer that re-draws its errand every few periods never arrives anywhere, and ends mid-board with its contracts pointing at contests it kept leaving. A layer that contracts unscored ground is not going anywhere that counts in the first place — and the reward makes that a real temptation, because a squad sent to a region with no priority is paid exactly nought, while one sent to hold ground it already owns can only be paid less than nought. The first is answered by pricing the re-drawing; the second by the reward's own floor. Nothing in the record said which was happening.
     on_priority: int = 0
+    #: The departures the frozen tactical layer chose beneath each side, counted by kind. The one diagnostic that can tell an even board fought unevenly by chance from two seats being played differently: the sides run one policy on boards that are one reflection of each other, so a fighter that reads only distances and strengths must produce two counts that differ by the draw, while a trained one whose decision boundary falls between the two seats produces two counts that differ the same way on every board. That difference is what a leaning self-play mean looks like from underneath, and until this was written down nothing recorded could separate the two.
+    our_departures: Dict[int, int] = field(default_factory=dict)
+    their_departures: Dict[int, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {"scored": self.scored, "side_score": round(self.side_score, 6),
@@ -180,7 +183,9 @@ class OpsStatistics:
                 "squads": self.squads, "pairs": self.pairs, "garrison": round(self.garrison, 1),
                 "tactics": self.tactics, "operations": self.operations,
                 "terminals": self.terminals, "periods": self.periods, "errands": self.errands,
-                "on_priority": self.on_priority}
+                "on_priority": self.on_priority,
+                "our_departures": {int(k): v for k, v in self.our_departures.items()},
+                "their_departures": {int(k): v for k, v in self.their_departures.items()}}
 
 
 class OpsArena(Arena):
@@ -490,6 +495,10 @@ class OpsArena(Arena):
                         override=True))
             deviations, out = tac.decide(board, slist, now)
             action.deviations.extend(deviations)
+            # What the layer beneath actually chose, counted a side at a time. The two sides run one policy on boards that are one reflection of each other, so with a fighter that reads only distances and strengths the two counts differ by the draw and by nothing else. A trained one has decision boundaries, and the reflection is congruent in the encoding but not in the ground: a feature that sits just one side of a boundary on this seat and just the other side on that one makes the two sides play differently for the whole run, which is a systematic difference and not noise. That is the shape the self-play mean has been leaning in, and nothing recorded so far could tell it from an even board fought unevenly by chance.
+            counts = self.statistics.our_departures if side == OURS else self.statistics.their_departures
+            for deviation in deviations:
+                counts[int(deviation.deviation)] = counts.get(int(deviation.deviation), 0) + 1
             if side == OURS:
                 self.our_reports = out
             else:

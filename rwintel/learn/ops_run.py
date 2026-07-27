@@ -26,6 +26,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 import torch
 
 from ..control.policy.operations import Concentrated, Operations
+from ..wire.action import Deviation
 from ..control.server import Server, ServerSettings
 from ..control.session import EpisodeSettings
 from ..data import AssetPaths
@@ -405,6 +406,40 @@ def signal(sessions, arm: Optional[str] = None) -> None:
     if counted:
         log.info("%d of them named ground the board put a priority on, which is %.0f per cent of this arm's decisions",
                  on_priority, 100.0 * on_priority / periods)
+    _report_departures(sessions, arm)
+
+
+def _report_departures(sessions: Sequence, arm: str) -> None:
+    """What the frozen tactical layer chose beneath each of the two sides, side by side.
+
+    The two sides run one policy on boards that are one reflection of each other, so a fighter that reads only distances and strengths gives two counts that differ by the draw. A trained one need not: the reflection is congruent in what the layer is handed and not in the ground it is handed it about, so a decision boundary can fall between the two seats and make them play differently on every board of a run. Measured, the self-play mean leans by up to about two hundredths under some sets of trained parameters and by nothing under others and under the handwritten ladder, which is exactly what that would look like from above. This is what it looks like from underneath, and nothing else recorded here can separate it from an even board fought unevenly by chance.
+
+    Reported for every arm rather than only the script one because the frozen layer is the same beneath every arm of a run, so each arm is another reading of the same question.
+    """
+    ours: Dict[int, int] = {}
+    theirs: Dict[int, int] = {}
+    for session in sessions:
+        for record in session.records:
+            if record.arm != arm:
+                continue
+            for kind, count in (record.statistics.get("our_departures") or {}).items():
+                ours[int(kind)] = ours.get(int(kind), 0) + int(count)
+            for kind, count in (record.statistics.get("their_departures") or {}).items():
+                theirs[int(kind)] = theirs.get(int(kind), 0) + int(count)
+    total, other = sum(ours.values()), sum(theirs.values())
+    if not total or not other:
+        return
+    kinds = sorted(set(ours) | set(theirs))
+    shares = ", ".join("%s %.1f%%/%.1f%%" % (Deviation(kind).name.lower(),
+                                             100.0 * ours.get(kind, 0) / total,
+                                             100.0 * theirs.get(kind, 0) / other)
+                       for kind in kinds)
+    # The largest gap between the two seats on any one departure, which is the single number that says whether they are playing the same game.
+    widest = max(kinds, key=lambda k: abs(ours.get(k, 0) / total - theirs.get(k, 0) / other))
+    gap = abs(ours.get(widest, 0) / total - theirs.get(widest, 0) / other)
+    log.info("the layer beneath chose, this side against the other: %s", shares)
+    log.info("the two seats differ most on %s, by %.1f percentage point(s) of %d and %d departure(s)",
+             Deviation(widest).name.lower(), 100.0 * gap, total, other)
 
 
 def measure(arguments) -> Dict[str, Summary]:

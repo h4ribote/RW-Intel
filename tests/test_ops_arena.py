@@ -28,7 +28,9 @@ from rwintel.control.policy.contracts import (
 from rwintel.control.policy.operations import Concentrated, Operations
 from rwintel.control.policy.tactics import Tactics
 from rwintel.control.policy.view import WorldView, build as build_view
+from rwintel.wire.action import Deviation
 from rwintel.data.regions import Region
+from rwintel.learn import ops_run
 from rwintel.learn.encoding import OPERATIONAL_SIZE, TACTICAL_SIZE
 from rwintel.learn.layers import LearntOperations, LearntTactics
 from rwintel.learn.rollout import FIGHT_DISCOUNT, FIGHT_TRACE, Rollout, Step
@@ -1227,3 +1229,50 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             function()
             print("ok", name)
+
+
+def test_the_two_seats_departures_are_counted_apart():
+    """The one diagnostic that can tell an even board fought unevenly by chance from two seats being played differently.
+
+    The arena runs one tactical policy beneath both sides of a board that is one reflection of the other, so a fighter reading only distances and strengths gives two counts that differ by the draw. A trained one need not: the reflection is congruent in what the layer is handed and not in the ground it is handed it about, so a decision boundary can fall between the two seats and make them play differently on every board of a run. Measured, the self-play mean leans by about +0.017 under two sets of trained parameters and by nothing under a third or under the handwritten ladder.
+
+    The counts must therefore never be pooled. This drives the pair through the record and through the reporting that reads it back.
+    """
+    statistics = OpsStatistics()
+    statistics.our_departures[int(Deviation.HOLD)] = 7
+    statistics.their_departures[int(Deviation.CLOSE)] = 5
+    written = statistics.as_dict()
+    assert written["our_departures"] == {int(Deviation.HOLD): 7}
+    assert written["their_departures"] == {int(Deviation.CLOSE): 5}
+
+    # And the report reads them back apart, naming the departure the two seats disagree most about rather than the commonest one.
+    class _Record:
+        def __init__(self, statistics):
+            self.arm = "script"
+            self.statistics = statistics
+
+    class _Session:
+        def __init__(self, records):
+            self.records = records
+
+    said = []
+    sessions = [_Session([
+        _Record({"our_departures": {int(Deviation.HOLD): 60, int(Deviation.CLOSE): 40},
+                 "their_departures": {int(Deviation.HOLD): 90, int(Deviation.CLOSE): 10}}),
+        _Record({"our_departures": {int(Deviation.HOLD): 40, int(Deviation.CLOSE): 60},
+                 "their_departures": {int(Deviation.HOLD): 10, int(Deviation.CLOSE): 90}}),
+        # Another arm's episodes must not be pooled into this arm's reading.
+        _Record({"our_departures": {int(Deviation.SPREAD): 1000}, "their_departures": {}}),
+    ])]
+    sessions[0].records[2].arm = "pin"
+    original = ops_run.log.info
+    ops_run.log.info = lambda message, *values: said.append(message % values)
+    try:
+        ops_run._report_departures(sessions, "script")
+    finally:
+        ops_run.log.info = original
+
+    assert any("hold 50.0%/50.0%" in line for line in said), said
+    assert any("close 50.0%/50.0%" in line for line in said), said
+    assert any("of 200 and 200 departure(s)" in line for line in said), said
+    assert not any("spread" in line for line in said), "another arm's episodes were pooled in"
