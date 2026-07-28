@@ -55,14 +55,17 @@ from rwintel.learn.deciders import Choice, NetworkTactics
 from rwintel.learn.encoding import (
     GLOBAL_SIZE,
     OPERATIONAL_FEATURES,
+    OPERATIONAL_RECIPE,
     OPERATIONAL_SIZE,
     REGION_FEATURES,
     REGION_SIZE,
     SQUAD_FEATURES,
     STRATEGIC_FEATURES,
+    STRATEGIC_RECIPE,
     STRATEGIC_SIZE,
     TACTICAL_ACTIONS,
     TACTICAL_FEATURES,
+    TACTICAL_RECIPE,
     TACTICAL_SIZE,
     operational_state,
     operational_slots,
@@ -73,7 +76,7 @@ from rwintel.learn.encoding import (
     tactical_state,
     task_mask,
 )
-from rwintel.learn.imitation import Sample, TeacherMismatch, fit, read_teacher
+from rwintel.learn.imitation import Sample, TeacherMismatch, feature_recipe, fit, read_teacher
 from rwintel.learn.frozen import frozen_layers
 from rwintel.learn.layers import LearntOperations, LearntStrategy, LearntTactics
 from rwintel.learn.net import (
@@ -83,8 +86,11 @@ from rwintel.learn.net import (
     OperationalNet,
     StrategicNet,
     TacticalNet,
+    _bytes,
     avowed,
     encoding_avowal,
+    encoding_features,
+    encoding_recipe,
     encoding_stamp,
 )
 from rwintel.learn.ops_arena import SCRIPT_TACTICS, OpsArena
@@ -1622,7 +1628,7 @@ def test_a_teacher_written_by_a_different_feature_list_is_refused_rather_than_fi
     """
     assert "decision 0" in _refusal(TeacherMismatch, fit, [Sample(state=[0.0] * (TACTICAL_SIZE - 1), action=0)])
 
-    stated = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES)}
+    stated = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES), "recipe": TACTICAL_RECIPE}
     decision = {"state": [0.0] * TACTICAL_SIZE, "action": 0}
     with tempfile.TemporaryDirectory() as folder:
         refusal = _refusal(TeacherMismatch, read_teacher, _teacher(folder, decision))
@@ -1639,6 +1645,29 @@ def test_a_teacher_written_by_a_different_feature_list_is_refused_rather_than_fi
         assert len(read_teacher(_teacher(folder, stated, decision, decision))) == 2
 
 
+def test_a_teacher_whose_slots_kept_their_names_and_changed_what_they_hold_is_refused_too():
+    """The half of the claim the names cannot make, on the side where it is least visible.
+
+    Every state in a teacher is a row of numbers already computed, so nothing below the head can be re-derived and compared with anything: if a slot kept its name and changed what it holds, the head is identical, the row lengths are identical, and a fit to it reports a perfectly ordinary accuracy for a network reading the board wrongly. That happened — the strategic cut compared this side's army with the enemy's whole side until it was corrected to armies against armies, and the teacher collected fifteen minutes before the correction states exactly the list it states today.
+
+    So a head states the recipe beside the names, and it is the same digest a set of parameters carries: the two go stale together. A head stating none has to be collected again, and there is no avowal here as there is for parameters, because a teacher is a recording of a rule that is still standing in this tree while a set of parameters is the output of a run that is not.
+    """
+    decision = {"state": [0.0] * STRATEGIC_SIZE, "action": 0}
+    named = {"layer": "strategy", "encoding": list(STRATEGIC_FEATURES)}
+    with tempfile.TemporaryDirectory() as folder:
+        refusal = _refusal(TeacherMismatch, read_teacher,
+                           _teacher(folder, named, decision), "strategy")
+        assert "not the recipe" in refusal and "collected again" in refusal
+
+        moved = dict(named, recipe="0123456789abcdef")
+        refusal = _refusal(TeacherMismatch, read_teacher,
+                           _teacher(folder, moved, decision), "strategy")
+        assert "different recipe" in refusal and STRATEGIC_RECIPE in refusal
+
+        whole = dict(named, recipe=STRATEGIC_RECIPE)
+        assert len(read_teacher(_teacher(folder, whole, decision), "strategy")) == 1
+
+
 def test_an_operational_teacher_is_refused_by_the_block_that_moved_and_not_by_a_slot_of_its_state():
     """The operational feature list does not name the state slot by slot and a refusal must not talk as though it did.
 
@@ -1647,7 +1676,8 @@ def test_an_operational_teacher_is_refused_by_the_block_that_moved_and_not_by_a_
     moved = "region.distance"
     assert moved in OPERATIONAL_FEATURES, "the block this test renames has itself been renamed"
     decision = {"state": [0.0] * OPERATIONAL_SIZE, "action": 0, "second": 0}
-    head = {"layer": "operations", "encoding": list(OPERATIONAL_FEATURES)}
+    head = {"layer": "operations", "encoding": list(OPERATIONAL_FEATURES),
+            "recipe": OPERATIONAL_RECIPE}
 
     with tempfile.TemporaryDirectory() as folder:
         renamed = dict(head, encoding=["region.range" if name == moved else name
@@ -1669,7 +1699,7 @@ def test_an_operational_teacher_is_refused_by_the_block_that_moved_and_not_by_a_
             "the width of the state was quoted as though it were the length of the list: " + said)
 
         # And the tactical list, whose names are one per number, is quoted as features.
-        head = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES)}
+        head = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES), "recipe": TACTICAL_RECIPE}
         renamed = dict(head, encoding=["target_dx" if name == "target_ahead_of_home" else name
                                        for name in TACTICAL_FEATURES])
         refusal = _refusal(TeacherMismatch, read_teacher,
@@ -1682,7 +1712,7 @@ def test_two_collecting_runs_joined_into_one_teacher_are_read_and_re_checked_at_
 
     Three things happen there. The join reads back whole, which is what it did before a file stated anything and has to go on doing. The second head is CHECKED rather than waved through, because it is the only line in the file that says whether the two halves were collected under the same encoding — a join across an encoding change is two different readings of the board in one file, and fitting to it produces a network that is wrong about half of what it saw. And a line that is neither a decision nor a head is refused by name and line like everything else malformed here, rather than surfacing as a missing key from somewhere inside the reader with nothing said about which file it came from.
     """
-    head = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES)}
+    head = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES), "recipe": TACTICAL_RECIPE}
     decision = {"state": [0.0] * TACTICAL_SIZE, "action": 0}
     with tempfile.TemporaryDirectory() as folder:
         joined = _teacher(folder, head, decision, decision, head, decision, decision)
@@ -2070,6 +2100,39 @@ def test_a_learnt_operational_arm_loads_and_names_itself_after_its_file():
                 batcher.stop()
 
 
+def test_the_separation_a_fight_is_put_down_at_runs_as_arms_like_the_other_two_draw_settings():
+    """Three settings decide how a fight is drawn — the imbalance floor, the stall time and the separation — and two of them could be swept as arms of one run while the third took a single figure for the whole run. The odd one out was the separation, which is the one the record names as the first thing to sweep: the arena's own 250 sits inside the gap the engine halts two converging forces in, so both sides are exchanging fire from the first period and the departures have the least of the fight left to decide.
+
+    Run as arms it is also a paired comparison, which is the reason it is worth doing this way rather than as two runs. The separation enters the placement alone and never touches the arena's own random stream, so two arms under one seed draw the same site, the same two budgets, the same imbalance, the same angle and the same two forces: the same fight, begun from a different distance. Each separation still carries its own baseline, because what the arena leans by is a property of the instrument and a wider board is a different instrument.
+    """
+    from rwintel.learn.__main__ import _separations
+
+    class _Asked:
+        separation = "250, 700"
+
+    assert _separations(_Asked()) == [250.0, 700.0]
+    # Named once so a plain run keeps the names the journal has always carried, and twice over so a sweep says which arm was which.
+    _Asked.separation = "700"
+    assert _separations(_Asked()) == [700.0]
+    _Asked.separation = None
+    assert _separations(_Asked()) == [None], "unasked for, the arena's own figure stands"
+    _Asked.separation = "0"
+    assert "0" in _refusal(SystemExit, _separations, _Asked())
+    _Asked.separation = "wide"
+    assert "wide" in _refusal(SystemExit, _separations, _Asked())
+
+    # Two arms at two separations draw the same fight from different distances, which is what makes them pairable.
+    from rwintel.learn.arena import Arena
+
+    drawn = []
+    for separation in (250.0, 700.0):
+        with _without_the_game_installed():
+            arena = Arena(_Chained(), seed=4242, separation=separation)
+        drawn.append((arena.random.uniform(0.0, 1.0), arena.separation))
+    assert drawn[0][0] == drawn[1][0], "the separation must not move the stream the forces are drawn from"
+    assert drawn[0][1] == 250.0 and drawn[1][1] == 700.0
+
+
 def test_an_engagement_episode_says_how_its_fights_were_drawn():
     """Two runs drawn under different settings are two different instruments, and a comparison that pooled them would read the change of instrument as a difference between the arms. The constructed operations arena writes its draw into every episode for that reason; the engagement arena wrote none of its own, so a journal of it could not say what it was measuring.
 
@@ -2350,7 +2413,8 @@ def test_parameters_fitted_to_a_different_feature_list_are_refused_by_the_featur
         path = os.path.join(directory, "stale.pt")
         state = TacticalNet().state_dict()
         state[ENCODING_KEY] = encoding_stamp(
-            ["target_dx" if name == "target_ahead_of_home" else name for name in TACTICAL_FEATURES])
+            ["target_dx" if name == "target_ahead_of_home" else name for name in TACTICAL_FEATURES],
+            TACTICAL_RECIPE)
         torch.save(state, path)
         refusal = _refusal(SystemExit, frozen_tactics, path)
         assert path in refusal and "'target_dx'" in refusal and "'target_ahead_of_home'" in refusal
@@ -2370,6 +2434,51 @@ def test_parameters_fitted_to_a_different_feature_list_are_refused_by_the_featur
         assert "no feature list" in _refusal(ValueError, eval_arms.build_all, [f"ops:{operational}"])
         # The refusal is also where the way out is named, because a person holding parameters that cost a training run to make will otherwise conclude from it that they have to make them again.
         assert "avow" in _refusal(ValueError, eval_arms.build_all, [f"ops:{operational}"])
+
+
+def test_a_slot_that_changed_what_it_holds_retires_the_parameters_fitted_to_the_old_holding():
+    """The failure the feature list itself could not catch, measured on the case that happened.
+
+    The strategic cut compared this side's fighting strength with the enemy's WHOLE side — buildings and builders counted into theirs and out of ours — and the day it was corrected to fighters against fighters, the slot stayed named `military_edge`, the list stayed identical byte for byte, and every width stayed where it was. The imitation the strategic layer was bootstrapped from had been fitted fifteen minutes earlier. It loaded in silence onto a quantity that had moved beneath it, and nothing in the file, the loader or the run could have said so.
+
+    So a stamp states two things: what the slots are CALLED, and a digest of the code that FILLS them. A file whose recipe disagrees is refused for good, exactly as one whose list disagrees is. A file that states a list and no recipe was written while the stamp carried only names, and is refused until a person avows it — the same shape of answer a file with no stamp at all already got, for the same reason: it cannot prove what it was fitted to, and refusing is not the same as knowing it is wrong.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        # What a stamp says, and that the two claims come apart cleanly.
+        assert encoding_recipe(getattr(StrategicNet(), ENCODING_KEY)) == STRATEGIC_RECIPE
+        assert encoding_features(getattr(StrategicNet(), ENCODING_KEY)) == STRATEGIC_FEATURES
+        assert TACTICAL_RECIPE != STRATEGIC_RECIPE, "the three cuts retire separately or they retire together"
+
+        # A file whose names are this layer's and whose recipe is not: the very failure above.
+        moved = os.path.join(directory, "moved.pt")
+        state = TacticalNet().state_dict()
+        state[ENCODING_KEY] = encoding_stamp(TACTICAL_FEATURES, "0123456789abcdef")
+        torch.save(state, moved)
+        refusal = _refusal(SystemExit, frozen_tactics, moved)
+        assert "different recipe" in refusal and "0123456789abcdef" in refusal and TACTICAL_RECIPE in refusal
+
+        # A file written while the stamp carried names alone. Refused, and the refusal names the way back.
+        half = os.path.join(directory, "half.pt")
+        state = TacticalNet().state_dict()
+        state[ENCODING_KEY] = _bytes("\n".join(TACTICAL_FEATURES))
+        torch.save(state, half)
+        refusal = _refusal(SystemExit, frozen_tactics, half)
+        assert "not the recipe" in refusal and "avow" in refusal
+
+        # And an avowal adds the missing half without touching the half the file already states.
+        recorded = torch.load(half, map_location="cpu")
+        words = "fitted after the last change to the tactical cut"
+        torch.save(avowed(recorded, TacticalNet(), words), half)
+        after = torch.load(half, map_location="cpu")
+        assert encoding_recipe(after[ENCODING_KEY]) == TACTICAL_RECIPE
+        assert encoding_avowal(after) == words
+        assert all(torch.equal(after[name], value) for name, value in recorded.items()
+                   if name != ENCODING_KEY)
+        frozen = frozen_tactics(half)
+        try:
+            assert frozen.build is not None
+        finally:
+            frozen.batcher.stop()
 
 
 def _unstamped(net, path):
@@ -2440,12 +2549,17 @@ def test_an_avowal_cannot_be_made_over_a_stated_list_or_for_a_layer_the_file_is_
 
         stale = TacticalNet().state_dict()
         stale[ENCODING_KEY] = encoding_stamp(
-            ["target_dx" if name == "target_ahead_of_home" else name for name in TACTICAL_FEATURES])
+            ["target_dx" if name == "target_ahead_of_home" else name for name in TACTICAL_FEATURES],
+            TACTICAL_RECIPE)
         refusal = _refusal(EncodingRefused, avowed, stale, TacticalNet(), words)
-        assert "already states the feature list" in refusal
-        # Nor twice, which is the same refusal reached from the other side: a file that has been avowed states a list like any other and is protected by it like any other.
+        assert "refused for good" in refusal
+        # Nor over a file that states this layer's list AND the recipe those features were made by, which is what a fit writes: there is nothing left for a person to add.
+        whole = TacticalNet().state_dict()
+        refusal = _refusal(EncodingRefused, avowed, whole, TacticalNet(), words)
+        assert "nothing here a person can add" in refusal
+        # Nor twice, which is the same refusal reached from the other side: a file that has been avowed carries somebody's word and is protected by it.
         once = avowed(state, TacticalNet(), words)
-        assert "already states the feature list" in _refusal(EncodingRefused, avowed, once, TacticalNet(), words)
+        assert "already carries somebody's avowal" in _refusal(EncodingRefused, avowed, once, TacticalNet(), words)
 
 
 def test_avowing_will_not_guess_which_layer_a_file_belongs_to():

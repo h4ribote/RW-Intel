@@ -8,7 +8,9 @@ The operational head is factorised into a region and a task rather than emitting
 
 Both carry their own feature list among their parameters, which is the one thing in this file that is not about arithmetic. A set of parameters is only meaningful beside the encoding it was fitted to, and the widths cannot say what that was: rename a feature, or replace one with another of the same shape, and every width stays where it is while two slots have quietly changed meaning. Such a file loads without complaint, trains without complaint, and fights on a reading of the board that is wrong in a way nothing downstream can see. Carrying the list inside the state dictionary means it is saved, loaded and copied by the ordinary means, and every loader can refuse a file that was fitted to a different one.
 
-A file that states no list at all is a different case from a file that states the wrong one, and treating the two alike throws away parameters that are known to be good. It cannot prove what it was fitted to — that is the whole point of writing the list down — but a person who knows that a layer's encoding has not moved since those parameters were fitted knows something true that the file does not say. So there is a way of saying it: an avowal, which writes into the file the list a person swears it was fitted to and their words for why in the same breath. Deliberately into the file rather than onto the command line of the run that loads it, because a flag is a claim made once and never seen again, while this one is saved and copied with the parameters and every loader says out loud that the list beside them is somebody's word and not a fit's record. What an avowal may never do is contradict: a file that already states a list is refused one absolutely, since overwriting a list is exactly the failure writing it down was for.
+A file that states no list at all is a different case from a file that states the wrong one, and treating the two alike throws away parameters that are known to be good. It cannot prove what it was fitted to — that is the whole point of writing the list down — but a person who knows that a layer's encoding has not moved since those parameters were fitted knows something true that the file does not say. So there is a way of saying it: an avowal, which writes into the file the list a person swears it was fitted to and their words for why in the same breath. Deliberately into the file rather than onto the command line of the run that loads it, because a flag is a claim made once and never seen again, while this one is saved and copied with the parameters and every loader says out loud that the list beside them is somebody's word and not a fit's record. What an avowal may never do is contradict: it may add a claim the file does not make and never overwrite one it does, since overwriting a claim is exactly the failure writing claims down was for.
+
+And the list is not the whole claim. A slot's name says what it is called and not what it holds, and the day the strategic cut changed from comparing this side's army with the enemy's whole side to comparing armies with armies, the name and the list were untouched — so parameters fitted the day before loaded in silence onto a quantity that had moved. What rides beside the list is therefore a digest of the code that fills the slots, so that a change of meaning retires the parameters fitted to the old meaning exactly as a change of name does. Its own limits are stated where it is computed.
 """
 
 from __future__ import annotations
@@ -20,15 +22,18 @@ from torch import nn
 
 from .encoding import (
     OPERATIONAL_FEATURES,
+    OPERATIONAL_RECIPE,
     OPERATIONAL_REGIONS,
     OPERATIONAL_SIZE,
     OPERATIONAL_TASKS,
     SQUAD_SLOTS,
     STRATEGIC_ACTIONS,
     STRATEGIC_FEATURES,
+    STRATEGIC_RECIPE,
     STRATEGIC_SIZE,
     TACTICAL_ACTIONS,
     TACTICAL_FEATURES,
+    TACTICAL_RECIPE,
     TACTICAL_SIZE,
 )
 
@@ -60,17 +65,32 @@ def _text(row: torch.Tensor) -> str:
     return bytes(row.detach().to("cpu").flatten().tolist()).decode("utf-8")
 
 
-def encoding_stamp(features: Sequence[str]) -> torch.Tensor:
-    """A feature list as a row of bytes, which is how it rides inside a state dictionary.
+#: What separates the two claims a stamp makes: the list of what the slots are called, and the digest of the code that fills them. A blank line, so that a stamp reads as two paragraphs and a stamp written before there were two still parses as the first alone.
+STAMP_BREAK = "\n\n"
+
+
+def encoding_stamp(features: Sequence[str], recipe: str) -> torch.Tensor:
+    """What a set of parameters was fitted to, as a row of bytes which rides inside a state dictionary: the names of the slots, and a digest of the code that fills them.
 
     Written down at all because the width of the input layer is not evidence about what the features MEAN. Renaming a feature, or replacing one with another of the same shape, leaves every width where it was, so a file fitted to the old meaning loads without complaint and the network then reads two slots as something they no longer are — which is the silent failure this module's neighbours exist to refuse, and the only one they could not see.
+
+    The names alone turned out not to be enough, and the case that showed it is worth keeping. The strategic cut compared this side's fighting strength with the enemy's whole side, buildings and builders included, and the day it was corrected to fighters against fighters the slot was still called `military_edge` and the list was still identical byte for byte. Parameters fitted the day before loaded in silence onto a quantity that had moved beneath them, and the imitation the strategic layer was bootstrapped from was one of them. So the recipe rides beside the names: change what a slot holds and the parameters fitted to the old holding are refused, exactly as they are when the slot is renamed.
     """
-    return _bytes("\n".join(features))
+    return _bytes("\n".join(features) + STAMP_BREAK + recipe)
 
 
 def encoding_features(stamp: torch.Tensor) -> Tuple[str, ...]:
     """The feature list back out of a stamp, for saying which feature has moved rather than only that something has."""
-    return tuple(_text(stamp).split("\n"))
+    return tuple(_text(stamp).split(STAMP_BREAK)[0].split("\n"))
+
+
+def encoding_recipe(stamp: torch.Tensor) -> Optional[str]:
+    """The digest of the code that filled the slots, or nothing where the stamp was written before a stamp carried one.
+
+    Nothing and not the empty string, because the two are different findings and one of the two is refusable: a file that states a recipe which disagrees is refused for good, and a file that states none is refused until a person avows what it was fitted to — the same shape of answer the feature list itself already gives.
+    """
+    parts = _text(stamp).split(STAMP_BREAK)
+    return parts[1] if len(parts) > 1 and parts[1] else None
 
 
 def encoding_avowal(state) -> Optional[str]:
@@ -110,14 +130,26 @@ def encoding_complaint(state, net: nn.Module) -> Optional[str]:
                 "were fitted, say so into the file itself with 'python -m rwintel.learn avow'")
     was = encoding_features(state[ENCODING_KEY])
     now = encoding_features(getattr(net, ENCODING_KEY))
-    if was == now:
-        return None
-    for index, (before, after) in enumerate(zip(was, now)):
-        if before != after:
-            return ("it was fitted to a different feature list: its %s %d is %r where this layer now reads %r"
-                    % (net.ENTRY, index, before, after))
-    return ("it was fitted to a different feature list: %d %ss where this layer's list has %d"
-            % (len(was), net.ENTRY, len(now)))
+    if was != now:
+        for index, (before, after) in enumerate(zip(was, now)):
+            if before != after:
+                return ("it was fitted to a different feature list: its %s %d is %r where this layer now reads %r"
+                        % (net.ENTRY, index, before, after))
+        return ("it was fitted to a different feature list: %d %ss where this layer's list has %d"
+                % (len(was), net.ENTRY, len(now)))
+    made = encoding_recipe(state[ENCODING_KEY])
+    makes = encoding_recipe(getattr(net, ENCODING_KEY))
+    if made is None:
+        return ("it states the feature list it was fitted to but not the recipe those features were made by, so "
+                "it was written before a stamp said what a slot HOLDS as well as what it is called; a slot whose "
+                "meaning moved under an unchanged name is exactly what the list cannot see, so either fit them "
+                "again or, if you know this layer's cut has not moved since they were fitted, say so into the "
+                "file itself with 'python -m rwintel.learn avow'")
+    if made != makes:
+        return ("it was fitted by a different recipe: the names of the slots are this layer's, but the code that "
+                "fills them digests to %s where this layer's digests to %s, so at least one slot holds a "
+                "different quantity than it did when these were fitted" % (made, makes))
+    return None
 
 
 def load_encoded(net: nn.Module, state) -> Optional[str]:
@@ -139,9 +171,9 @@ def avowed(state, net: nn.Module, words: str) -> dict:
 
     This is the way back for parameters recorded before the list was. Every loader here refuses such a file and is right to: nothing in it says which encoding produced it. But refusing it is not the same as knowing it is wrong, and where a layer's encoding has not moved since the parameters were fitted, a person knows something true that the file does not state. This is how they state it — into the file, so that it is saved, copied and read back with the parameters and no later reader has to be told separately.
 
-    Three refusals, and they are what keep this from being a way of waving a file through.
+    An avowal may add a claim the file does not make. It may never contradict one it does.
 
-    A file that already states what it was fitted to cannot be avowed at all, whether that list is this one or another. Overwriting it is precisely the failure the list exists to prevent, so a file whose list disagrees with the layer's is refused for good rather than until somebody runs this.
+    That distinction is what decides the two kinds of file that arrive here. A file with no stamp at all states nothing, and the whole stamp is added. A file that states this layer's feature list but no recipe — written while the stamp carried only names — states half of it, and the half it is missing is added while the half it makes is checked first and must agree. What is refused for good is a file whose list disagrees with this layer's, or whose recipe does: overwriting a claim is precisely the failure writing claims down was for, and a person's word is not evidence against a record the fit itself left.
 
     A file whose first layer does not read what this network reads cannot be avowed as this network's. That is the whole of what a width proves, and it is exactly what is wanted here: it is what stops one layer's name, pointed at a directory of parameters, from stamping another layer's files with a list they were never fitted to. What a width does not prove is that a file of the right width was fitted to the list now in force — which is why a person's word is required at all.
 
@@ -149,12 +181,22 @@ def avowed(state, net: nn.Module, words: str) -> dict:
     """
     if not isinstance(state, dict):
         raise EncodingRefused("this is not a set of parameters at all")
-    for key in (ENCODING_KEY, AVOWAL_KEY):
-        if key in state:
+    if AVOWAL_KEY in state:
+        raise EncodingRefused(
+            "it already carries somebody's avowal, and an avowal is a person's word about a file that has not "
+            "had one; writing over one is the very thing writing it down was for")
+    if ENCODING_KEY in state:
+        was = encoding_features(state[ENCODING_KEY])
+        now = encoding_features(getattr(net, ENCODING_KEY))
+        if was != now:
             raise EncodingRefused(
-                "it already states the feature list it was fitted to, and an avowal is a person's word about a "
-                "file that states none; a list that disagrees with this layer's is refused for good, because "
-                "writing over one is the very thing writing it down was for (the entry it carries is %r)" % key)
+                "it states a feature list that is not this layer's, and a list that disagrees is refused for "
+                "good rather than until somebody runs this: %d %ss against this layer's %d"
+                % (len(was), net.ENTRY, len(now)))
+        if encoding_recipe(state[ENCODING_KEY]) is not None:
+            raise EncodingRefused(
+                "it already states both what its slots are called and the recipe they were made by, so there is "
+                "nothing here a person can add; a recipe that disagrees with this layer's is refused for good")
     width = reads(state)
     wanted = net.body[0].in_features
     if width != wanted:
@@ -203,7 +245,7 @@ class TacticalNet(nn.Module):
         self.action = _initialise(nn.Linear(width, TACTICAL_ACTIONS), gain=0.01)
         self.value = _initialise(nn.Linear(width, 1), gain=1.0)
         # The feature list travels with the parameters, because the widths above cannot tell a renamed feature from the one it replaced and a file fitted to the old meaning would otherwise load in silence.
-        self.register_buffer(ENCODING_KEY, encoding_stamp(TACTICAL_FEATURES))
+        self.register_buffer(ENCODING_KEY, encoding_stamp(TACTICAL_FEATURES, TACTICAL_RECIPE))
 
     def forward(self, state: torch.Tensor, mask: Optional[torch.Tensor] = None):
         hidden = self.body(state)
@@ -229,7 +271,7 @@ class OperationalNet(nn.Module):
         self.task = _initialise(nn.Linear(width, OPERATIONAL_TASKS), gain=0.01)
         self.value = _initialise(nn.Linear(width, 1), gain=1.0)
         # Its own feature list, for the reason the tactical network carries one.
-        self.register_buffer(ENCODING_KEY, encoding_stamp(OPERATIONAL_FEATURES))
+        self.register_buffer(ENCODING_KEY, encoding_stamp(OPERATIONAL_FEATURES, OPERATIONAL_RECIPE))
 
     def forward(self, state: torch.Tensor, squad: torch.Tensor,
                 region_mask: Optional[torch.Tensor] = None,
@@ -260,7 +302,7 @@ class StrategicNet(nn.Module):
         self.body = _initialise(_trunk(STRATEGIC_SIZE, width), gain=2.0 ** 0.5)
         self.action = _initialise(nn.Linear(width, STRATEGIC_ACTIONS), gain=0.01)
         self.value = _initialise(nn.Linear(width, 1), gain=1.0)
-        self.register_buffer(ENCODING_KEY, encoding_stamp(STRATEGIC_FEATURES))
+        self.register_buffer(ENCODING_KEY, encoding_stamp(STRATEGIC_FEATURES, STRATEGIC_RECIPE))
 
     def forward(self, state: torch.Tensor, mask: Optional[torch.Tensor] = None):
         hidden = self.body(state)

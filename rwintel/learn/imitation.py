@@ -26,14 +26,17 @@ from ..wire import Deviation, Task
 from ..control.policy.contracts import Posture
 from .encoding import (
     OPERATIONAL_FEATURES,
+    OPERATIONAL_RECIPE,
     OPERATIONAL_REGIONS,
     OPERATIONAL_SIZE,
     OPERATIONAL_TASKS,
     STRATEGIC_ACTIONS,
     STRATEGIC_FEATURES,
+    STRATEGIC_RECIPE,
     STRATEGIC_SIZE,
     TACTICAL_ACTIONS,
     TACTICAL_FEATURES,
+    TACTICAL_RECIPE,
     TACTICAL_SIZE,
 )
 from .net import OperationalNet, StrategicNet, TacticalNet, entropy, one_hot_slot
@@ -141,6 +144,20 @@ def widths(layer: str) -> Tuple[int, int, int]:
         return OPERATIONAL_SIZE, OPERATIONAL_REGIONS, OPERATIONAL_TASKS
     if layer == STRATEGIC:
         return STRATEGIC_SIZE, STRATEGIC_ACTIONS, 0
+    raise ValueError(_no_such_layer(layer))
+
+
+def feature_recipe(layer: str) -> str:
+    """The digest of the code that fills one layer's slots, which a teacher file states at its head beside the names of them.
+
+    The names are half a claim. A slot that keeps its name and changes what it holds leaves a teacher's head byte for byte identical while every state in the file below means something else, and that is not hypothetical: the strategic cut compared this side's army with the enemy's whole side until the day it was corrected to armies against armies, and the teacher collected fifteen minutes earlier stated exactly the list it states today. What is written beside the names is therefore the same digest a set of parameters carries, so a teacher and a network go stale together and for the same reason.
+    """
+    if layer == TACTICAL:
+        return TACTICAL_RECIPE
+    if layer == OPERATIONAL:
+        return OPERATIONAL_RECIPE
+    if layer == STRATEGIC:
+        return STRATEGIC_RECIPE
     raise ValueError(_no_such_layer(layer))
 
 
@@ -339,19 +356,38 @@ def _stated_encoding(row: dict, layer: str, where: str) -> None:
     if named is not None and named != layer:
         raise TeacherMismatch(f"{where}: this is a {named} teacher, and it is being read for the {layer} layer")
     expected = feature_names(layer)
-    if tuple(stated) == expected:
-        return
     entry = feature_entry(layer)
-    for index, (before, after) in enumerate(zip(stated, expected)):
-        if before != after:
-            raise TeacherMismatch(
-                f"{where}: this teacher was written by a different feature list — its {entry} {index} is "
-                f"{before!r} where the {layer} encoding now reads {after!r} — so fitting to it would produce a "
-                f"network reading what that {entry} covers as something it no longer is")
-    raise TeacherMismatch(
-        f"{where}: this teacher was written by a feature list of {len(stated)} {entry}s where the {layer} "
-        f"encoding now has {len(expected)}, so fitting to it would produce a network reading every feature in "
-        f"the wrong place")
+    if tuple(stated) != expected:
+        for index, (before, after) in enumerate(zip(stated, expected)):
+            if before != after:
+                raise TeacherMismatch(
+                    f"{where}: this teacher was written by a different feature list — its {entry} {index} is "
+                    f"{before!r} where the {layer} encoding now reads {after!r} — so fitting to it would produce "
+                    f"a network reading what that {entry} covers as something it no longer is")
+        raise TeacherMismatch(
+            f"{where}: this teacher was written by a feature list of {len(stated)} {entry}s where the {layer} "
+            f"encoding now has {len(expected)}, so fitting to it would produce a network reading every feature "
+            f"in the wrong place")
+    _stated_recipe(row, layer, where)
+
+
+def _stated_recipe(row: dict, layer: str, where: str) -> None:
+    """Holds a line that states the names of the slots to be stating the recipe those slots were filled by as well.
+
+    The names cannot see a slot that kept its name and changed what it holds, and a teacher is exactly where that is invisible: every state in the file is a row of numbers already computed, so nothing below the head can be re-derived and checked. A file that states no recipe was written before a head carried one and has to be collected again — there is no avowal here as there is for a set of parameters, and the asymmetry is deliberate. A set of parameters is the output of a run and cannot be remade without repeating it; a teacher is a recording of a rule that is still standing in this tree, and collecting it again asks the same rule the same questions.
+    """
+    stated = row.get("recipe")
+    wanted = feature_recipe(layer)
+    if not isinstance(stated, str) or not stated:
+        raise TeacherMismatch(
+            f"{where}: this file states what its slots are called but not the recipe they were filled by, so "
+            f"nothing in it says whether a slot has kept its name and changed what it holds; it was collected "
+            f"before a head said so and has to be collected again")
+    if stated != wanted:
+        raise TeacherMismatch(
+            f"{where}: this teacher was written by a different recipe — the names of its slots are the "
+            f"{layer} encoding's, but the code that filled them digests to {stated} where this tree's digests "
+            f"to {wanted}, so at least one slot holds a different quantity than it did when this was collected")
 
 
 def _row(line: str, where: str) -> dict:

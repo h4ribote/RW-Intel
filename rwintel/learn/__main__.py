@@ -106,11 +106,10 @@ def _arena_seed(arguments, session) -> int:
 
 
 def _arena_options(arguments, order: Optional[str] = None, floor: Optional[float] = None,
-                   stall: Optional[int] = None) -> dict:
+                   stall: Optional[int] = None, separation: Optional[float] = None) -> dict:
     """The arena settings a run actually asked for, as keywords, so that everything unasked for stands at the figure the arena states rather than at a copy of it kept here."""
     options = _given(stall_ms=stall * 1000 if stall else None, imbalance_floor=floor,
-                     score=getattr(arguments, "score", None),
-                     separation=getattr(arguments, "separation", None))
+                     score=getattr(arguments, "score", None), separation=separation)
     if order is not None:
         options["decision_order"] = order
     return options
@@ -182,6 +181,16 @@ def _floors(arguments) -> list:
 def _stalls(arguments) -> list:
     """How long a fight may go without a casualty before it is called, in game seconds."""
     return _numbers(arguments.stall_seconds, "a stall time", whole=True, check=lambda value: value > 0)
+
+
+def _separations(arguments) -> list:
+    """How far apart the two sides are put down when a fight is drawn, in world units.
+
+    Comma separated and run as arms, for the reason the imbalance floor and the stall time are: a setting of the draw is a different instrument, and the only way to read two instruments against each other without also reading the machine, the hour and the seed is to run them as arms of one run. What that costs is that the arms are not paired — two separations draw different fights, so there is no shared draw to difference across — and what it buys is that each separation carries its own baseline, which is the figure any single arm of it is only readable beside.
+
+    This is the sharpest of the three. The arena's own figure is inside the gap the engine halts two converging forces in, which is what makes a fight begin at all and is also what leaves the departures least to decide: two forces already exchanging fire from the first period can only be held or pulled back. Put them down further apart and whether the fight happens is itself a departure's to settle.
+    """
+    return _numbers(arguments.separation, "a separation", whole=False, check=lambda value: value > 0.0)
 
 
 def _load(net, path: Optional[str], device) -> None:
@@ -334,14 +343,15 @@ def train_tactics(arguments) -> int:
                              session.instance, status_terminals=False, discount=discount)
 
     # One arena setting to a training run: a run whose arms differed would be training one policy on two arenas and reporting one number for it.
-    order, floor, stall = _orders(arguments)[0], _floors(arguments)[0], _stalls(arguments)[0]
+    order, floor = _orders(arguments)[0], _floors(arguments)[0]
+    stall, separation = _stalls(arguments)[0], _separations(arguments)[0]
 
     def arm(session):
         # Both sides script is how the arena itself is measured rather than a policy: it is the baseline a learnt layer has to beat, and it is the only setting in which what the arena produces says something about the arena rather than about whatever the policy currently happens to do.
         ours = None if arguments.script else learnt
         return Arena(session, tactics=ours, seed=_arena_seed(arguments, session),
                      **_given(outcome_weight=arguments.outcome_weight),
-                     **_arena_options(arguments, order, floor, stall),
+                     **_arena_options(arguments, order, floor, stall, separation),
                      opponent=None if (arguments.script or arguments.script_opponent) else learnt)
 
     journal = Journal(arguments.record or default_path("tactics"))
@@ -447,26 +457,32 @@ def duel(arguments) -> int:
 
         policies.append((f"duel-always-{pinned.name.lower()}", fixed))
 
-    def build(policy, order: str, floor: Optional[float], stall: Optional[int]):
+    def build(policy, order: str, floor: Optional[float], stall: Optional[int],
+              separation: Optional[float]):
         def arm(session):
             # The opponent is left unnamed, which is what puts the handwritten layer on the other side of every fight. That is the thing being measured against, so it is not something this run offers a choice about.
             return Arena(session, tactics=policy, seed=_arena_seed(arguments, session),
-                         **_arena_options(arguments, order, floor, stall))
+                         **_arena_options(arguments, order, floor, stall, separation))
 
         return arm
 
-    orders, floors, stalls = _orders(arguments), _floors(arguments), _stalls(arguments)
+    orders, floors = _orders(arguments), _floors(arguments)
+    stalls, separations = _stalls(arguments), _separations(arguments)
 
-    def named(side: str, order: str, floor: Optional[float], stall: Optional[int]) -> str:
+    def named(side: str, order: str, floor: Optional[float], stall: Optional[int],
+              separation: Optional[float]) -> str:
         # Named after whatever is actually varying across the arms, so that a plain measurement keeps the two names the journal has always used and a comparison of arena settings says which setting each arm was.
         return (side + (f"-{order}" if len(orders) > 1 else "")
                 + (f"-floor{floor:g}" if len(floors) > 1 and floor is not None else "")
-                + (f"-stall{stall:d}" if len(stalls) > 1 and stall is not None else ""))
+                + (f"-stall{stall:d}" if len(stalls) > 1 and stall is not None else "")
+                + (f"-sep{separation:g}" if len(separations) > 1 and separation is not None else ""))
 
     # The policies' sides and the baseline's side of the comparison. A run with nothing loaded is the baseline alone, which is how the arena itself is measured; a run with a policy takes both unless the baseline was explicitly declined.
     sides = list(policies) + ([("duel-baseline", None)] if not policies or arguments.baseline else [])
-    arms = [(named(side, order, floor, stall), build(policy, order, floor, stall))
-            for order in orders for floor in floors for stall in stalls for side, policy in sides]
+    arms = [(named(side, order, floor, stall, separation),
+             build(policy, order, floor, stall, separation))
+            for order in orders for floor in floors for stall in stalls
+            for separation in separations for side, policy in sides]
     # The baseline is written down as the baseline. It is a different quantity from a policy's score rather than a run of it that happens to have scored nought, and the likeliest way to confuse the two is to have journalled them under one name. Under one journal that is the arm each episode carries; the file is named for what the run was for.
     baselines = {name for name, _ in arms if name.startswith("duel-baseline")}
     journal = Journal(arguments.record or default_path("duel" if arguments.load else "duel-baseline"))
@@ -809,7 +825,7 @@ def collect(arguments) -> int:
                                                                     status_terminals=False),
                          seed=_arena_seed(arguments, session),
                          **_arena_options(arguments, _orders(arguments)[0], _floors(arguments)[0],
-                                          _stalls(arguments)[0]))
+                                          _stalls(arguments)[0], _separations(arguments)[0]))
 
         episode = _episode(arguments, arena=True)
     else:
@@ -842,13 +858,14 @@ def _write_steps(steps, path: Optional[str], layer: str) -> None:
     import json
     import os
 
-    from .imitation import feature_names
+    from .imitation import feature_names, feature_recipe
 
     directory = os.path.dirname(os.path.abspath(path))
     if directory:
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as out:
-        out.write(json.dumps({"layer": layer, "encoding": list(feature_names(layer))},
+        out.write(json.dumps({"layer": layer, "encoding": list(feature_names(layer)),
+                              "recipe": feature_recipe(layer)},
                              separators=(",", ":")) + "\n")
         for step in steps:
             out.write(json.dumps({"state": [round(v, 5) for v in step.state], "action": step.action,
@@ -942,12 +959,13 @@ def main(argv=None) -> int:
     parser.add_argument("--stall-seconds", default=None,
                         help="game seconds a fight may go without a casualty before the arena calls it, "
                              "which is how decisive its fights are. Comma separated, they run as arms")
-    parser.add_argument("--separation", type=float, default=None,
+    parser.add_argument("--separation", default=None,
                         help="world units between the two sides when a fight is put down. The arena's own figure "
                              "is inside the gap the engine halts two converging forces in, which is what makes a "
                              "fight begin at all; a larger one puts the departures rather than the exchange in "
                              "charge of the fight, and is how much of the score the tactical choice can move at "
-                             "all is asked. A run that moves it is a different instrument")
+                             "all is asked. Comma separated, they run as arms, and each carries its own baseline "
+                             "because a run that moves it is a different instrument")
     parser.add_argument("--imbalance-floor", default=None,
                         help="the weaker side's smallest share of the stronger when a fight is drawn. Lower "
                              "draws more lopsided fights, which are more decisive. Comma separated, they run "
