@@ -9,16 +9,15 @@ The action spaces are exactly the ones the script layers already emit, which is 
 
 from __future__ import annotations
 
-import hashlib
 import math
 import sys
-from enum import Enum
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..wire import REGION_SLOTS, SQUAD_SLOTS, Deviation, RegionState, Stance, Status, Task
 from ..control.policy.contracts import DOCTRINES, Doctrine, Posture, Role, SquadRecord
 from ..control.policy.strategy import INCOME_PLATEAU_FLOOR
 from ..control.policy.view import Sighting, WorldView
+from .recipe import digest
 
 #: World units a distance is quoted against. Regions are agglomerated at 400 and a match is fought over a few thousand, so this puts an ordinary march near one.
 DISTANCE_SCALE = 2000.0
@@ -489,76 +488,11 @@ def squad_mask(squads: Sequence[SquadRecord], base: int = 0) -> List[float]:
 #
 # A feature list says what the slots are CALLED. It cannot say what they hold, and the difference is not academic: the strategic cut once read our fighting strength against the enemy's whole side, buildings and builders included, and the day that was corrected to fighters against fighters, the feature stayed named `military_edge` and every list stayed byte for byte identical. Parameters fitted the day before loaded in silence and read a quantity that had changed underneath them. That is the one failure the list was written down to catch and the one it structurally cannot.
 #
-# So a cut states the recipe as well as the names. The recipe is a digest of the code that turns a board into those numbers — the entry point for the layer, everything in this module it reaches, and every module-level figure any of them reads — so that changing what a slot holds retires the parameters fitted to the old holding, exactly as changing what it is called does.
-#
-# Two limits, and both are stated rather than worked around. **Prose does not count**: a function's docstring is skipped, because the docstrings here are the bulk of the file and a stamp that turned every explanation into a retirement would be one nobody could keep. **And the digest reaches only this module**: a quantity can change meaning further out, in the view the features are read off or in what the game reports, and no digest taken here would move. The recipe narrows the hole to changes made outside the cut; it does not close it.
-
-def _code_digest(code, docstring: Optional[str] = None) -> str:
-    """One code object as a digest of what it does rather than of how it reads.
-
-    The instructions, the names it touches and the constants it carries. Its own prose is left out where the caller knows what that prose is, and a nested code object — a comprehension, a lambda — is digested the same way, since that is where a fair share of the arithmetic in this module actually lives.
-    """
-    parts = [code.co_name, str(code.co_argcount), code.co_code.hex(),
-             ",".join(code.co_names), ",".join(code.co_varnames)]
-    for index, constant in enumerate(code.co_consts):
-        if index == 0 and docstring is not None and constant == docstring:
-            continue
-        if hasattr(constant, "co_code"):
-            parts.append(_code_digest(constant))
-        else:
-            parts.append(repr(constant))
-    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
-
-
-def _value_digest(value) -> str:
-    """A module-level figure as text that says the same thing on every run.
-
-    Written out rather than left to `repr`, and the reason is that a digest which changed from one run to the next would retire every set of parameters every time anything loaded them. A container built out of hashed keys does not repr in a fixed order, and one of the tables this module reads is exactly that, so the orders are settled here by sorting.
-
-    What is not a number, a name, a container or an enumerated member is digested as its kind alone. That is deliberate and it is the recipe's second limit: a table of rules defined in another module is named as a table and not as its contents, so a change made there is a change made outside the cut and is not caught here.
-    """
-    if isinstance(value, bool) or value is None or isinstance(value, (int, float, str, bytes)):
-        return repr(value)
-    if isinstance(value, Enum):
-        return "%s.%s" % (type(value).__name__, value.name)
-    if isinstance(value, (tuple, list)):
-        return "[%s]" % ",".join(_value_digest(item) for item in value)
-    if isinstance(value, (set, frozenset)):
-        return "{%s}" % ",".join(sorted(_value_digest(item) for item in value))
-    if isinstance(value, dict):
-        return "{%s}" % ",".join(sorted("%s:%s" % (_value_digest(key), _value_digest(item))
-                                        for key, item in value.items()))
-    return type(value).__name__
-
-
-def _recipe(*entries: str) -> str:
-    """What a layer's cut is made of, as one short digest.
-
-    Walked from the entry points outward rather than taken over the whole module, so that the three cuts retire separately: a change to the tactical bearing must not throw away operational parameters that never read it. What the walk follows is the names a function actually touches, which catches a helper rewritten under an unchanged caller; what it stops at is anything this module does not define, which is where the built-ins and the imported types are and where the limit stated above begins.
-
-    Module-level figures are digested by their value, because a scale is part of what a slot holds: a distance quoted against two thousand and the same distance quoted against three thousand are two different features wearing one name.
-    """
-    module = sys.modules[__name__]
-    seen: set = set()
-    queue: List[str] = list(entries)
-    parts: List[str] = []
-    while queue:
-        name = queue.pop(0)
-        if name in seen or not hasattr(module, name):
-            continue
-        seen.add(name)
-        value = getattr(module, name)
-        code = getattr(value, "__code__", None)
-        if code is None:
-            parts.append("%s=%s" % (name, _value_digest(value)))
-            continue
-        parts.append("%s:%s" % (name, _code_digest(code, getattr(value, "__doc__", None))))
-        queue.extend(sorted(set(code.co_names)))
-    return hashlib.sha256("\n".join(sorted(parts)).encode("utf-8")).hexdigest()[:16]
-
+# So a cut states the recipe as well as the names. The machinery is in `recipe.py` along with the three limits it comes with; here are only the entry points, one set per layer, so that the three cuts retire separately.
 
 #: The recipe each layer's parameters are stamped with beside its feature list. Computed at import from the code above, so it is never a figure anybody maintains by hand and can never fall behind what the cut actually does.
-TACTICAL_RECIPE = _recipe("tactical_state")
-STRATEGIC_RECIPE = _recipe("strategic_state")
-OPERATIONAL_RECIPE = _recipe("operational_state", "operational_slots", "squad_slots",
-                             "region_mask", "task_mask", "squad_mask")
+TACTICAL_RECIPE = digest([sys.modules[__name__]], ["tactical_state"])
+STRATEGIC_RECIPE = digest([sys.modules[__name__]], ["strategic_state"])
+OPERATIONAL_RECIPE = digest([sys.modules[__name__]],
+                            ["operational_state", "operational_slots", "squad_slots",
+                             "region_mask", "task_mask", "squad_mask"])

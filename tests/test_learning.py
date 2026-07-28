@@ -76,7 +76,8 @@ from rwintel.learn.encoding import (
     tactical_state,
     task_mask,
 )
-from rwintel.learn.imitation import Sample, TeacherMismatch, feature_recipe, fit, read_teacher
+from rwintel.learn.imitation import (Sample, TeacherMismatch, feature_recipe, fit, read_teacher,
+                                     rule_recipe)
 from rwintel.learn.frozen import frozen_layers
 from rwintel.learn.layers import LearntOperations, LearntStrategy, LearntTactics
 from rwintel.learn.net import (
@@ -1628,7 +1629,8 @@ def test_a_teacher_written_by_a_different_feature_list_is_refused_rather_than_fi
     """
     assert "decision 0" in _refusal(TeacherMismatch, fit, [Sample(state=[0.0] * (TACTICAL_SIZE - 1), action=0)])
 
-    stated = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES), "recipe": TACTICAL_RECIPE}
+    stated = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES), "recipe": TACTICAL_RECIPE,
+              "rule": rule_recipe(TACTICAL)}
     decision = {"state": [0.0] * TACTICAL_SIZE, "action": 0}
     with tempfile.TemporaryDirectory() as folder:
         refusal = _refusal(TeacherMismatch, read_teacher, _teacher(folder, decision))
@@ -1704,7 +1706,17 @@ def test_a_teacher_whose_slots_kept_their_names_and_changed_what_they_hold_is_re
         assert "different recipe" in refusal and STRATEGIC_RECIPE in refusal
 
         whole = dict(named, recipe=STRATEGIC_RECIPE)
-        assert len(read_teacher(_teacher(folder, whole, decision), "strategy")) == 1
+        refusal = _refusal(TeacherMismatch, read_teacher,
+                           _teacher(folder, whole, decision), "strategy")
+        assert "which rule chose the actions" in refusal and "collected again" in refusal
+
+        other = dict(whole, rule="0123456789abcdef")
+        refusal = _refusal(TeacherMismatch, read_teacher,
+                           _teacher(folder, other, decision), "strategy")
+        assert "different rule" in refusal and rule_recipe(STRATEGIC) in refusal
+
+        both = dict(whole, rule=rule_recipe(STRATEGIC))
+        assert len(read_teacher(_teacher(folder, both, decision), "strategy")) == 1
 
 
 def test_an_operational_teacher_is_refused_by_the_block_that_moved_and_not_by_a_slot_of_its_state():
@@ -1716,7 +1728,7 @@ def test_an_operational_teacher_is_refused_by_the_block_that_moved_and_not_by_a_
     assert moved in OPERATIONAL_FEATURES, "the block this test renames has itself been renamed"
     decision = {"state": [0.0] * OPERATIONAL_SIZE, "action": 0, "second": 0}
     head = {"layer": "operations", "encoding": list(OPERATIONAL_FEATURES),
-            "recipe": OPERATIONAL_RECIPE}
+            "recipe": OPERATIONAL_RECIPE, "rule": rule_recipe(OPERATIONAL)}
 
     with tempfile.TemporaryDirectory() as folder:
         renamed = dict(head, encoding=["region.range" if name == moved else name
@@ -1738,7 +1750,8 @@ def test_an_operational_teacher_is_refused_by_the_block_that_moved_and_not_by_a_
             "the width of the state was quoted as though it were the length of the list: " + said)
 
         # And the tactical list, whose names are one per number, is quoted as features.
-        head = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES), "recipe": TACTICAL_RECIPE}
+        head = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES), "recipe": TACTICAL_RECIPE,
+            "rule": rule_recipe(TACTICAL)}
         renamed = dict(head, encoding=["target_dx" if name == "target_ahead_of_home" else name
                                        for name in TACTICAL_FEATURES])
         refusal = _refusal(TeacherMismatch, read_teacher,
@@ -1751,7 +1764,8 @@ def test_two_collecting_runs_joined_into_one_teacher_are_read_and_re_checked_at_
 
     Three things happen there. The join reads back whole, which is what it did before a file stated anything and has to go on doing. The second head is CHECKED rather than waved through, because it is the only line in the file that says whether the two halves were collected under the same encoding — a join across an encoding change is two different readings of the board in one file, and fitting to it produces a network that is wrong about half of what it saw. And a line that is neither a decision nor a head is refused by name and line like everything else malformed here, rather than surfacing as a missing key from somewhere inside the reader with nothing said about which file it came from.
     """
-    head = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES), "recipe": TACTICAL_RECIPE}
+    head = {"layer": "tactics", "encoding": list(TACTICAL_FEATURES), "recipe": TACTICAL_RECIPE,
+            "rule": rule_recipe(TACTICAL)}
     decision = {"state": [0.0] * TACTICAL_SIZE, "action": 0}
     with tempfile.TemporaryDirectory() as folder:
         joined = _teacher(folder, head, decision, decision, head, decision, decision)
@@ -1870,24 +1884,26 @@ def test_the_handwritten_layer_reaches_the_two_added_departures():
     assert departure(tanks_only, _squad(status=Status.ACTIVE, losses=0.0)) == Deviation.FOCUS
 
 
-def test_the_handwritten_layer_closes_when_it_cannot_shoot_back():
-    """The departure the set was missing, and the rung the ladder reaches it on.
+def test_the_handwritten_layer_stands_rather_than_closing_when_it_cannot_shoot_back():
+    """The departure the ladder was given for this board, and then measured out of it again.
 
-    The engine halts a unit when it acquires a target and acquisition happens at sight range, while shooting needs weapon range, so two forces walking at each other come to rest in the gap between the two. A squad that outranges what is shooting at it keeps that gap, which is kiting. A squad that is outranged stands in it and is shot at without ever firing, and every departure the set had before this one leaves it there: withdrawing abandons the errand, holding leaves the engine's own halt in force, and concentrating is refused outright because the rule that picks a target only counts enemies already inside our reach.
+    The engine halts a unit when it acquires a target and acquisition happens at sight range, while shooting needs weapon range, so two forces walking at each other come to rest in the gap between the two. A squad that outranges what is shooting at it keeps that gap, which is kiting. A squad that is outranged stands in it and is shot at without ever firing, and the argument for closing was that nothing else in the set answers that: withdrawing abandons the errand, holding leaves the engine's own halt in force, and concentrating is refused outright because the rule that picks a target only counts enemies already inside our reach.
 
-    That last point is why closing has to be tried before concentrating rather than after. With nothing in reach the concentration test is false, so a ladder that asked it first would fall through to holding — which is standing still under fire, the one answer that is certainly wrong.
+    The argument was right about the board and wrong about the answer. The ladder against itself with this branch taken away on one side stands +0.0675 with two standard errors of 0.0254 over 1,081 paired fights, where claiming that difference takes 153: walking in on a squad that is outranged is walking into the fire it could not answer, and standing there is cheaper. So the ladder answers this board with holding, which is what it answered before the departure existed, and the departure stays in the action space for a layer that can tell where it is right.
     """
     tactics = Tactics(None, _CATALOGUE)
 
-    def departure(view, squad):
-        return tactics._departure(squad, [s for s in view.ours], [s for s in view.enemies],
-                                  squad.losses, _Track())
+    def departure(view, squad, layer=None):
+        return (layer or tactics)._departure(squad, [s for s in view.ours], [s for s in view.enemies],
+                                             squad.losses, _Track())
 
     ours = [_unit(1, 100, 100), _unit(2, 120, 100), _unit(3, 140, 100)]
     place = [_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)]
     # Our tanks reach 130 and the gun reaches 320, and it stands 200 out from the squad's centre: it can shoot and we cannot.
     outranged = _view(ours + [_unit(9, 320, 100, type_index=1, hostile=1)], place)
-    assert departure(outranged, _squad(status=Status.ACTIVE, losses=0.0)) == Deviation.CLOSE
+    assert departure(outranged, _squad(status=Status.ACTIVE, losses=0.0)) == Deviation.HOLD
+    # And the move itself is still in the space, which is what the pinned arm and every learnt layer reach for.
+    assert Deviation.CLOSE in tuple(Deviation)
 
     # The same fight with the gun inside our own reach is a fight we can answer where we stand, and the ladder answers it as it always did.
     engaged = _view(ours + [_unit(9, 220, 100, type_index=1, hostile=1),
@@ -2059,21 +2075,27 @@ def test_the_ladder_with_one_branch_taken_away_falls_through_rather_than_answeri
     """
     from rwintel.learn.__main__ import _withheld
 
-    view, squad = _skirmish(), _squad()
+    ours = [_unit(1, 100, 100), _unit(2, 120, 100), _unit(3, 140, 100)]
+    place = [_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)]
+    # A gun inside our own reach with a tank beside it: a fight this squad can answer where it stands.
+    board = _view(ours + [_unit(9, 220, 100, type_index=1, hostile=1),
+                          _unit(10, 200, 130, type_index=0, hostile=1)], place)
+    squad = _squad(status=Status.ACTIVE, losses=0.0)
+
+    def departure(layer):
+        return layer._departure(squad, list(board.ours), list(board.enemies), squad.losses, _Track())
+
     whole = LearntTactics(None, _CATALOGUE, None, rollout=None, instance=0)
-    chosen, _ = whole.decide(view, [squad], 21000)
-    answered = chosen[0].deviation
+    answered = departure(whole)
+    assert answered is Deviation.FOCUS_THREAT
 
     lessened = LearntTactics(None, _CATALOGUE, None, rollout=None, instance=0, withhold=(answered,))
-    after, _ = lessened.decide(view, [squad], 21000)
-    assert after[0].deviation != answered, "the branch that answered was not taken away"
+    assert departure(lessened) != answered, "the branch that answered was not taken away"
     assert whole.withhold == frozenset() and lessened.withhold == {answered}
 
     # Taking away every departure leaves the ladder at the one that is not a departure at all.
-    nothing = LearntTactics(None, _CATALOGUE, None, rollout=None, instance=0,
-                            withhold=tuple(Deviation))
-    left, _ = nothing.decide(view, [squad], 21000)
-    assert left[0].deviation is Deviation.HOLD
+    nothing = LearntTactics(None, _CATALOGUE, None, rollout=None, instance=0, withhold=tuple(Deviation))
+    assert departure(nothing) is Deviation.HOLD
 
     class _Asked:
         without = "close, kite"
@@ -2553,6 +2575,31 @@ def test_a_slot_that_changed_what_it_holds_retires_the_parameters_fitted_to_the_
             assert frozen.build is not None
         finally:
             frozen.batcher.stop()
+
+
+def test_the_three_rules_digest_apart_and_a_change_to_one_leaves_the_others_alone():
+    """A teacher records a rule as much as it records an encoding, and the rule is the half nothing could state.
+
+    The three layers' rules are walked from their own deciding entry points, so a change to one does not retire the other two's teachers. What is deliberately outside the walk is the reporting half of each layer: a teacher records the choice, so what has to be digested is what makes the choice.
+    """
+    from rwintel.learn.recipe import digest, rule_digests
+    from rwintel.control.policy import tactics as tactics_module
+
+    rules = rule_digests()
+    assert set(rules) == {"tactics", "operations", "strategy"}
+    assert len(set(rules.values())) == 3, "three rules that digest alike are three that retire together"
+    assert all(len(value) == 16 for value in rules.values())
+    # Twice in one process is twice the same answer, which is what a stamp anything checks has to be.
+    assert rule_digests() == rules
+
+    # And the walk reaches the helpers rather than stopping at the entry: taking the ladder's own gate away
+    # moves the digest, though `_departure` reaches it only by name.
+    class _Ungated(tactics_module.Tactics):
+        def _allowed(self, departure):
+            return True
+
+    moved = digest([_Ungated, tactics_module], ["_departure"])
+    assert moved != rules["tactics"], "a helper rewritten under an unchanged caller has to move the digest"
 
 
 def _unstamped(net, path):

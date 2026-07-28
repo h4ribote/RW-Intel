@@ -154,9 +154,9 @@ class Tactics:
 
         Breaking off comes first because everything below it is a way of fighting better and none of them helps a fight that should not go on. Scattering comes next because an area weapon on a bunched squad is the fastest way to lose one. Kiting before concentrating because a range advantage is worth more than a focused volley and the two want opposite positions. Concentrating last, as the thing to do when the fight is worth having on the ground it is on.
 
-        Closing sits between kiting and concentrating, and the pair of tests either side of it is the whole of the reasoning. A squad that out-reaches what is shooting at it keeps that difference, which is kiting. A squad with nothing inside its own reach cannot answer at all — it is being shot at from beyond where it can shoot back, which is where the engine's own advance leaves two forces standing, since a unit halts when it acquires a target and acquisition happens further out than shooting does. Neither withdrawing nor holding fixes that: one leaves the errand and the other leaves the halt in force. Walking in does, and nothing else in the set does.
+        Closing is NOT here, and it was, and the reason it is not is a measurement. It sat between kiting and concentrating on this argument: a squad with nothing inside its own reach cannot answer at all, since a unit halts when it acquires a target and acquisition happens further out than shooting does, so two converging forces come to rest in a gap where neither withdrawing nor holding fixes anything and only walking in does. The argument was right about the board and wrong about the answer. Measured on the ladder's own decisions — the ladder against itself, with this branch taken away on one side — taking it away is worth +0.0675 with two standard errors of 0.0254 over 1,081 paired fights, where claiming that difference takes 153. Walking in on a squad that is outranged is walking into the fire it could not answer, and standing there is cheaper.
 
-        It has to come before concentrating rather than after, and not by preference: the rule that decides whether concentrating is worth it only counts enemies already inside our reach, so with nothing inside it that test is false and the ladder would fall through to holding — which is precisely standing still under fire.
+        Two things follow and both are worth stating here. The departure is still in the action space, and a learnt layer still answers with it on about a seventh of its boards, so what is removed is this ladder's condition for it and not the move. And this ladder is not the best constant policy either: with the branch gone it stands +0.0281 with two standard errors of 0.0238 above always holding, which is the first measurement in this project that choosing the departure from the board is worth more than always taking the best single one.
 
         Two of the departures also carry the choice a rule on the game side used to make on their behalf. A withdrawal is the short step back that repositions a squad, unless the squad is being destroyed, when it is the whole way out of the fight. A concentration goes onto the weakest enemy, unless a longer-ranged one is close enough to shoot at, when it goes onto that: the gun that out-reaches the squad does the most damage and dies to a focused volley like anything else.
         """
@@ -170,8 +170,6 @@ class Tactics:
             return Deviation.SPREAD
         if self._out_ranges(members, threats) >= KITE_RANGE_MARGIN and self._allowed(Deviation.KITE):
             return Deviation.KITE
-        if not self._anything_in_reach(members, threats) and self._allowed(Deviation.CLOSE):
-            return Deviation.CLOSE
         if self._worth_concentrating(members, threats):
             focused = (Deviation.FOCUS_THREAT if self._long_range_in_reach(members, threats)
                        else Deviation.FOCUS)

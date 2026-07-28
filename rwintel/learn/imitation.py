@@ -40,9 +40,13 @@ from .encoding import (
     TACTICAL_SIZE,
 )
 from .net import OperationalNet, StrategicNet, TacticalNet, entropy, one_hot_slot
+from .recipe import rule_digests
 from .policy import LAYERS, OPERATIONAL, STRATEGIC, TACTICAL
 
 log = logging.getLogger(__name__)
+
+#: What each layer's handwritten rule digests to in this tree, computed once at import.
+_RULES = rule_digests()
 
 #: How much of each label is held back from the action the teacher chose and shared out over the ones it was allowed to choose instead. Small, and the difference between a policy that can still be argued with and one that cannot: the script is a function rather than a distribution, so a fit with nothing held back converges to certainty about boards it has seen a handful of.
 SMOOTHING = 0.05
@@ -144,6 +148,18 @@ def widths(layer: str) -> Tuple[int, int, int]:
         return OPERATIONAL_SIZE, OPERATIONAL_REGIONS, OPERATIONAL_TASKS
     if layer == STRATEGIC:
         return STRATEGIC_SIZE, STRATEGIC_ACTIONS, 0
+    raise ValueError(_no_such_layer(layer))
+
+
+def rule_recipe(layer: str) -> str:
+    """The digest of the handwritten rule that answered a teacher's boards.
+
+    The other half of what a teacher is. The feature list and the encoding recipe between them say what the numbers in a decision MEAN; neither says which rule chose the action beside them, and a teacher is a recording of a rule. The eighth tactical departure is the case that made it matter: the ladder answered a fifth of its boards by walking in on a squad that was outranged, that was measured to cost it 0.0675 of a fight and taken out, and a teacher recorded the day before states exactly what one recorded the day after states. Fitting to the older file produces a network imitating a rule that no longer exists, and reports a perfectly ordinary accuracy for doing it.
+    """
+    return _RULES[layer] if layer in _RULES else _no_such_layer_raised(layer)
+
+
+def _no_such_layer_raised(layer: str):
     raise ValueError(_no_such_layer(layer))
 
 
@@ -369,6 +385,7 @@ def _stated_encoding(row: dict, layer: str, where: str) -> None:
             f"encoding now has {len(expected)}, so fitting to it would produce a network reading every feature "
             f"in the wrong place")
     _stated_recipe(row, layer, where)
+    _stated_rule(row, layer, where)
 
 
 def _stated_recipe(row: dict, layer: str, where: str) -> None:
@@ -388,6 +405,27 @@ def _stated_recipe(row: dict, layer: str, where: str) -> None:
             f"{where}: this teacher was written by a different recipe — the names of its slots are the "
             f"{layer} encoding's, but the code that filled them digests to {stated} where this tree's digests "
             f"to {wanted}, so at least one slot holds a different quantity than it did when this was collected")
+
+
+def _stated_rule(row: dict, layer: str, where: str) -> None:
+    """Holds a line that states the encoding to be stating the rule that answered under it as well.
+
+    A teacher records two things and the head has to say both. What the numbers mean is the encoding; what the action beside them was chosen by is the rule, and nothing in the file could say which. A rule that changed is not a smaller matter than an encoding that changed: fitting to a recording of a rule that has been measured out of the tree produces a network imitating something no longer there, and the reinforcement run after it starts from that.
+
+    Refused rather than avowable, for the reason the encoding recipe is: a teacher is a recording of a rule that is still standing here, and collecting it again asks the same rule the same questions.
+    """
+    stated = row.get("rule")
+    wanted = rule_recipe(layer)
+    if not isinstance(stated, str) or not stated:
+        raise TeacherMismatch(
+            f"{where}: this file states what its numbers mean but not which rule chose the actions beside "
+            f"them, so nothing in it says whether the {layer} rule has moved since; it was collected before "
+            f"a head said so and has to be collected again")
+    if stated != wanted:
+        raise TeacherMismatch(
+            f"{where}: this teacher was written by a different rule — the {layer} ladder that answered its "
+            f"boards digests to {stated} where this tree's digests to {wanted}, so fitting to it would "
+            f"produce a network imitating a rule that is no longer here")
 
 
 def _row(line: str, where: str) -> dict:

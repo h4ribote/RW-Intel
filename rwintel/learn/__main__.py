@@ -888,14 +888,14 @@ def _write_steps(steps, path: Optional[str], layer: str) -> None:
     import json
     import os
 
-    from .imitation import feature_names, feature_recipe
+    from .imitation import feature_names, feature_recipe, rule_recipe
 
     directory = os.path.dirname(os.path.abspath(path))
     if directory:
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as out:
         out.write(json.dumps({"layer": layer, "encoding": list(feature_names(layer)),
-                              "recipe": feature_recipe(layer)},
+                              "recipe": feature_recipe(layer), "rule": rule_recipe(layer)},
                              separators=(",", ":")) + "\n")
         for step in steps:
             out.write(json.dumps({"state": [round(v, 5) for v in step.state], "action": step.action,
