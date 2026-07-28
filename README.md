@@ -155,7 +155,7 @@ python -m rwintel.control --instances 2 --paired --opponents 0 --map Lake --max-
 .\tools\windows\Start-RwPairedMatch.ps1 -Speed 10
 ```
 
-学習の実行である。`python -m rwintel.learn` は最初の語で実行の種類を選び、`tactics` `operations` `collect` `clone` `duel` `avow` の六つがある。戦術層は試合を回さず交戦アリーナの中で学習させ、作戦層は通常のスキルミッシュで乱入者を入れて回す。`collect` は決定器を渡さずに走らせて、スクリプトの決定を教師データとして書き出す。`avow` はゲームに触れず、特徴の並びを名乗っていないパラメータの一式に、どの符号化に当てたものかという人間の言い分を理由の文ごと書き込む——刻印を持たない古いファイルを使う唯一の道であり、以後どの読み込み口も「これは当てはめの記録ではなく人の言葉である」と毎回言う。
+学習の実行である。`python -m rwintel.learn` は最初の語で実行の種類を選び、`tactics` `operations` `strategy` `collect` `clone` `choices` `duel` `avow` の八つがある。**三層すべてが学習できる。** 戦術層は試合を回さず交戦アリーナの中で学習させ、作戦層と戦略層は通常のスキルミッシュで乱入者を入れて回す。`collect` は決定器を渡さずに走らせて、スクリプトの決定を教師データとして書き出す。**`choices` と `clone` と `avow` はゲームに触れない。** `choices` は、書き出された盤面の上で複数のパラメータに確率最大で答えさせ、どの行動をどれだけ選ぶかを教師の分布と並べて出す——**成績は「実行が動いたか」を言い、これは「方策が動いたか」を言う。二つは別の問いである。** `avow` は、名乗るべきものを名乗っていないパラメータの一式に、どの符号化に当てたものかという人間の言い分を理由の文ごと書き込む——刻印の無い古いファイルを使う唯一の道であり、以後どの読み込み口も「これは当てはめの記録ではなく人の言葉である」と毎回言う。**足せるだけで、上書きはできない。**
 
 ```powershell
 python -m rwintel.learn tactics --instances 4 --save local\tactics.pt
@@ -178,6 +178,7 @@ tools/macos/learn-run.sh --count 4 --speed 10 -- \
 ```powershell
 python -m rwintel.learn clone --layer tactics --teacher local\teacher.jsonl --save local\tactics-bc.pt
 python -m rwintel.learn tactics --instances 8 --load local\tactics-bc.pt --warmup 5 --save local\tactics.pt
+python -m rwintel.learn choices --layer tactics --teacher local\teacher.jsonl --load local\tactics-bc.pt,local\tactics.pt
 ```
 
 `duel` は学習せずに測る実行で、こちら側に読み込んだ網、相手側にスクリプト戦術層を置いて交戦の成績を取る。**`--load` を渡した決闘は、両側スクリプトの基準線アームを既定で同時に取る。** 二つのアームは同じ交戦を戦うので、報告は交戦ごとに対にした差も出す。**成績は反対称なので基準線の平均は 0 でなければならず、0 から離れていればアリーナがその乱数種で盤面の片側に有利ということになる。** アリーナがどちらへ傾くかは種の性質なので、**同じ種の基準線を引かずに方策の生値を読んではならない。**
@@ -204,17 +205,20 @@ python -m rwintel.learn.ops_compare local\ops-eval-learnt.jsonl local\ops-eval-p
 | 引数 | 実行 | 意味 |
 | --- | --- | --- |
 | `--instances` / `--episodes` | `clone` 以外 | 接続するゲームの数と、1 インスタンスあたりのエピソード数 |
-| `--load` | `tactics` `operations` `clone` `duel` `avow` | 開始時に読むパラメータ。**`duel` だけは読み先が無ければ異常終了する**。学習の実行は新しい方策から始める。**`avow` では書き込む先で、コンマで並べれば複数を一度に扱う。** どの読み込み口も、名乗る特徴の並びが今のものでないファイルを拒む |
-| `--save` | `tactics` `operations` `clone` | 終了時に書くパラメータ |
-| `--layer` | `collect` `clone` `avow` | どちらの層を記録するか、写すか、言い分を書き込むか。**`avow` だけは既定を持たず、言わなければ拒む**——既定があれば、黙っているだけで違う層の特徴の並びが書き込まれうる |
-| `--because` | `avow` | その並びだと信じる理由。**必須である。** その一文が、書き込まれた並びを信じてよい唯一の証拠だからである |
-| `--teacher` / `--smoothing` / `--epochs` / `--patience` / `--keep-tainted` | `clone` | 教師データと、その当てはめ方 |
+| `--load` | `tactics` `operations` `strategy` `clone` `choices` `duel` `avow` | 開始時に読むパラメータ。**`duel` と `choices` は読み先が無ければ異常終了する**。学習の実行は新しい方策から始める。**`duel` `choices` `avow` はコンマで並べれば複数を一度に扱う。** どの読み込み口も、名乗る特徴の並びと、その並びを埋めたコードの digest が今のものでないファイルを拒む |
+| `--save` | `tactics` `operations` `strategy` `clone` | 終了時に書くパラメータ |
+| `--layer` | `collect` `clone` `choices` `avow` | どの層を記録するか、写すか、読むか、言い分を書き込むか。**`avow` だけは既定を持たず、言わなければ拒む**——既定があれば、黙っているだけで違う層の特徴の並びが書き込まれうる |
+| `--because` | `avow` | それだと信じる理由。**必須である。** その一文が、書き込まれた言い分を信じてよい唯一の証拠だからである |
+| `--teacher` | `clone` `choices` | 教師データ。`choices` はそこに書かれた盤面を、方策どうしを比べる共通の物差しとして使う |
+| `--smoothing` / `--epochs` / `--patience` / `--keep-tainted` | `clone` | 教師データの当てはめ方 |
 | `--script` / `--script-opponent` | `tactics` | アリーナの両側をスクリプトにする / 相手だけをスクリプトに固定する |
 | `--greedy` | `duel` | 方策 1 本につき「確率最大の行動で打つアーム」を**足す**。抽選のアームは運用時と同じものなので消えない。二つは同じ交戦を戦うので、抽選が課している税だけを切り出せる |
 | `--intruder` | `operations` | スクリプト乱入者を注入する。設計が学習と評価の両方で要求している |
 | `--record` / `--record-episodes` | `clone` 以外 | エピソード記録の書き出し先。`collect` だけは `--record` が決定列を指し、エピソード記録は `--record-episodes` に出る |
 | `--device` | `collect` 以外 | torch のデバイス。既定は CPU で、この大きさの網ではカードより 3 倍から 7 倍速い |
-| `--width` | `tactics` `clone` `duel` | 戦術網の 1 層あたりの隠れユニット数 |
+| `--width` | `tactics` `clone` `choices` `duel` | 戦術網および戦略網の 1 層あたりの隠れユニット数 |
+| `--pin` | `duel` | 逸脱を一つに固定したアームを足す。コンマで並べれば並べただけ立つ。**帯——決定が動かせる幅——はこれでしか読めない** |
+| `--separation` / `--stall-seconds` / `--imbalance-floor` | アリーナを使う実行 | 交戦の抽選の三つの設定。**コンマで並べればアームとして走り、それぞれが自分の基準線を持つ。** 学習の実行は最初の一つだけを使う——アームごとに違えば、一つの方策を二つのアリーナで訓練して一つの数字を報告することになる |
 | `--entropy` / `--learning-rate` | `tactics` `operations` `ops_train` | 方策をどれだけ一様さへ押すか、と最適化器の学習率。**構築作戦アリーナで最も良い層は `--entropy 0.0002`、すなわち既定の 10 分の 1 で、凍結した戦術層の下で 150 エピソード鍛えたものである** |
 | `--outcome-weight` | `tactics` | アリーナで交戦の成績を終端としてどれだけの重みで払うか |
 | `--score` | アリーナを使う実行 | 交戦の成績のどちらの読みを終端として払うか(`health` / `kills`)。既定は `health`。**決めるのは払う側だけで、報告はどちらの設定でも両方の読みで出る** |
