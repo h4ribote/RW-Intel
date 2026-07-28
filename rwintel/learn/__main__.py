@@ -877,6 +877,46 @@ def _write_steps(steps, path: Optional[str], layer: str) -> None:
     log.info("wrote %d decision(s) to %s", len(steps), path)
 
 
+def choices(arguments) -> int:
+    """Says what each of several sets of parameters would actually choose, on one fixed set of boards.
+
+    A score says whether a run moved. It does not say whether the POLICY moved, and the two are different questions with different fixes: a generation that scores the same as the one before it may be answering the same boards the same way, or may have moved a great deal of its mass and landed somewhere worth exactly as much. Read from a score alone the first reads as a learner that is stuck and the second as one that is looking in the wrong place, and this project spent weeks calling the tactical plateau the former. It is the latter. Three generations on one teacher: the share of boards answered `close` falls from 49 to 46 to 35 per cent while `hold` — which is the top of the measured band — never moves off 5, and the freed mass goes to `kite` and `focus`. The layer is unlearning the departure that is known to be harmful and putting the mass somewhere nobody has measured.
+
+    It starts no game and reads no arena. The boards are the ones a collecting run already wrote down, so this is arithmetic over a file and costs a few seconds.
+
+    Reported at the likeliest action, which is what a measurement run plays and where every ceiling this project quotes was taken, with the entropy of the distribution beside it because the two answer different halves of the question.
+    """
+    from .imitation import chosen, read_teacher, report_chosen
+    from .net import OperationalNet, StrategicNet, TacticalNet
+
+    import os
+
+    device = _device(arguments.device)
+    paths = [path.strip() for path in str(arguments.load or "").split(",") if path.strip()]
+    if not paths:
+        raise SystemExit("say which parameters to read, as in --load local/tactics-bc4.pt,local/tactics-close.pt")
+    if len(set(paths)) != len(paths):
+        raise SystemExit("the same parameters were named twice, and two rows cannot share a name")
+    samples = read_teacher(arguments.teacher or "local/teacher.jsonl", arguments.layer,
+                           keep_tainted=arguments.keep_tainted)
+    rows = []
+    for path in paths:
+        if not os.path.exists(path):
+            raise SystemExit("there are no parameters at %s to read" % path)
+        if arguments.layer == TACTICAL:
+            net = TacticalNet(**_given(width=arguments.width))
+        elif arguments.layer == STRATEGIC:
+            net = StrategicNet(**_given(width=arguments.width))
+        else:
+            net = OperationalNet()
+        net = net.to(device)
+        _load(net, path, device)
+        rows.append(chosen(samples, arguments.layer, net, os.path.splitext(os.path.basename(path))[0],
+                           device=device))
+    report_chosen(rows, samples, arguments.layer)
+    return 0
+
+
 # ---- imitating what the script does ---------------------------------------------------------
 
 def clone(arguments) -> int:
@@ -917,7 +957,7 @@ def main(argv=None) -> int:
             stream.reconfigure(errors="replace")
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("what", choices=["tactics", "operations", "strategy", "collect", "clone", "duel", "avow"])
+    parser.add_argument("what", choices=["tactics", "operations", "strategy", "collect", "clone", "choices", "duel", "avow"])
     parser.add_argument("--layer", default=None, choices=list(LAYERS),
                         help="which layer to collect, to clone or to avow. Collecting and cloning default to "
                              "the tactical layer; avowing has no default and must be told, because the width "
@@ -1059,6 +1099,8 @@ def main(argv=None) -> int:
         return train_strategy(arguments)
     if arguments.what == "clone":
         return clone(arguments)
+    if arguments.what == "choices":
+        return choices(arguments)
     if arguments.what == "duel":
         return duel(arguments)
     return collect(arguments)

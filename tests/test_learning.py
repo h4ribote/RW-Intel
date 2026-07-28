@@ -1645,6 +1645,45 @@ def test_a_teacher_written_by_a_different_feature_list_is_refused_rather_than_fi
         assert len(read_teacher(_teacher(folder, stated, decision, decision))) == 2
 
 
+def test_what_a_policy_would_choose_is_readable_off_a_teacher_without_starting_a_game():
+    """A score says whether a run moved; it does not say whether the policy moved, and the two have different fixes.
+
+    A generation that scores the same as the one before it may be answering the same boards the same way, or may have moved a great deal of its mass and landed somewhere worth exactly as much. From a score alone the first reads as a learner that is stuck and the second as one looking in the wrong place. The tactical plateau was read as the first for weeks and is the second: over three generations the share of boards answered `close` falls from 49 to 46 to 35 per cent while `hold`, which is the top of the measured band, never moves off 5.
+
+    So the distribution is readable directly, off the boards a collecting run already wrote down, with no game and no arena. What it reports is the likeliest action, because that is what a measurement run plays.
+    """
+    from rwintel.learn.imitation import chosen, teacher_shares
+
+    # A separable teacher, for the reason the fit's own floor test uses one: what is being checked is the
+    # reading, so the thing being read has to be something a fit is known to recover.
+    draw = random.Random(11)
+    samples = []
+    for _ in range(400):
+        action = draw.randrange(TACTICAL_ACTIONS)
+        state = [draw.uniform(-0.2, 0.2) for _ in range(TACTICAL_SIZE)]
+        state[action] = 1.0
+        samples.append(Sample(state=state, action=action))
+    share, second = teacher_shares(samples, TACTICAL)
+    assert abs(sum(share) - 1.0) < 1e-9 and not second
+    assert len(share) == TACTICAL_ACTIONS
+
+    net = TacticalNet()
+    row = chosen(samples, TACTICAL, net, "fresh")
+    assert row.name == "fresh"
+    assert abs(sum(row.share) - 1.0) < 1e-9, "every board is answered by exactly one action"
+    assert 0.0 <= row.agreement <= 1.0 and row.entropy > 0.0
+    assert not row.second_share, "the tactical layer chooses one thing"
+
+    # A policy fitted to the teacher answers the teacher's own boards the teacher's way, which is what makes a
+    # departure from it later readable as the reinforcement having moved something.
+    fitted, _ = fit(samples, TACTICAL, net=TacticalNet(), seed=7, epochs=60, smoothing=0.0, patience=60)
+    after = chosen(samples, TACTICAL, fitted, "fitted")
+    assert after.agreement > 0.95, "the fit recovers a separable teacher, so the reading of it has to say so"
+    assert after.entropy < row.entropy, "fitting a deterministic teacher narrows the distribution"
+    # And the distribution it reports is the teacher's own, which is what makes a later generation's departure from it readable.
+    assert max(abs(a - b) for a, b in zip(after.share, share)) < 0.05
+
+
 def test_a_teacher_whose_slots_kept_their_names_and_changed_what_they_hold_is_refused_too():
     """The half of the claim the names cannot make, on the side where it is least visible.
 

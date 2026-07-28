@@ -537,3 +537,78 @@ def _shares(shares: Sequence[float], names: Sequence[str], most: int = 5) -> str
     ranked = sorted(zip(names, shares), key=lambda pair: pair[1], reverse=True)
     shown = [f"{name} {100.0 * share:.0f}%" for name, share in ranked[:most] if share > 0.0]
     return " ".join(shown) if shown else "nothing"
+
+
+@dataclass
+class Chosen:
+    """What one set of parameters answers on a fixed set of boards, beside what the teacher answered on the same ones."""
+
+    name: str
+    #: Share of the boards each action is the likeliest on, which is the action a measurement run actually plays.
+    share: List[float]
+    second_share: List[float]
+    #: Share of the boards where the likeliest action is the one the teacher chose.
+    agreement: float
+    second_agreement: float
+    #: Mean entropy of the distribution, in nats, summed over both heads where there are two.
+    entropy: float
+
+
+def chosen(samples: Sequence[Sample], layer: str, net: nn.Module, name: str, device=None) -> Chosen:
+    """Which action a policy would take on each of a teacher's boards, as a distribution over the action space.
+
+    This exists because a whole class of question about a reinforcement run cannot be answered from its score. A run that moved nowhere on the board may have moved its policy a long way and put the mass somewhere that pays the same; a run that moved nowhere at all is a different fault with a different fix, and the two are indistinguishable from a score. The answer is cheap — it starts no game, and the boards are already recorded — and it had never been asked, so the tactical layer's plateau was read for weeks as a policy that was not moving when the argmax mix moves a great deal from one generation to the next.
+
+    Reported on the ARGMAX rather than on the mean of the distribution, because the likeliest action is what a measurement run plays and is where every ceiling this project quotes was taken. The entropy of the distribution is reported beside it, since the two answer different halves of "did anything move".
+    """
+    _, first, second = widths(layer)
+    tensors = _tensors(list(samples), layer, device)
+    net.eval()
+    with torch.no_grad():
+        head, two = _heads(net, layer, tensors)
+        picks = head.argmax(dim=-1)
+        share = [float((picks == index).sum()) / max(1, len(samples)) for index in range(first)]
+        agreement = float((picks == tensors.actions).float().mean())
+        spread = float(entropy(head).mean())
+        second_share: List[float] = []
+        second_agreement = 0.0
+        if two is not None and tensors.seconds is not None:
+            others = two.argmax(dim=-1)
+            second_share = [float((others == index).sum()) / max(1, len(samples)) for index in range(second)]
+            second_agreement = float((others == tensors.seconds).float().mean())
+            spread += float(entropy(two).mean())
+    return Chosen(name=name, share=share, second_share=second_share, agreement=agreement,
+                  second_agreement=second_agreement, entropy=spread)
+
+
+def teacher_shares(samples: Sequence[Sample], layer: str) -> Tuple[List[float], List[float]]:
+    """The same distribution for the teacher itself, which is the only thing a policy's distribution is readable against."""
+    _, first, second = widths(layer)
+    total = max(1, len(samples))
+    share = [0.0] * first
+    other = [0.0] * second
+    for sample in samples:
+        if 0 <= sample.action < first:
+            share[sample.action] += 1.0 / total
+        if second and 0 <= sample.second < second:
+            other[sample.second] += 1.0 / total
+    return share, other
+
+
+def report_chosen(rows: Sequence[Chosen], samples: Sequence[Sample], layer: str) -> None:
+    """The teacher's distribution and then each policy's, in the order they were named, so that a lineage reads down the page."""
+    names, second_names = _names(layer)
+    share, other = teacher_shares(samples, layer)
+    log.info("what each policy would choose on the teacher's %d board(s), at its likeliest action", len(samples))
+    log.info("%-28s %s", "teacher", _shares(share, names, most=len(names)))
+    if other:
+        log.info("%-28s %s", "teacher's task", _shares(other, second_names, most=len(second_names)))
+    for row in rows:
+        log.info("%-28s %s", row.name, _shares(row.share, names, most=len(names)))
+        if row.second_share:
+            log.info("%-28s %s", row.name + "'s task", _shares(row.second_share, second_names,
+                                                              most=len(second_names)))
+        log.info("%-28s   agrees with the teacher on %.1f%% of them%s, entropy %.3f", "",
+                 100.0 * row.agreement,
+                 f" and {100.0 * row.second_agreement:.1f}% of the tasks" if row.second_share else "",
+                 row.entropy)
