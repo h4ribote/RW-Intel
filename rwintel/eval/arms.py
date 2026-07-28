@@ -134,7 +134,7 @@ def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tup
 
 
 class _Batchers:
-    """Several inference servers behind one arm, stopped together. The run holds one object per arm and stops it when it is done, and an arm that carries two learnt layers has two servers to stop rather than one."""
+    """Several inference servers behind one arm, standing in for one. The run holds one object per arm, stops it when it is done and reports how its batching went, and an arm that carries two learnt layers has two of everything to answer for rather than one."""
 
     def __init__(self, batchers) -> None:
         self.batchers = list(batchers)
@@ -142,6 +142,19 @@ class _Batchers:
     def stop(self) -> None:
         for batcher in self.batchers:
             batcher.stop()
+
+    @property
+    def calls(self) -> int:
+        return sum(batcher.calls for batcher in self.batchers)
+
+    @property
+    def served(self) -> int:
+        return sum(batcher.served for batcher in self.batchers)
+
+    @property
+    def batch_size(self) -> float:
+        """How the batching went across every server this arm started, pooled over their calls rather than averaged over the servers. Two layers deciding at different periods make very different numbers of calls, and a mean of the two means would let the rarer layer's figure count as much as the commoner one's."""
+        return self.served / self.calls if self.calls else 0.0
 
 
 def _stem(name: str) -> str:

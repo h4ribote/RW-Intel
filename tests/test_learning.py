@@ -2915,6 +2915,11 @@ def test_an_arm_can_carry_the_whole_learnt_chain():
                 assert policy.operations.rollout is None and policy.strategy.rollout is None
                 # The layer nobody named is the script's own, unchanged, so the arm is still the chain with the named decisions replaced and nothing else moved.
                 assert type(policy.tactics).__name__ == "Tactics"
+                # And the several servers stand in for one everywhere the run touches them, including the figure it reports at the end: a wrapper that could only be stopped crashed a completed measurement on its last line.
+                assert batcher.batch_size == 0.0 and batcher.calls == 0
+                batcher.batchers[0].calls, batcher.batchers[0].served = 3, 12
+                batcher.batchers[1].calls, batcher.batchers[1].served = 1, 4
+                assert abs(batcher.batch_size - 4.0) < 1e-12
             finally:
                 batcher.stop()
 
