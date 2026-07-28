@@ -33,8 +33,9 @@ class LearntTactics(Tactics):
 
     def __init__(self, session, catalogue, decider, rollout: Optional[Rollout] = None,
                  instance: int = -1, status_terminals: bool = True,
-                 discount: float = REWARD_DISCOUNT) -> None:
-        super().__init__(session, catalogue)
+                 discount: float = REWARD_DISCOUNT, withhold=()) -> None:
+        # Withholding reaches the inherited ladder and not the decider, which is the point of it: an arm built with no decider IS the ladder, so this is how the ladder is measured against itself with one of its branches taken away.
+        super().__init__(session, catalogue, withhold)
         self.decider = decider
         self.rollout = rollout
         self.instance = instance

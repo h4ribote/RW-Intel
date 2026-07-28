@@ -172,6 +172,28 @@ def _pinned(arguments) -> list:
     return departures
 
 
+def _withheld(arguments) -> list:
+    """Which departures a run measures the ladder WITHOUT, as arms beside the ordinary ones.
+
+    A different ablation from pinning and a different question. Pinning asks what a departure is worth as a constant policy, over every board there is; withholding asks what it is worth inside the ladder, on the boards the ladder's own tests actually send to it. The eighth departure is where the two come apart — pinned, closing loses 0.044 against the ladder, and the ladder answers with it on 49 per cent of its decisions — and nothing before this could tell "the ladder's condition for it is wrong" from "the boards it fires on are ones where closing is right".
+
+    The arm is the ladder with one branch taken away, so the baseline it is read against is the ladder itself, and the difference is the departure's whole contribution to the layer that uses it.
+    """
+    if not arguments.without:
+        return []
+    departures = []
+    for written in str(arguments.without).split(","):
+        name = written.strip().upper()
+        if not name:
+            continue
+        if name not in Deviation.__members__:
+            raise SystemExit(f"no departure named {written.strip()!r}: expected one of "
+                             f"{', '.join(member.name.lower() for member in Deviation)}")
+        if Deviation[name] not in departures:
+            departures.append(Deviation[name])
+    return departures
+
+
 def _floors(arguments) -> list:
     """How lopsided a draw may be, as the weaker side's share of the stronger."""
     return _numbers(arguments.imbalance_floor, "an imbalance floor", whole=False,
@@ -456,6 +478,14 @@ def duel(arguments) -> int:
                                  session.instance, status_terminals=False)
 
         policies.append((f"duel-always-{pinned.name.lower()}", fixed))
+
+    for withheld in _withheld(arguments):
+        def lessened(session, catalogue, withheld=withheld):
+            # No decider, so the inherited ladder decides and this arm IS the ladder — with one branch of it taken away.
+            return LearntTactics(session, catalogue, None, None, session.instance,
+                                 status_terminals=False, withhold=(withheld,))
+
+        policies.append((f"duel-without-{withheld.name.lower()}", lessened))
 
     def build(policy, order: str, floor: Optional[float], stall: Optional[int],
               separation: Optional[float]):
@@ -985,6 +1015,11 @@ def main(argv=None) -> int:
     parser.add_argument("--pin", default=None,
                         help="departures to measure a layer pinned to, comma separated, as arms of a duel. "
                              "This is the ablation the band a policy plays inside is read from")
+    parser.add_argument("--without", default=None,
+                        help="departures to take away from the handwritten ladder, comma separated, as arms "
+                             "of a duel. The other ablation, and a different question: pinning asks what a "
+                             "departure is worth as a constant policy over every board, this asks what it is "
+                             "worth inside the ladder on the boards the ladder's own tests send to it")
     parser.add_argument("--frozen", default=None,
                         help="trained layers to hold still beneath the one being trained, written "
                              "layer:path and separated by commas, as in "

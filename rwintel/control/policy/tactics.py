@@ -92,10 +92,14 @@ class _Fight:
 
 
 class Tactics:
-    def __init__(self, session, catalogue: Catalogue) -> None:
+    def __init__(self, session, catalogue: Catalogue, withhold: Sequence[Deviation] = ()) -> None:
         self.session = session
         self.catalogue = catalogue
         self.tracks: Dict[int, _Track] = {}
+        #: Departures this ladder may not answer with. A branch whose departure is withheld is skipped and the ladder falls through to the next test, which is exactly what the ladder did before that departure existed.
+        #:
+        #: An ablation rather than a setting. What a departure is worth as a CONSTANT policy is read by pinning it, and every one of the eight has been; what it is worth INSIDE THE LADDER, on the boards the ladder's own tests send to it, is a different quantity and nothing could read it. The eighth departure is where the two come apart: pinned, closing loses 0.044 against the ladder, and the ladder answers with it on 49 per cent of its decisions, so either the ladder's condition for it is wrong or the boards it fires on are ones where closing is right and the constant arm is dominated by boards where it is not. Withholding it and measuring the same ladder against itself is the only thing that tells those apart.
+        self.withhold = frozenset(withhold)
 
     def decide(self, view: WorldView, squads: List[SquadRecord],
                game_time_ms: int) -> Tuple[List[SquadDeviation], List[MissionReport]]:
@@ -159,16 +163,28 @@ class Tactics:
         if not threats and not self._under_fire(members):
             return Deviation.HOLD
         if self._spent(squad, losses) or self._losing_the_exchange(losses, track):
-            return Deviation.WITHDRAW_FAR if squad.status == Status.LOSING else Deviation.WITHDRAW
-        if self._covered_by_area_fire(squad, members, threats):
+            leaving = Deviation.WITHDRAW_FAR if squad.status == Status.LOSING else Deviation.WITHDRAW
+            if self._allowed(leaving):
+                return leaving
+        if self._covered_by_area_fire(squad, members, threats) and self._allowed(Deviation.SPREAD):
             return Deviation.SPREAD
-        if self._out_ranges(members, threats) >= KITE_RANGE_MARGIN:
+        if self._out_ranges(members, threats) >= KITE_RANGE_MARGIN and self._allowed(Deviation.KITE):
             return Deviation.KITE
-        if not self._anything_in_reach(members, threats):
+        if not self._anything_in_reach(members, threats) and self._allowed(Deviation.CLOSE):
             return Deviation.CLOSE
         if self._worth_concentrating(members, threats):
-            return Deviation.FOCUS_THREAT if self._long_range_in_reach(members, threats) else Deviation.FOCUS
+            focused = (Deviation.FOCUS_THREAT if self._long_range_in_reach(members, threats)
+                       else Deviation.FOCUS)
+            if self._allowed(focused):
+                return focused
         return Deviation.HOLD
+
+    def _allowed(self, departure: Deviation) -> bool:
+        """Whether this ladder may answer with a departure at all.
+
+        Everything is allowed unless a run said otherwise, so the ordinary ladder pays one set lookup a branch and is the ladder it was. A branch that is not allowed falls through rather than being replaced with something else, because falling through is what the ladder DID before the departure existed and anything else would be a second change measured as one.
+        """
+        return departure not in self.withhold
 
     def _spent(self, squad: SquadRecord, losses: float) -> bool:
         """Whether the mission has cost what it was given to spend. The contract's figure is in credits and so are the losses, which is the reason the design passes an absolute budget rather than a share: the comparison is a subtraction and it means the same thing an hour into the match as it did at the start."""

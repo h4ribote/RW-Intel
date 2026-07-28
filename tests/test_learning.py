@@ -2050,6 +2050,41 @@ def test_a_layer_pinned_to_one_departure_answers_with_it_and_writes_nothing_down
     assert "sidestep" in _refusal(SystemExit, _pinned, _Asked())
 
 
+def test_the_ladder_with_one_branch_taken_away_falls_through_rather_than_answering_it():
+    """The other ablation, and a different question from pinning.
+
+    Pinning asks what a departure is worth as a constant policy, over every board there is. Withholding asks what it is worth INSIDE the ladder, on the boards the ladder's own tests send to it. The eighth departure is where the two come apart: pinned, closing loses 0.044 against the ladder, and the ladder answers with it on 49 per cent of its decisions, so either its condition for it is wrong or the boards it fires on are ones where closing is right and the constant arm is dragged down by the boards it is not. Nothing before this could tell those apart.
+
+    What a withheld branch does is fall through to the next test, which is exactly what the ladder did before that departure existed. Anything else would be a second change measured as one.
+    """
+    from rwintel.learn.__main__ import _withheld
+
+    view, squad = _skirmish(), _squad()
+    whole = LearntTactics(None, _CATALOGUE, None, rollout=None, instance=0)
+    chosen, _ = whole.decide(view, [squad], 21000)
+    answered = chosen[0].deviation
+
+    lessened = LearntTactics(None, _CATALOGUE, None, rollout=None, instance=0, withhold=(answered,))
+    after, _ = lessened.decide(view, [squad], 21000)
+    assert after[0].deviation != answered, "the branch that answered was not taken away"
+    assert whole.withhold == frozenset() and lessened.withhold == {answered}
+
+    # Taking away every departure leaves the ladder at the one that is not a departure at all.
+    nothing = LearntTactics(None, _CATALOGUE, None, rollout=None, instance=0,
+                            withhold=tuple(Deviation))
+    left, _ = nothing.decide(view, [squad], 21000)
+    assert left[0].deviation is Deviation.HOLD
+
+    class _Asked:
+        without = "close, kite"
+
+    assert _withheld(_Asked()) == [Deviation.CLOSE, Deviation.KITE]
+    _Asked.without = None
+    assert _withheld(_Asked()) == []
+    _Asked.without = "sidestep"
+    assert "sidestep" in _refusal(SystemExit, _withheld, _Asked())
+
+
 def test_every_episode_draws_a_different_fight_and_the_arms_of_a_run_draw_the_same_ones():
     """An arena is built afresh for every episode and draws its sites, budgets, imbalances and forces from the seed it is built with. Built from the instance alone, every episode of an instance drew the identical sequence: a run of fifty episodes on seven instances was about fifty distinct fights fought forty times over, and its two thousand fight rows were reported as two thousand samples. That is a sample size overstated by a factor of thirty to fifty, and it is what every left-right lean the arena was charged with turned out to be made of.
 
