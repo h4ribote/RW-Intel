@@ -139,7 +139,13 @@ def main(argv=None) -> int:
     parser.add_argument("--opening", type=float, default=OPENING_BASELINE,
                         help="what point a squad's terminal is read from: one measures the errand against the opening ownership of the disc it was sent to, which is what the side score is a mean of, and nought measures it against the neutral half, which pays a squad for how the ground stands rather than for what it did to the ground and is the reading the layers that learnt to attack nothing were trained under")
     parser.add_argument("--credit", choices=CREDITS, default=CREDIT,
-                        help="what a squad's terminal is: the whole domination of the region its contract named, which every squad sent there takes in full, or only the part its own surviving units account for")
+                        help="what a squad's terminal is, and there are three. 'board' is the default and reads "
+                             "no contract at all: the sum, over every disc the episode scores, of the part this "
+                             "squad's surviving units account for. The other two read the region the contract "
+                             "named -- 'region' its whole domination, which every squad sent there takes in "
+                             "full, and 'marginal' only the part this squad's own units account for. Both of "
+                             "those let the layer choose its own terminal by choosing where to point last, "
+                             "which is what made longer training weaker three times over")
     parser.add_argument("--max-seconds", type=int, default=0)
     parser.add_argument("--device", default=None)
     parser.add_argument("--load", default=None, help="parameters to start from, an imitation of the script or an earlier run")
