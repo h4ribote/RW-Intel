@@ -44,9 +44,16 @@ def parse(name: str) -> Arm:
     raise ValueError(f"no arm named {name!r}: expected 'script', 'ops:<path>', 'strategy:<path>', 'ops-pin', 'ops-concentrate', or one of {', '.join(p.name.lower() for p in Posture)}")
 
 
+#: What joins two learnt layers into one arm, as in `ops:local/operations.pt+strategy:local/strategy.pt`. Chosen because a path may contain a comma on some systems and never contains a plus in this project's own naming.
+LAYER_JOIN = "+"
+
+
 def _is_learnt(name: str) -> bool:
-    prefix, separator, _ = name.partition(":")
-    return bool(separator) and prefix in OPERATIONAL_PREFIXES + STRATEGIC_PREFIXES
+    for part in name.split(LAYER_JOIN):
+        prefix, separator, _ = part.partition(":")
+        if not separator or prefix not in OPERATIONAL_PREFIXES + STRATEGIC_PREFIXES:
+            return False
+    return True
 
 
 def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tuple[Arm, object]:
@@ -62,12 +69,9 @@ def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tup
     """
     import os
 
-    prefix, _, path = name.partition(":")
-    path = path.strip()
-    if not path:
+    parts = [part.strip() for part in name.split(LAYER_JOIN) if part.strip()]
+    if not parts:
         raise ValueError(f"a learnt arm needs a path, as in 'ops:local/operations.pt', not {name!r}")
-    if not os.path.exists(path):
-        raise ValueError(f"there are no parameters at {path} to measure")
 
     # Imported here rather than at the top of the module so that a control process running only script and posture arms never loads the tensor library, which is the same discipline the deciders keep.
     import torch
@@ -77,31 +81,75 @@ def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tup
     from ..learn.net import EncodingRefused, OperationalNet, StrategicNet, load_encoded
     from ..learn.policy import OPERATIONAL, STRATEGIC, LearningPolicy
 
-    strategic = prefix in STRATEGIC_PREFIXES
-    layer = STRATEGIC if strategic else OPERATIONAL
     # The games this process is scored beside run on these cores; a library that helps itself to all of them turns every inference into a fight with the simulation it is measuring.
     torch.set_num_threads(2)
     where = torch.device(device) if device else torch.device("cpu")
-    net = (StrategicNet() if strategic else OperationalNet()).to(where)
-    state = torch.load(path, map_location=where)
-    # Refused for the same reason a missing file is: a number about parameters that read the board differently from the way they were fitted to read it is a plausible number about nothing, and the shapes all match, so nothing later in the run would notice.
+    loaded = []
+    batchers = []
     try:
-        avowal = load_encoded(net, state)
-    except EncodingRefused as refused:
-        raise ValueError(f"the parameters at {path} cannot be measured: {refused}")
-    if avowal:
-        # Said out loud beside the arm it is about, because a number is only worth keeping if what produced it is written down beside it, and what produced this one is parameters whose feature list nothing in the file could prove.
-        log.warning("the feature list at %s is a person's word and not a fit's record: %s", path, avowal)
-    batcher = (strategic_batcher if strategic else operational_batcher)(net, device=where, greedy=greedy)
-    log.info("the %s arm reads the %s layer at %s %s", os.path.splitext(os.path.basename(path))[0], layer, path,
-             "at its likeliest action" if greedy else "by drawing from it")
+        for part in parts:
+            prefix, _, path = part.partition(":")
+            path = path.strip()
+            if not path:
+                raise ValueError(f"a learnt arm needs a path, as in 'ops:local/operations.pt', not {part!r}")
+            if not os.path.exists(path):
+                raise ValueError(f"there are no parameters at {path} to measure")
+            strategic = prefix in STRATEGIC_PREFIXES
+            layer = STRATEGIC if strategic else OPERATIONAL
+            if any(layer == held for held, _, _, _ in loaded):
+                raise ValueError(f"the {layer} layer is named twice in the arm {name!r}, so one of the two would never play")
+            net = (StrategicNet() if strategic else OperationalNet()).to(where)
+            state = torch.load(path, map_location=where)
+            # Refused for the same reason a missing file is: a number about parameters that read the board differently from the way they were fitted to read it is a plausible number about nothing, and the shapes all match, so nothing later in the run would notice.
+            try:
+                avowal = load_encoded(net, state)
+            except EncodingRefused as refused:
+                raise ValueError(f"the parameters at {path} cannot be measured: {refused}")
+            if avowal:
+                # Said out loud beside the arm it is about, because a number is only worth keeping if what produced it is written down beside it, and what produced this one is parameters whose feature list nothing in the file could prove.
+                log.warning("the feature list at %s is a person's word and not a fit's record: %s", path, avowal)
+            batcher = (strategic_batcher if strategic else operational_batcher)(net, device=where, greedy=greedy)
+            batchers.append(batcher)
+            loaded.append((layer, net, batcher, strategic))
+            log.info("the %s arm reads the %s layer at %s %s", _stem(name), layer, path,
+                     "at its likeliest action" if greedy else "by drawing from it")
+    except BaseException:
+        # A later layer failing must not leave an earlier one's inference thread running against an arm that will never play.
+        for batcher in batchers:
+            batcher.stop()
+        raise
 
     def build(session) -> LearningPolicy:
-        # A fresh decider per session because it answers for one instance; the network behind it is shared, which is the whole point of batching the inference across instances. No rollout, so the layer decides and writes nothing down. The decider carries the same reading as the server, since one of them answers when there is a server and the other when there is not.
-        decider = (NetworkStrategy if strategic else NetworkOperations)(net, where, batcher, greedy=greedy)
-        return LearningPolicy(session, layer, decider, None, session.instance)
+        # A fresh decider per session because it answers for one instance; the network behind it is shared, which is the whole point of batching the inference across instances. No rollout anywhere, so every layer here decides and writes nothing down. The decider carries the same reading as the server, since one of them answers when there is a server and the other when there is not.
+        deciders = {layer: (NetworkStrategy if strategic else NetworkOperations)(net, where, batcher, greedy=greedy)
+                    for layer, net, batcher, strategic in loaded}
+        # One of them is named as the arm's layer and the rest are frozen beside it, which is the same construction either way: a frozen layer and a measured one differ only in the rollout, and neither has one here.
+        first = loaded[0][0]
+        return LearningPolicy(session, first, deciders[first], None, session.instance,
+                              frozen={layer: decider for layer, decider in deciders.items() if layer != first})
 
-    return (os.path.splitext(os.path.basename(path))[0], build), batcher
+    # One layer hands back its own server rather than a wrapper around it, because callers that read a single
+    # layer's answers directly - the tests that check what a network replies - hold the server itself.
+    return (_stem(name), build), (batchers[0] if len(batchers) == 1 else _Batchers(batchers))
+
+
+class _Batchers:
+    """Several inference servers behind one arm, stopped together. The run holds one object per arm and stops it when it is done, and an arm that carries two learnt layers has two servers to stop rather than one."""
+
+    def __init__(self, batchers) -> None:
+        self.batchers = list(batchers)
+
+    def stop(self) -> None:
+        for batcher in self.batchers:
+            batcher.stop()
+
+
+def _stem(name: str) -> str:
+    """What an arm carrying learnt layers is called: the file stems joined the way the layers were, so a chain of two is named for both and never merges with either alone in a journal."""
+    import os
+
+    return LAYER_JOIN.join(os.path.splitext(os.path.basename(part.partition(":")[2].strip()))[0]
+                           for part in name.split(LAYER_JOIN) if part.strip())
 
 
 def concentrating(name: str = "ops-concentrate") -> Arm:

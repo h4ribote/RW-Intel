@@ -89,7 +89,8 @@ from rwintel.learn.net import (
 )
 from rwintel.learn.ops_arena import SCRIPT_TACTICS, OpsArena
 from rwintel.learn.ops_run import arms_of, frozen_tactics, load_arms
-from rwintel.learn.policy import STRATEGIC, TACTICAL, LearningPolicy
+from rwintel.learn import policy as eval_arms_policy
+from rwintel.learn.policy import OPERATIONAL, STRATEGIC, TACTICAL, LearningPolicy
 from rwintel.learn.reward import (
     COMPLETE_REWARD,
     DISCOUNT,
@@ -2885,3 +2886,42 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             function()
             print("ok", name)
+
+
+def test_an_arm_can_carry_the_whole_learnt_chain():
+    """The design says a layer is learnt against frozen neighbours, and the training runners freeze them; until this the measuring runner could not, so a chain with two layers trained could be built and never measured.
+
+    An arm may therefore name several learnt layers at once. Every one of them is read and none is learnt from, which is what a measurement is: the layer named first stands as the arm's own and the rest are frozen beside it, and that is the same construction either way since a frozen layer and a measured one differ only in the rollout and neither has one here.
+    """
+    with tempfile.TemporaryDirectory() as folder:
+            operational = os.path.join(folder, "operations.pt")
+            strategic = os.path.join(folder, "strategy.pt")
+            torch.save(OperationalNet().state_dict(), operational)
+            torch.save(StrategicNet().state_dict(), strategic)
+
+            name = f"ops:{operational}+strategy:{strategic}"
+            assert eval_arms._is_learnt(name)
+            (arm_name, build), batcher = eval_arms.learnt(name)
+            try:
+                # Named for both files, so a journal can never merge the chain with either layer measured alone.
+                assert arm_name == "operations+strategy"
+                # Both layers are put in place and neither is handed a rollout, which is what a measurement is: the policy is read, not fitted.
+                session = _Chained()
+                session.instance = 0
+                with _without_the_game_installed():
+                    policy = build(session)
+                assert isinstance(policy.operations, LearntOperations)
+                assert isinstance(policy.strategy, LearntStrategy)
+                assert policy.operations.rollout is None and policy.strategy.rollout is None
+                # The layer nobody named is the script's own, unchanged, so the arm is still the chain with the named decisions replaced and nothing else moved.
+                assert type(policy.tactics).__name__ == "Tactics"
+            finally:
+                batcher.stop()
+
+            # A layer named twice would leave one of the two never playing, and is refused rather than silently dropped.
+            try:
+                eval_arms.learnt(f"ops:{operational}+ops:{operational}")
+            except ValueError as refused:
+                assert "named twice" in str(refused)
+            else:
+                raise AssertionError("naming one layer twice in an arm was accepted")
