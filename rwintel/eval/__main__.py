@@ -168,8 +168,9 @@ def main(argv=None) -> int:
     parser.add_argument("--arm", action="append", default=None,
                         help="an arm of the comparison: 'script', a posture name to pin the strategic layer to, "
                              "'ops:<path>' to load a learnt operational layer with the rest of the chain left "
-                             "script, 'strategy:<path>' to load a learnt strategic layer the same way, or "
-                             "'ops-pin' to pin that layer to one legal region and task. Repeatable")
+                             "script, 'strategy:<path>' or 'tactics:<path>' to load those layers the same way, "
+                             "several of them joined by '+' to carry a whole learnt chain, or "
+                             "'ops-pin' to pin the operational layer to one legal region and task. Repeatable")
     parser.add_argument("--greedy", action="store_true",
                         help="read every learnt arm at its likeliest action instead of drawing from it. Drawing "
                              "is the default because every match measurement recorded so far was taken that way, "

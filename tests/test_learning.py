@@ -3165,3 +3165,42 @@ def test_an_arm_can_carry_the_whole_learnt_chain():
                 assert "named twice" in str(refused)
             else:
                 raise AssertionError("naming one layer twice in an arm was accepted")
+
+
+def test_an_arm_can_carry_a_learnt_fighter_under_the_chain():
+    """A layer trained with a trained fighter frozen beneath it was trained in that environment, so measuring it with the handwritten fighter underneath measures it somewhere else.
+
+    The training runners have been able to freeze a tactical layer under a match since `--frozen` existed, and the strategic generations on file were trained that way. The measuring runner could name only the operational and strategic layers, so the chain it scored was never the chain those layers were fitted in. It can name all three now, and the tactical layer's own strength is still read where it always was -- on the engagement arena, against the ladder, off any match at all.
+    """
+    with tempfile.TemporaryDirectory() as folder:
+            tactical = os.path.join(folder, "tactics.pt")
+            operational = os.path.join(folder, "operations.pt")
+            strategic = os.path.join(folder, "strategy.pt")
+            torch.save(TacticalNet().state_dict(), tactical)
+            torch.save(OperationalNet().state_dict(), operational)
+            torch.save(StrategicNet().state_dict(), strategic)
+
+            name = f"tactics:{tactical}+ops:{operational}+strategy:{strategic}"
+            assert eval_arms._is_learnt(name)
+            (arm_name, build), batcher = eval_arms.learnt(name)
+            try:
+                assert arm_name == "tactics+operations+strategy"
+                session = _Chained()
+                session.instance = 0
+                with _without_the_game_installed():
+                    policy = build(session)
+                # All three decisions come from networks, and none of the three records anything: an arm reads a policy, it does not fit one.
+                assert isinstance(policy.tactics, LearntTactics)
+                assert isinstance(policy.operations, LearntOperations)
+                assert isinstance(policy.strategy, LearntStrategy)
+                assert policy.tactics.rollout is None
+                assert policy.operations.rollout is None and policy.strategy.rollout is None
+            finally:
+                batcher.stop()
+
+            # A fighter alone is a legal arm too, since the same chain with one decision replaced is what every other arm here is.
+            (alone, _), only = eval_arms.learnt(f"tactics:{tactical}")
+            try:
+                assert alone == "tactics"
+            finally:
+                only.stop()

@@ -18,9 +18,10 @@ log = logging.getLogger(__name__)
 
 Arm = Tuple[str, Callable]
 
-#: How a learnt-layer arm names the file it loads, as in `ops:local/operations.pt` or `strategy:local/strategy.pt`. The prefix is what tells a path from a posture, and it names the layer because two of the three are measured on a match: the operational layer, whose deployment is read against the script's, and the strategic layer, whose posture is read against the rule's and against a posture pinned for the whole match. The tactical layer is not among them — it is measured on the engagement arena, off any match at all.
+#: How a learnt-layer arm names the file it loads, as in `ops:local/operations.pt` or `strategy:local/strategy.pt`. The prefix is what tells a path from a posture, and it names the layer. Two of the three are what a match measures on their own: the operational layer, whose deployment is read against the script's, and the strategic layer, whose posture is read against the rule's and against a posture pinned for the whole match. **The tactical prefix is here for a different reason.** A tactical layer's own strength is read on the engagement arena and nowhere else, but a layer trained with a trained fighter frozen beneath it was trained in that environment, and measuring it with the handwritten fighter underneath measures it somewhere else. The chain an arm carries has to be the chain the layer was trained in, or the number is about neither.
 OPERATIONAL_PREFIXES = ("ops", "operations")
 STRATEGIC_PREFIXES = ("strategy", "strat")
+TACTICAL_PREFIXES = ("tactics", "tactical")
 
 
 def pinned(posture: Posture) -> Callable:
@@ -41,25 +42,29 @@ def parse(name: str) -> Arm:
     key = name.upper()
     if key in Posture.__members__:
         return name.lower(), pinned(Posture[key])
-    raise ValueError(f"no arm named {name!r}: expected 'script', 'ops:<path>', 'strategy:<path>', 'ops-pin', 'ops-concentrate', or one of {', '.join(p.name.lower() for p in Posture)}")
+    raise ValueError(f"no arm named {name!r}: expected 'script', 'ops:<path>', 'strategy:<path>', 'tactics:<path>', 'ops-pin', 'ops-concentrate', or one of {', '.join(p.name.lower() for p in Posture)}")
 
 
 #: What joins two learnt layers into one arm, as in `ops:local/operations.pt+strategy:local/strategy.pt`. Chosen because a path may contain a comma on some systems and never contains a plus in this project's own naming.
 LAYER_JOIN = "+"
 
 
+#: Every prefix that names a layer, so that one list answers both "is this a learnt arm" and "which layer is it".
+LEARNT_PREFIXES = OPERATIONAL_PREFIXES + STRATEGIC_PREFIXES + TACTICAL_PREFIXES
+
+
 def _is_learnt(name: str) -> bool:
     for part in name.split(LAYER_JOIN):
         prefix, separator, _ = part.partition(":")
-        if not separator or prefix not in OPERATIONAL_PREFIXES + STRATEGIC_PREFIXES:
+        if not separator or prefix not in LEARNT_PREFIXES:
             return False
     return True
 
 
 def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tuple[Arm, object]:
-    """A learnt layer, loaded from a file, as an arm of a match comparison.
+    """A learnt layer, or a chain of them, loaded from files, as an arm of a match comparison.
 
-    Everything but the operational decision is the script it is measured against, exactly as a training run holds it, and the layer is handed no rollout, so with nowhere to record a decision it records none: this reads the network, it does not learn it. One network is loaded and one batching server answers every instance's decisions through it, the same arrangement the duel uses for the tactical layer; the server is returned for the run to stop, because a `(name, build)` pair has nowhere to keep it.
+    Every layer the arm does not name is the script it is measured against, exactly as a training run holds it, and each layer named is handed no rollout, so with nowhere to record a decision it records none: this reads the networks, it does not learn them. One network is loaded and one batching server answers every instance's decisions through it, the same arrangement the duel uses for the tactical layer; the server is returned for the run to stop, because a `(name, build)` pair has nowhere to keep it.
 
     Refused rather than started from nothing when the file is not there, which is what the duel does and for the same reason: a comparison that quietly scored a freshly initialised policy would produce a perfectly plausible number about a policy nobody asked about.
 
@@ -76,10 +81,19 @@ def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tup
     # Imported here rather than at the top of the module so that a control process running only script and posture arms never loads the tensor library, which is the same discipline the deciders keep.
     import torch
 
-    from ..learn.deciders import (NetworkOperations, NetworkStrategy, operational_batcher,
-                                  strategic_batcher)
-    from ..learn.net import EncodingRefused, OperationalNet, StrategicNet, load_encoded
-    from ..learn.policy import OPERATIONAL, STRATEGIC, LearningPolicy
+    from ..learn.deciders import (NetworkOperations, NetworkStrategy, NetworkTactics,
+                                  operational_batcher, strategic_batcher, tactical_batcher)
+    from ..learn.net import (EncodingRefused, OperationalNet, StrategicNet, TacticalNet,
+                             load_encoded)
+    from ..learn.policy import OPERATIONAL, STRATEGIC, TACTICAL, LearningPolicy
+
+    # What each prefix names and what builds it. Written once here rather than as a chain of conditionals, because a third layer turned every two-way choice into a place the three could come to disagree about which network reads which file.
+    kinds = {prefix: (layer, build_net, build_batcher, build_decider)
+             for prefixes, layer, build_net, build_batcher, build_decider in (
+                 (OPERATIONAL_PREFIXES, OPERATIONAL, OperationalNet, operational_batcher, NetworkOperations),
+                 (STRATEGIC_PREFIXES, STRATEGIC, StrategicNet, strategic_batcher, NetworkStrategy),
+                 (TACTICAL_PREFIXES, TACTICAL, TacticalNet, tactical_batcher, NetworkTactics))
+             for prefix in prefixes}
 
     # The games this process is scored beside run on these cores; a library that helps itself to all of them turns every inference into a fight with the simulation it is measuring.
     torch.set_num_threads(2)
@@ -94,11 +108,12 @@ def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tup
                 raise ValueError(f"a learnt arm needs a path, as in 'ops:local/operations.pt', not {part!r}")
             if not os.path.exists(path):
                 raise ValueError(f"there are no parameters at {path} to measure")
-            strategic = prefix in STRATEGIC_PREFIXES
-            layer = STRATEGIC if strategic else OPERATIONAL
+            if prefix not in kinds:
+                raise ValueError(f"no layer named {prefix!r} to load in the arm {name!r}: expected one of {', '.join(sorted(kinds))}")
+            layer, build_net, build_batcher, build_decider = kinds[prefix]
             if any(layer == held for held, _, _, _ in loaded):
                 raise ValueError(f"the {layer} layer is named twice in the arm {name!r}, so one of the two would never play")
-            net = (StrategicNet() if strategic else OperationalNet()).to(where)
+            net = build_net().to(where)
             state = torch.load(path, map_location=where)
             # Refused for the same reason a missing file is: a number about parameters that read the board differently from the way they were fitted to read it is a plausible number about nothing, and the shapes all match, so nothing later in the run would notice.
             try:
@@ -108,9 +123,9 @@ def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tup
             if avowal:
                 # Said out loud beside the arm it is about, because a number is only worth keeping if what produced it is written down beside it, and what produced this one is parameters whose feature list nothing in the file could prove.
                 log.warning("the feature list at %s is a person's word and not a fit's record: %s", path, avowal)
-            batcher = (strategic_batcher if strategic else operational_batcher)(net, device=where, greedy=greedy)
+            batcher = build_batcher(net, device=where, greedy=greedy)
             batchers.append(batcher)
-            loaded.append((layer, net, batcher, strategic))
+            loaded.append((layer, net, batcher, build_decider))
             log.info("the %s arm reads the %s layer at %s %s", _stem(name), layer, path,
                      "at its likeliest action" if greedy else "by drawing from it")
     except BaseException:
@@ -121,8 +136,8 @@ def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tup
 
     def build(session) -> LearningPolicy:
         # A fresh decider per session because it answers for one instance; the network behind it is shared, which is the whole point of batching the inference across instances. No rollout anywhere, so every layer here decides and writes nothing down. The decider carries the same reading as the server, since one of them answers when there is a server and the other when there is not.
-        deciders = {layer: (NetworkStrategy if strategic else NetworkOperations)(net, where, batcher, greedy=greedy)
-                    for layer, net, batcher, strategic in loaded}
+        deciders = {layer: build_decider(net, where, batcher, greedy=greedy)
+                    for layer, net, batcher, build_decider in loaded}
         # One of them is named as the arm's layer and the rest are frozen beside it, which is the same construction either way: a frozen layer and a measured one differ only in the rollout, and neither has one here.
         first = loaded[0][0]
         return LearningPolicy(session, first, deciders[first], None, session.instance,
