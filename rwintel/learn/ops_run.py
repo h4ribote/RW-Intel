@@ -155,6 +155,8 @@ class Arm:
     net: object = None
     device: object = None
     batcher: object = None
+    #: What the `wanted` arm puts a strategic priority at, against the terms the ladder reads for itself. Meaningless to every other arm, which leave it where it is.
+    weight: float = 0.0
 
 
 def _arm(arguments, arm: "Arm", arms: int = 1, frozen: FrozenTactics = FrozenTactics()):
@@ -167,6 +169,8 @@ def _arm(arguments, arm: "Arm", arms: int = 1, frozen: FrozenTactics = FrozenTac
     `massed` was meant to be the concentration arm the reading needed, and measurement says it is not one. It is the script ladder with the discount a region takes for the strength we already have standing in it removed — and on this arena that discount is already nought, because the squads are at the staging point and not in the contested regions when the choice is made. Measured: the two arms score identically on 43 of 51 boards at the default garrison and on 37 of 38 at half of it, and the engine does not reproduce, so identical scores mean identical decisions. It is therefore an ablation of one term of the ladder, worth keeping as that, and it is no evidence about concentration. An arm that actually concentrates has to replace the region choice rather than remove a term from it, which is what `concentrate` does. Against the script it says what the spreading rule costs; against the pin it says whether massing on the right ground beats leaving it.
 
     `narrow` is the ladder with each doctrine's candidate set left as its own filter builds it, which is the ladder as it stood before the strategic layer's priority could admit a region to that set. Against the present script arm it says what admission is worth. It replaced an earlier arm that tried the opposite rule - narrowing the candidates to the wanted ones - and that rule is not kept, because measurement said it changed one operational decision in 41508: narrowing cannot move a decision whose candidate set holds no wanted region to begin with.
+
+    `wanted` is the ladder with the strategic layer's request re-weighted against the terms the ladder reads for itself, written `wanted:3` for three times its own worth. It exists because admitting the wanted ground to the candidates was implemented, measured, and moved nothing, and the arithmetic that survived that measurement is a matter of scale: a priority never exceeds one, four resource points are worth 0.6 and enemy strength on ground we hold another 0.3, so a contested point that draws no income loses the scoring to a quiet mine even once it is a candidate. This arm asks whether that is what sends the ladder off the scored ground, and unlike the concentrating arm it does not replace the choice -- every term is still read, and only what the request weighs has moved.
 
     `concentrate` is the arm that does what the massed arm was supposed to do. It keeps the doctrine's own choice of task and overrides only the region, sending every squad at the single region the strategic layer wants most. On this arena the priorities sit on the contested regions alone, so that is every squad at one contest — concentration in the plain sense, made by replacing the choice rather than by removing a term from it.
 
@@ -182,6 +186,8 @@ def _arm(arguments, arm: "Arm", arms: int = 1, frozen: FrozenTactics = FrozenTac
         operations = lambda session, catalogue: Operations(session, catalogue, admit=False)
     elif arm.kind == "concentrate":
         operations = lambda session, catalogue: Concentrated(session, catalogue)
+    elif arm.kind == "wanted":
+        operations = lambda session, catalogue: Operations(session, catalogue, wanted=arm.weight)
     elif arm.kind == "learnt":
         # The trained layer read greedily — its most probable region and task, not a draw — since this measures the policy rather than trains it, and with no rollout it records nothing. Each learnt arm closes over its own network and its own batching server, so several of them in one run neither share parameters nor queue behind one another's window.
         operations = lambda session, catalogue: LearntOperations(
@@ -200,7 +206,7 @@ def _arm(arguments, arm: "Arm", arms: int = 1, frozen: FrozenTactics = FrozenTac
 
 
 #: The operational arms a run may ask for. A learnt one may be written `learnt:PATH` to give it its own parameters, which is how one run carries several of them.
-ARM_KINDS = ("script", "pin", "massed", "narrow", "concentrate", "learnt")
+ARM_KINDS = ("script", "pin", "massed", "narrow", "concentrate", "wanted", "learnt")
 
 
 def arms_of(arguments) -> List[Arm]:
@@ -218,8 +224,20 @@ def arms_of(arguments) -> List[Arm]:
         if kind not in ARM_KINDS:
             raise SystemExit("no such operational arm as %s: the arms are %s, and a learnt one may name its own "
                              "parameters as learnt:PATH" % (kind, ", ".join(ARM_KINDS)))
-        if path and kind != "learnt":
+        if path and kind not in ("learnt", "wanted"):
             raise SystemExit("only a learnt arm carries parameters, and %s named some" % kind)
+        if kind == "wanted":
+            # The weight is the whole of what this arm is, so a bare `wanted` would be the script arm under another name and is refused rather than run as one.
+            try:
+                weight = float(path)
+            except ValueError:
+                raise SystemExit("the wanted arm is written wanted:WEIGHT, as in wanted:3, and %r is not a weight"
+                                 % (path or ""))
+            if weight < 0.0:
+                raise SystemExit("a negative weight would send the layer away from the ground the strategic layer asked for, which is not what any arm here is for")
+            label = "wanted-" + path
+            arms.append(Arm(kind=kind, label=label, name=label, weight=weight))
+            continue
         if kind != "learnt":
             arms.append(Arm(kind=kind, label=kind, name=kind))
             continue

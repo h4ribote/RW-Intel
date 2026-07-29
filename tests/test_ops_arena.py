@@ -1314,3 +1314,34 @@ def test_the_board_reading_cannot_be_changed_by_renaming_the_errand():
     off_disc = named._standing(_tasked(1, 7, [1]), shares, +1.0, units)
     assert abs(on_disc - off_disc) > 1e-6 and off_disc == 0.0, (
         "the region reading no longer pays differently for renaming the errand, so this record is stale")
+
+
+def test_the_wanted_arm_reweighs_the_request_and_nothing_else():
+    """What the strategic layer asked for is scored on the same scale as the terms this layer reads for itself, and that scale was never swept.
+
+    A priority never exceeds one, while four resource points are worth 0.6 and enemy strength on ground we hold another 0.3, so a contested point drawing no income can lose the scoring to a quiet mine. Admitting the wanted ground to the candidates was implemented and measured and moved nothing, which leaves the scale as the standing explanation for where the ladder goes. The arm exists to measure it: every term is still read and only the request's weight moves, so a difference between it and the script arm is about the scale and about nothing else.
+    """
+    from types import SimpleNamespace
+
+    from rwintel.learn.ops_run import arms_of
+
+    region = SimpleNamespace(id=4)
+    orders = SimpleNamespace(priorities={4: 0.5})
+    # The default weight is one, which is the scale every measurement on file was taken at.
+    assert abs(Operations._priority(SimpleNamespace(wanted=1.0), orders, region) - 0.5) < 1e-12
+    assert abs(Operations._priority(SimpleNamespace(wanted=3.0), orders, region) - 1.5) < 1e-12
+    # Ground nobody asked for is worth nothing whatever the weight, so re-weighting cannot invent a request.
+    assert Operations._priority(SimpleNamespace(wanted=9.0), orders, SimpleNamespace(id=7)) == 0.0
+
+    arms = arms_of(SimpleNamespace(our=["script", "wanted:3"], load=None))
+    assert [arm.label for arm in arms] == ["script", "wanted-3"]
+    assert arms[1].weight == 3.0
+
+    # A weight is the whole of what the arm is: without one it would be the script arm under a second name, and two arms of one run cannot be one policy.
+    for written in ("wanted", "wanted:x", "wanted:-1"):
+        try:
+            arms_of(SimpleNamespace(our=[written], load=None))
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("%r was accepted as a re-weighted arm" % written)

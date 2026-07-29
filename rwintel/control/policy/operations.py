@@ -31,6 +31,9 @@ CROWDING_COST = 0.3
 #: What one resource point in a region adds to holding or taking it, on the same scale as a strategic priority. Opening value.
 RESOURCE_WORTH = 0.15
 
+#: What the strategic layer's request is worth against the terms this layer reads for itself. One means "a full priority weighs as much as the ladder's own reading of the ground", which is the opening value and the scale every measurement so far was taken at. It is a knob rather than a constant because of an arithmetic the measurements walked into: a priority never exceeds one, while four resource points are worth 0.6 and enemy strength on ground we hold another 0.3, so a contested point that draws no income can lose the scoring to a quiet mine even after it is admitted to the candidates. Admitting the wanted ground was implemented and measured and moved nothing (about 52 per cent of decisions named priority-bearing ground either way), which is what leaves the scale as the standing candidate for why the ladder goes where it goes.
+WANTED_WEIGHT = 1.0
+
 #: How much enemy strength in a region we hold raises it as something to garrison. Opening value.
 THREAT_WEIGHT = 0.3
 
@@ -90,9 +93,11 @@ class Operations:
     """The operational layer. Reads the board, the strategic orders, the squads the organisation layer has formed and what the tactical layer reports back, and answers with contracts and with what it could not do for want of strength."""
 
     def __init__(self, session, catalogue: Catalogue, crowding: float = CROWDING_COST,
-                 admit: bool = True) -> None:
+                 admit: bool = True, wanted: float = WANTED_WEIGHT) -> None:
         self.session = session
         self.catalogue = catalogue
+        #: What a strategic priority weighs against this layer's own terms. Held on the instance for the reason the crowding term and the admitting rule are: which side of it a region falls on is the sort of thing this project settles by putting two arms on one board, not by argument. Nothing in a match moves it.
+        self.wanted = wanted
         #: Whether ground the strategic layer asked for joins a doctrine's candidates even where the doctrine's own filter would have left it out. Held on the instance for the reason the crowding term is, so that the rule can be turned off and what it is worth read off a measurement rather than argued.
         self.admit = admit
         #: How much our own strength already standing in a region discounts it as a target. Held on the instance rather than read from the constant so that the one term which decides whether the layer spreads or masses can be turned off and measured, which is what the operations arena's massed arm does. What that arm measured is that the term does nothing there: it discounts a region by the strength we already have standing in it, and on the arena the squads are at their staging point rather than in the contested regions when the choice is made, so the discount is already nought and the two arms decide alike on most boards. The term may still be worth something in a match, where squads do stand in the regions they are being re-tasked around; that has not been measured. Nothing in a match changes it; it is a knob for the instrument.
@@ -278,9 +283,9 @@ class Operations:
                  if region.id not in known and self._priority(orders, region) > 0.0]
         return candidates + extra if extra else candidates
 
-    @staticmethod
-    def _priority(orders: OperationsOrders, region: RegionState) -> float:
-        return orders.priorities.get(region.id, 0.0)
+    def _priority(self, orders: OperationsOrders, region: RegionState) -> float:
+        """What the strategic layer asked for, on the scale this layer scores in. The weight is one unless an arm moved it, so this is the request itself everywhere but on an instrument."""
+        return self.wanted * orders.priorities.get(region.id, 0.0)
 
     @staticmethod
     def _reach(region: RegionState) -> float:
