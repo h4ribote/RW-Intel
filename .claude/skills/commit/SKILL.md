@@ -86,13 +86,13 @@ MSG="$(mktemp)"
 cat > "$MSG" <<'MSGEOF'
 <作成したコミットメッセージ全文>
 MSGEOF
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$HOME/.claude/skills/commit/check-commit-style.ps1")" -Path "$(cygpath -w "$MSG")"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w ".claude/skills/commit/check-commit-style.ps1")" -Path "$(cygpath -w "$MSG")"
 ```
 
 Windows 以外 (macOS / Linux) や PowerShell が使えない環境では、同等の Python 版 (`check-commit-style.py`) を使う:
 
 ```bash
-python3 "$HOME/.claude/skills/commit/check-commit-style.py" --path "$MSG"
+python3 ".claude/skills/commit/check-commit-style.py" --path "$MSG"
 ```
 
 3. `error` が1件でも報告されたらメッセージを修正し、error が 0 件になるまで再検査する
