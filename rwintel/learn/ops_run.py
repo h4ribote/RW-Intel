@@ -400,9 +400,10 @@ def signal(sessions, arm: Optional[str] = None) -> None:
 
     The three figures are the decisions the squads were given, the errands those decisions were divided into, and how many horizon payments actually landed on a decision. The last is nought for every arm of this runner and that is not a fault: no arm here is handed a rollout, so no decision is recorded and there is nothing for a payment to land on. It is reported all the same, because it is the figure a training run has to be read by and a measuring run is where the errand lengths it is compared against are taken.
     """
-    periods = errands = terminals = staged = on_priority = 0
-    # Whether the field is there at all, kept apart from its value: an episode written before it existed carries no count, and a missing count read as nought would report an arm as having named no scored ground when nothing had asked.
+    periods = errands = terminals = staged = on_priority = massed = 0
+    # Whether the fields are there at all, kept apart from their values: an episode written before one existed carries no count, and a missing count read as nought would report an arm as having named no scored ground, or never massed, when nothing had asked.
     counted = False
+    counted_massing = False
     for session in sessions:
         for record in session.records:
             if (arm is not None and record.arm != arm) or not record.statistics.get("scored"):
@@ -414,6 +415,9 @@ def signal(sessions, arm: Optional[str] = None) -> None:
             if "on_priority" in record.statistics:
                 counted = True
                 on_priority += int(record.statistics["on_priority"])
+            if "massed" in record.statistics:
+                counted_massing = True
+                massed += int(record.statistics["massed"])
     if not periods or not errands:
         return
     # No share of the decisions is quoted any more. It used to be `min(staged, errands) / errands`, on the ground that the horizon paid each squad's last errand and no other, and that ground is gone: every period is paid its own movement now, so a payment reaches every decision whatever the errands come to, and the old figure would assert the opposite of the truth on every run.
@@ -424,6 +428,10 @@ def signal(sessions, arm: Optional[str] = None) -> None:
     if counted:
         log.info("%d of them named ground the board put a priority on, which is %.0f per cent of this arm's decisions",
                  on_priority, 100.0 * on_priority / periods)
+    # And whether the arm masses at all. The region block carries how many of this side's squads hold a contract on each region, so a layer can see the allocation; this is the only figure that says whether it does anything with it. The concentrating rule reads 100 per cent by construction and the handwritten ladder pushes the other way, discounting a region by the strength already standing in it.
+    if counted_massing:
+        log.info("%d of them were about a squad sharing its region with another of this side, which is %.0f per cent",
+                 massed, 100.0 * massed / periods)
     _report_departures(sessions, arm)
 
 

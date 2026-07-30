@@ -171,6 +171,10 @@ class OpsStatistics:
     #:
     #: It exists to separate two ways of ending up far from the scored ground, which the reach alone cannot tell apart. A layer that re-draws its errand every few periods never arrives anywhere, and ends mid-board with its contracts pointing at contests it kept leaving. A layer that contracts unscored ground is not going anywhere that counts in the first place — and the reward makes that a real temptation, because a squad sent to a region with no priority is paid exactly nought, while one sent to hold ground it already owns can only be paid less than nought. The first is answered by pricing the re-drawing; the second by the reward's own floor. Nothing in the record said which was happening.
     on_priority: int = 0
+    #: Of those decisions, how many were made about a squad sharing its region with at least one other squad of this side.
+    #:
+    #: The one figure that says whether an arm masses. The concentrating rule sends every squad at one contest and reads 100 per cent here by construction; the handwritten ladder discounts a region by the strength already standing in it and so pushes the other way. It exists because the region block was given a count of how many of this side's squads hold a contract on each region, and nothing in the record could then say whether a layer that could see the allocation did anything with it: the score says the layer got better and this says whether massing is what it started doing.
+    massed: int = 0
     #: The departures the frozen tactical layer chose beneath each side, counted by kind. The one diagnostic that can tell an even board fought unevenly by chance from two seats being played differently: the sides run one policy on boards that are one reflection of each other, so a fighter that reads only distances and strengths must produce two counts that differ by the draw, while a trained one whose decision boundary falls between the two seats produces two counts that differ the same way on every board. That difference is what a leaning self-play mean looks like from underneath, and until this was written down nothing recorded could separate the two.
     our_departures: Dict[int, int] = field(default_factory=dict)
     their_departures: Dict[int, int] = field(default_factory=dict)
@@ -189,7 +193,7 @@ class OpsStatistics:
                 "squads": self.squads, "pairs": self.pairs, "garrison": round(self.garrison, 1),
                 "tactics": self.tactics, "operations": self.operations,
                 "terminals": self.terminals, "periods": self.periods, "errands": self.errands,
-                "on_priority": self.on_priority,
+                "on_priority": self.on_priority, "massed": self.massed,
                 "our_departures": {int(k): v for k, v in self.our_departures.items()},
                 "their_departures": {int(k): v for k, v in self.their_departures.items()}}
 
@@ -521,6 +525,7 @@ class OpsArena(Arena):
 
         Read off the contracts the layers wrote onto the squad records rather than off any layer's own bookkeeping, so that it costs the same and means the same for every arm — the handwritten ladder, the pinned deployment, the concentrating arm and a learnt network alike — and so that an arm which keeps no trajectories is still measured. This side only: the statistics belong to the process's own side and the enemy's periods are the mirror's business.
         """
+        held = [squad.contract.target_region for squad in self.squads.values() if squad.contract is not None]
         for squad in self.squads.values():
             contract = squad.contract
             if contract is None:
@@ -528,6 +533,9 @@ class OpsArena(Arena):
             self.statistics.periods += 1
             if self.priorities.get(contract.target_region, 0.0) > 0.0:
                 self.statistics.on_priority += 1
+            # Counted against the contracts standing this period, so it says what the allocation was rather than what any one layer meant by it, and it is the same count for every arm.
+            if held.count(contract.target_region) > 1:
+                self.statistics.massed += 1
             if self._issued.get(squad.id) != contract.issued_at_ms:
                 self._issued[squad.id] = contract.issued_at_ms
                 self.statistics.errands += 1

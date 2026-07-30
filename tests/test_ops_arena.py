@@ -1345,3 +1345,44 @@ def test_the_wanted_arm_reweighs_the_request_and_nothing_else():
             pass
         else:
             raise AssertionError("%r was accepted as a re-weighted arm" % written)
+
+
+def test_the_episode_counts_how_often_squads_share_a_region():
+    """The region block was given a count of how many of this side's squads hold a contract on each region, so a layer can see the allocation. Nothing in the record then said whether a layer that could see it did anything with it.
+
+    That question cannot be answered by the score, which says only that the layer got better, nor by the errand length or the priority share, both of which have been refused as quality measures. This is the figure that says whether massing is what it started doing, and it is counted against the contracts standing in the period rather than off any layer's own bookkeeping, so it costs the same and means the same for the handwritten ladder, the pin, the concentrating rule and a network alike.
+    """
+    from rwintel.control.policy.contracts import Stance, Task, TaskContract
+
+    with _without_the_game_installed():
+        arena = OpsArena(_Session(_grid()), seed=5)
+
+    def contracted(squad_id, region):
+        squad = _tasked(squad_id, region, [squad_id])
+        squad.contract = TaskContract(squad=squad_id, task=Task.ATTACK, target_region=region,
+                                     stance=Stance.AGGRESSIVE, cost_budget=1000.0,
+                                     deadline_ms=90000, issued_at_ms=1000 * squad_id)
+        return squad
+
+    arena.orders = object()
+    arena.priorities = {4: 1.0, 7: 1.0}
+
+    # Two squads on one region and one on its own: two of the three decisions are about a shared region.
+    arena.squads = {0: contracted(0, 4), 1: contracted(1, 4), 2: contracted(2, 7)}
+    arena._survey()
+    assert arena.statistics.periods == 3
+    assert arena.statistics.massed == 2, (
+        "a period with two squads on one region should count both of them as massed, not %d"
+        % arena.statistics.massed)
+
+    # Spread out, nobody shares, and the count does not move even though every squad still holds a contract.
+    arena.squads = {0: contracted(0, 4), 1: contracted(1, 7), 2: contracted(2, 9)}
+    arena._survey()
+    assert arena.statistics.periods == 6 and arena.statistics.massed == 2, (
+        "a period in which no two squads share a region added to the massing count")
+
+    # It is about the allocation and not about the ground being worth anything: a shared region the board puts no priority on still counts as massing, and still names no priority.
+    before = arena.statistics.on_priority
+    arena.squads = {0: contracted(0, 9), 1: contracted(1, 9)}
+    arena._survey()
+    assert arena.statistics.massed == 4 and arena.statistics.on_priority == before
