@@ -886,6 +886,39 @@ def test_the_operational_cut_reads_one_mirrored_board_the_same_way_from_either_s
     assert state(theirs, their_squad, 0) != yours
 
 
+def test_the_region_block_says_how_many_squads_are_committed_to_each_region():
+    """The region block carried where the squad being decided about was going and nothing about where the others were sent, so a layer could not price a second squad onto ground a first was already taking, nor massing three on one contest.
+
+    The reward it is fitted against prices no coordination either -- a squad is paid what its own surviving units account for -- so the count is what makes the allocation visible at all. It is counted off the contracts in force, which is this process's own statement about where a squad was sent and nothing the game reports, and it has to be congruent under the mirror for the same reason every other feature does.
+    """
+    _, ours, theirs, our_squad, their_squad = _mirrored_board()
+    ours = _contacts(rehome(ours, 1, STAGE))
+    theirs = _contacts(rehome(theirs, 2, _reflected(*STAGE)))
+
+    def rows(state_vector, slot):
+        start = GLOBAL_SIZE + slot * REGION_SIZE
+        return dict(zip(REGION_FEATURES, state_vector[start:start + REGION_SIZE]))
+
+    # One squad each, contracted to congruent ground: ours names region one, its mirror names region two.
+    mine = operational_state(ours, None, [our_squad], 30000, base=0)
+    yours = operational_state(theirs, None, [their_squad], 30000, base=1)
+    assert mine == yours, "the count is not congruent between the two sides"
+    committed = [rows(mine, slot)["committed"] for slot in (0, 1)]
+    assert committed[0] > 0.0, "the region a squad is contracted to is not counted"
+    assert committed[1] == 0.0, "a region nobody is contracted to is counted"
+
+    # A second squad onto the same ground moves the number, which is the whole point: two squads on one contest read differently from one.
+    second = _squad(id=4)
+    both = operational_state(ours, None, [our_squad, second], 30000, base=0)
+    assert rows(both, 0)["committed"] > committed[0], (
+        "a second squad contracted to the same region did not raise the count")
+
+    # A squad under no contract has not been sent anywhere and counts nowhere, which is a different statement from having been sent home.
+    idle = _squad(id=5, contract=False)
+    with_idle = operational_state(ours, None, [our_squad, idle], 30000, base=0)
+    assert rows(with_idle, 0)["committed"] == committed[0], "an uncontracted squad was counted somewhere"
+
+
 def test_the_operational_squad_rows_are_offset_by_the_sides_own_first_squad():
     """Why the offset is fixed once rather than recomputed from whoever is alive.
 

@@ -307,6 +307,8 @@ REGION_FEATURES: Tuple[str, ...] = (
     "enemy_present", "distance", "seen_recently", "priority", "spawn",
     # Where the squad being decided about is already going. Written per decision rather than per period, which is what makes it the one region feature that differs between two squads reading the same board.
     "contracted",
+    # How many of this side's squads are on their way here, including the one being decided about. The board's whole allocation rather than this squad's part of it, which is the one thing in this cut that says anything about the other squads' errands: a layer that cannot see where its neighbours were sent cannot price sending a second squad to ground a first is already taking, nor massing three on one contest, and the per-squad reward it is fitted against prices no coordination between squads either. Counted from the contracts in force at the start of the period, so it does not shift as the squads of one period are decided in turn.
+    "committed",
 )
 
 SQUAD_FEATURES: Tuple[str, ...] = (
@@ -398,9 +400,10 @@ def operational_state(view: WorldView, orders, squads: Sequence[SquadRecord],
     priorities = orders.priorities if orders is not None else {}
     ordered = operational_slots(view)
     starts = frozenset(spawns)
+    committed = _committed(squads)
     for slot in range(REGION_SLOTS):
         region = ordered[slot] if slot < len(ordered) else None
-        state.extend(_region_row(region, priorities, ours, game_time_ms, starts, contracted))
+        state.extend(_region_row(region, priorities, ours, game_time_ms, starts, contracted, committed))
 
     slots = squad_slots(squads, base)
     by_slot = {slots[squad.id]: squad for squad in squads}
@@ -410,8 +413,25 @@ def operational_state(view: WorldView, orders, squads: Sequence[SquadRecord],
     return [_finite(value) for value in state]
 
 
+def _committed(squads: Sequence[SquadRecord]) -> Dict[int, int]:
+    """How many of this side's squads each region is holding a contract from.
+
+    Read off the contracts the squads are under rather than off anything the game reports, because a contract is this process's own statement about where a squad was sent and the game has no notion of it. A squad under no contract counts nowhere: it has not been sent anywhere, which is a different thing from having been sent home.
+
+    This is the same count on both sides of a mirror board, since each side counts its own squads and a reflected board gives each side congruent contracts. It is the one part of the region block that says anything about squads other than the one being decided about.
+    """
+    counts: Dict[int, int] = {}
+    for squad in squads:
+        contract = squad.contract
+        if contract is None:
+            continue
+        counts[contract.target_region] = counts.get(contract.target_region, 0) + 1
+    return counts
+
+
 def _region_row(region: Optional[RegionState], priorities: Dict[int, float], ours: float,
-                game_time_ms: int, spawns: frozenset, contracted: Optional[int] = None) -> List[float]:
+                game_time_ms: int, spawns: frozenset, contracted: Optional[int] = None,
+                committed: Optional[Dict[int, int]] = None) -> List[float]:
     if region is None:
         return [0.0] * REGION_SIZE
     return [
@@ -426,6 +446,8 @@ def _region_row(region: Optional[RegionState], priorities: Dict[int, float], our
         _clip(priorities.get(region.id, 0.0)),
         1.0 if region.id in spawns else 0.0,
         1.0 if contracted is not None and region.id == contracted else 0.0,
+        # Divided by the squad block's width rather than by however many squads are standing, so that one squad of two here and one of eight here are different numbers. The block's width is what bounds it: no more squads can be contracted than there are rows to read them in.
+        _clip((committed or {}).get(region.id, 0) / SQUAD_SLOTS),
     ]
 
 
