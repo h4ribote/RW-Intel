@@ -65,8 +65,19 @@ class WorldView:
 
     def contact(self, x: float, y: float, radius: float) -> Dict[Role, float]:
         """What has been run into around a point, by role and by worth. This is the only way anything above the fighting learns what the enemy is fielding once the fog is on."""
+        return self._by_role(self.enemies_near(x, y, radius))
+
+    def contacted(self) -> Dict[Role, float]:
+        """The same reading taken over the whole board rather than around one point: everything of the enemy's this side can presently see, by role and by worth.
+
+        The tactical layer asks the question of a squad's own surroundings, because what it decides is a departure in one fight. The strategic layer asks it of the board, because what it decides is what to build and which posture to hold, and neither is a statement about any one place. Once the fog is on, the squads in contact are the only sensor the chain has and this is the sum of what they can see; with the fog off it is the enemy's whole army, which is the honest reading of an omniscient board.
+        """
+        return self._by_role(self.enemies)
+
+    @staticmethod
+    def _by_role(sightings: List[Sighting]) -> Dict[Role, float]:
         found: Dict[Role, float] = {}
-        for sighting in self.enemies_near(x, y, radius):
+        for sighting in sightings:
             found[sighting.role] = found.get(sighting.role, 0.0) + sighting.value
         return found
 

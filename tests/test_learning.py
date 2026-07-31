@@ -2860,6 +2860,45 @@ def test_the_strategic_layer_is_the_script_with_one_method_replaced():
                                             LOSS_ALLOWANCE_SHARE[Posture.DECIDE] * report.military_value)
 
 
+def test_the_chain_tells_the_strategic_layer_what_the_enemy_is_fielding():
+    """Seven of the strategic cut's twenty-nine features are the shares of the enemy's worth by role, and nothing in the chain used to hand that reading over, so all seven were nought in every frame of every match — a quarter of the cut, structurally dead, and dead in a way no range or length check can see.
+
+    It is the same hole on the rule's side. The handwritten layer's answer to an air-heavy enemy is written as a condition on exactly this reading, so it could never fire either. Both are closed by the chain reading the board and handing it down, which is what this drives end to end: a board with the enemy's worth split between two roles, through the real `ScriptPolicy`, and the layer must have been told.
+    """
+    from rwintel.control.policy import ScriptPolicy
+
+    told = []
+
+    class _Watched(Strategy):
+        def decide(self, report, regions, game_time_ms, contact=None):
+            told.append(contact)
+            return super().decide(report, regions, game_time_ms, contact)
+
+    class _Session:
+        types = _TYPES
+        assets = {}
+        regions = []
+        map_content = None
+
+    session = _Session()
+    policy = ScriptPolicy(session)
+    policy.strategy = _Watched(session, policy.catalogue)
+    # Two of ours and two of the enemy's, the enemy's split across two type indices so the reading is a mix and not one role at whole.
+    units = [_unit(1, 0.0, 0.0), _unit(2, 100.0, 0.0),
+             _unit(3, 900.0, 0.0, type_index=0, hostile=1),
+             _unit(4, 950.0, 0.0, type_index=len(_TYPES) - 1, hostile=1)]
+    policy.plan(_observation(units, [_region(1, 0.0, 0.0)]))
+
+    assert told and told[0], "the chain decided a posture without saying what the enemy is fielding"
+    contact = told[0]
+    assert abs(sum(contact.values()) - sum(_CATALOGUE.value(unit.type_index)
+                                           for unit in units if unit.hostile)) < 1e-9, (
+        "the reading is not the enemy's whole standing worth")
+    # And it reaches the cut as shares that are not all nought, which is the state the layer is actually trained on.
+    state = dict(zip(STRATEGIC_FEATURES, strategic_state(_report(), _places(), 30000, contact=contact)))
+    assert sum(value for name, value in state.items() if name.startswith("contact_")) > 0.0
+
+
 def test_a_match_returns_its_own_score_and_the_shaping_cancels_whole():
     """The property every layer here is built around, on the layer that is paid the match.
 

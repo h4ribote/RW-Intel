@@ -133,8 +133,9 @@ class ScriptPolicy:
             self.last_strategic_ms = now
             self.statistics.strategic += 1
             self._note_lost_regions(view, now)
+            # What the enemy is fielding, over the whole board. Without it the strategic layer's seven contact features are nought in every frame of every match — a quarter of its cut, structurally dead — and the rule's own answer to an air-heavy enemy can never fire, since it is written as a condition on exactly this reading.
             self.economy_orders, self.operations_orders = self.strategy.decide(
-                self._front_report(view), view.regions, now)
+                self._front_report(view), view.regions, now, view.contacted())
 
         if operational and self.operations_orders is not None:
             contracts, self.shortfalls = self.operations.decide(
