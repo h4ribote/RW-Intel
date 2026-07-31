@@ -9,6 +9,7 @@ Advantages are computed here rather than in the optimiser because they need the 
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -121,6 +122,8 @@ class Rollout:
         self.trace = trace
         self.live: Dict[object, Trajectory] = {}
         self.done: List[Trajectory] = []
+        #: Guards the finished list alone. The instance threads file trajectories into it while the trainer thread drains it on its own clock, and the drain used to take what it wanted and then REBIND the attribute to what was left, so a trajectory filed after the replacement list was built and before it was bound went onto a list nothing held any more and went with it. What would be lost is a finished trajectory — decisions collected, paid, and gone from the run with nothing in any census to say so — which is the class of silent loss this buffer's census exists to make impossible. The window was reasoned from the code and not observed: a loop filing eight thousand trajectories against a draining thread lost none, which is what a window of a few bytecodes under one interpreter lock ought to look like. It is shut rather than measured because the cost of shutting it is a lock taken around three list operations and the cost of leaving it is unbounded and invisible. The live dict needs no such guard, since each key belongs to one instance and only that instance's thread touches it.
+        self._filed = threading.Lock()
         #: What the last drain took, kept so that whoever spends a batch can report how it was made up. Overwritten by each drain rather than accumulated, because the question it answers is about one update.
         self.census = Census()
 
@@ -134,7 +137,8 @@ class Rollout:
         trajectory.steps.append(step)
         if step.done:
             trajectory.finished = True
-            self.done.append(trajectory)
+            with self._filed:
+                self.done.append(trajectory)
             del self.live[key]
 
     def close_with(self, key: object, terminal: float) -> bool:
@@ -148,7 +152,8 @@ class Rollout:
         trajectory.steps[-1].reward += terminal
         trajectory.steps[-1].done = True
         trajectory.finished = True
-        self.done.append(trajectory)
+        with self._filed:
+            self.done.append(trajectory)
         del self.live[key]
         return True
 
@@ -165,7 +170,8 @@ class Rollout:
             return
         trajectory.tail_value = trajectory.steps[-1].value if tail_value is None else tail_value
         trajectory.reason = reason
-        self.done.append(trajectory)
+        with self._filed:
+            self.done.append(trajectory)
 
     def cut_all(self, tail_value: Optional[float] = None, owner: object = None,
                 reason: str = "unobserved") -> None:
@@ -187,7 +193,9 @@ class Rollout:
         touched = set(squads)
         if not touched:
             return
-        for trajectory in list(self.done) + list(self.live.values()):
+        with self._filed:
+            finished = list(self.done)
+        for trajectory in finished + list(self.live.values()):
             key = trajectory.key
             if not (isinstance(key, tuple) and key and key[0] == owner):
                 continue
@@ -200,7 +208,9 @@ class Rollout:
 
         Called at the end of an episode's close, after any interference with the episode has been marked. Until then a trajectory that finished in the middle of the episode sits in the finished set drainable, and the trainer thread runs on its own clock: it can pull that trajectory into an update before the episode closes and the tainting runs, so an intruder-touched decision leaks into the gradient untainted. Sealing only at close, after the taint, is what shuts that window. Scoped to the owner exactly as taint and cut_all are, because one buffer serves every instance of a run and an episode closing on one instance says nothing about the fight another is still in the middle of. Setting a flag in place rather than moving the trajectory keeps this safe to call from an instance's own thread while the trainer reads the same set: the trainer only ever removes trajectories, and only the ones already sealed.
         """
-        for trajectory in self.done:
+        with self._filed:
+            finished = list(self.done)
+        for trajectory in finished:
             key = trajectory.key
             if owner is None or (isinstance(key, tuple) and key and key[0] == owner):
                 trajectory.sealed = True
@@ -210,12 +220,13 @@ class Rollout:
 
         With ``sealed_only`` the trainer takes only the trajectories an episode's close has sealed and leaves the rest in place, so a trajectory that finished mid-episode is never drained before the tainting that decides whether it is clean has run. The finishing paths that take the whole buffer at once — the last update of a run and the collecting run's single read — seal everything first and drain without the gate.
         """
-        if sealed_only:
-            ready = [trajectory for trajectory in self.done if trajectory.sealed]
-            self.done = [trajectory for trajectory in self.done if not trajectory.sealed]
-        else:
-            ready = self.done
-            self.done = []
+        with self._filed:
+            if sealed_only:
+                ready = [trajectory for trajectory in self.done if trajectory.sealed]
+                self.done[:] = [trajectory for trajectory in self.done if not trajectory.sealed]
+            else:
+                ready = list(self.done)
+                del self.done[:]
         out: List[Step] = []
         for trajectory in ready:
             self._finish(trajectory)

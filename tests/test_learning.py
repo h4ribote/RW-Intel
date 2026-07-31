@@ -478,6 +478,24 @@ def test_a_finished_trajectory_is_held_from_the_gated_drain_until_its_episode_is
     assert len(drained) == 3 and not rollout.done
 
 
+def test_a_drain_empties_the_finished_list_rather_than_replacing_it():
+    """The instance threads file finished trajectories into this list while the trainer drains it on its own clock, so a drain that builds a replacement list and binds it over the attribute drops whatever was filed after the replacement was built. What would be dropped is a finished trajectory — decisions collected, paid, and gone from the run with nothing in any census to say so.
+
+    Pinned as identity rather than as a race, because a race is exactly what a test cannot pin: the window is a few bytecodes wide under one interpreter lock, and a loop filing eight thousand trajectories against a draining thread lost none. What can be pinned is the property that makes the window impossible, which is that the list a filer holds is the list the drain empties.
+    """
+    rollout = Rollout()
+    held = rollout.done
+    for key in (1, 2):
+        rollout.add((0, key), Step(state=[0.0], action=0, mask=[1.0], squad=key, done=True))
+    rollout.seal(0)
+    assert len(rollout.drain(sealed_only=True)) == 2
+    assert rollout.done is held, "the gated drain replaced the list its filers are appending to"
+
+    rollout.add((0, 3), Step(state=[0.0], action=0, mask=[1.0], squad=3, done=True))
+    assert len(rollout.drain()) == 1
+    assert rollout.done is held, "the ungated drain replaced the list its filers are appending to"
+
+
 def test_an_interfered_decision_that_finished_mid_episode_is_tainted_before_it_can_be_drained():
     """The race the seal closes: a squad the intruder touched finishes its errand in the middle of an episode, so its trajectory joins the finished set several periods before the episode closes and the tainting runs, and the trainer thread drains on its own clock. Held unsealed, the trajectory cannot be drained in that window; when the episode closes the taint marks it and the seal releases it, and the gated drain then drops it as interfered with, so the decision never reaches an update. Squad 2, untouched, is the control that proves the gate releases what it should."""
     rollout = Rollout()
