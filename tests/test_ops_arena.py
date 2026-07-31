@@ -50,6 +50,7 @@ from rwintel.learn.ops_arena import (
     OpsStatistics,
     _Contest,
 )
+from rwintel.control.policy.strategy import LOSS_ALLOWANCE_FLOOR, OFFENSIVE
 from rwintel.wire import (
     BLOCK_REGIONS,
     BLOCK_UNITS,
@@ -319,6 +320,21 @@ def test_the_synthesized_priorities_are_invariant_under_the_mirror_map():
     for region, weight in arena.priorities.items():
         mirror = arena.mirror_of[region]
         assert arena.priorities[mirror] == weight
+
+    # The posture is drawn rather than pinned, and the two orders it decides are read off the same tables a match reads them off.
+    #
+    # Pinned to ARM before, with the other two drawn independently: four of the operational cut's five posture features were nought on every board this arena had drawn, while in a match all five move, and `offensive` and the allowance became free quantities that no strategic layer could have paired that way. A board saying "hold the front, and press" is a board a match cannot emit.
+    assert arena.orders.offensive is OFFENSIVE[arena.orders.posture]
+    assert arena.orders.loss_allowance >= LOSS_ALLOWANCE_FLOOR
+    drawn = set()
+    for seed in range(24):
+        other = _arena(session=_Session(_grid()), seed=seed, sites=_CORNERS)
+        other.last_regions = list(_grid())
+        other._deploy(_observation(slot=0), Action(), 0)
+        if other.orders is not None:
+            drawn.add(other.orders.posture)
+            assert other.orders.offensive is OFFENSIVE[other.orders.posture]
+    assert len(drawn) >= 4, "the draw reaches only %d posture(s), so the cut's posture block barely moves" % len(drawn)
 
     # The layers are told about more ground than the episode scores, and every weight in that dict is even under the reflection too.
     wanted = arena.orders.priorities

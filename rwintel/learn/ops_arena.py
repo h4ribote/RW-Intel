@@ -22,6 +22,7 @@ from ..wire import (
     encode_action,
 )
 from ..control.policy.contracts import Doctrine, OperationsOrders, Posture, SquadRecord
+from ..control.policy.strategy import LOSS_ALLOWANCE_FLOOR, LOSS_ALLOWANCE_SHARE, OFFENSIVE
 from ..control.policy.operations import Operations
 from ..control.policy.tactics import Tactics
 from ..control.policy.view import WorldView, build as build_view, rehome
@@ -98,6 +99,9 @@ SCRIPT_TACTICS = "script"
 
 #: The doctrines a staged squad may be drawn from. Engineers are excluded because the economy drives them and a contract would land on top of a placement; garrisons are the defenders, drawn separately and never staged as a taskable squad.
 _DOCTRINES = (Doctrine.VANGUARD, Doctrine.GARRISON, Doctrine.RAID)
+
+#: The postures a board may be drawn under. Every one of them, because the whole point of drawing it is that a match holds each of them for part of a match and the layer must have seen all five.
+POSTURES = tuple(Posture)
 
 
 def _tally(force) -> Dict[int, int]:
@@ -538,9 +542,18 @@ class OpsArena(Arena):
             wanted[first] = weight
             wanted[second] = weight
         self.wanted = wanted
-        self.orders = OperationsOrders(posture=Posture.ARM, priorities=wanted,
-                                       offensive=self.random.random() < 0.5,
-                                       loss_allowance=self.random.uniform(*SQUAD_VALUE))
+        # A posture drawn per board, with the two orders it decides read off the same tables a match reads them off.
+        #
+        # Pinned to ARM before, with the other two drawn independently of it and of each other. Both halves of that were wrong in the same way. The posture is five of the operational cut's global features, so four of them were nought and one was one on every board this arena has ever drawn, while in a match all five move; and `offensive` and the loss allowance are not free quantities in a match at all — they are a table lookup on the posture, so drawing them apart from it produced combinations a match cannot emit, and the layer was shown a board saying "hold the front, and press" that no strategic layer will ever say. The posture is one statement about the board and identical to both sides, so drawing it changes nothing about the mirror.
+        posture = self.random.choice(POSTURES)
+        # What a match would call this side's military value, which is what the allowance is a share of: the worth of the squads it staged. Read off the tallies the spawn rows were ordered against rather than off the board, because the board has not been spawned yet when the orders are drawn, and the two sides were ordered against the same tallies anyway.
+        staged = sum(count * self.catalogue.value(index)
+                     for slot in range(self.our_n)
+                     for index, count in self._wanted.get(slot, {}).items())
+        self.orders = OperationsOrders(posture=posture, priorities=wanted,
+                                       offensive=OFFENSIVE[posture],
+                                       loss_allowance=max(LOSS_ALLOWANCE_FLOOR,
+                                                          LOSS_ALLOWANCE_SHARE[posture] * staged))
 
     def _quiet_pairs(self) -> List[Tuple[int, int]]:
         """Every unordered pair of regions the board's reflection maps onto each other and no contest was drawn on, each named once, in the map's own order so the draw is a function of the seed and not of a dict's iteration.
