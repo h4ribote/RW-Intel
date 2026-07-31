@@ -179,6 +179,7 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena.until_ms = 0
     arena.known = set()
     arena._wanted = {}
+    arena._drawn = {}
     arena._period = 0
     arena._issued = {}
     arena._sandbox_sent = True
@@ -366,6 +367,16 @@ def test_garrisons_never_enter_the_taskable_squad_dicts():
     commissioned = {member for squad in list(arena.squads.values()) + list(arena.enemy.values())
                     for member in squad.members}
     assert commissioned and not (commissioned & garrison_ids)
+
+    # And every staged squad carries the doctrine its force was drawn for, on both sides and slot for slot.
+    #
+    # Not the one its first unit would be offered to, which is a different question with a different answer: `doctrine_for` tries ENGINEER, RAID, GARRISON and VANGUARD in that order, so a tank goes to GARRISON and a vanguard force comes back labelled a garrison. The label is the action space here — `task_mask` reads it — so such a squad would be offered DEFEND and ESCORT and never ATTACK, in an arena built to measure whether ground is taken, while a match musters fighting formations first and gives the same armour a vanguard's head.
+    for slot, squad in list(arena.squads.items()) + list(arena.enemy.items()):
+        assert squad.doctrine is arena._drawn[slot], (
+            "slot %d was drawn as %s and came back as %s" % (slot, arena._drawn[slot], squad.doctrine))
+    mirrored = {slot: arena._drawn[slot] for slot in range(arena.our_n)}
+    assert all(arena._drawn[arena.our_n + slot] is doctrine for slot, doctrine in mirrored.items()), (
+        "the mirror squad is the same force reflected and has to be the same doctrine")
 
 
 def test_an_episode_is_refused_when_the_room_exposes_no_sparring_slot():

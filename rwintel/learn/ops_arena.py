@@ -306,6 +306,8 @@ class OpsArena(Arena):
         self._our_pt: Optional[Tuple[float, float]] = None
         self._their_pt: Optional[Tuple[float, float]] = None
         self._wanted: Dict[int, Dict[int, int]] = {}
+        #: Which doctrine each staged slot's force was drawn for, so the squad carries the doctrine it was built as rather than the one its first unit would be offered to.
+        self._drawn: Dict[int, Doctrine] = {}
         self._period = 0
         #: When each of this side's squads was last handed a contract, so that a fresh one can be told from the same one standing. A contract carries the moment it was issued and the operational layer only writes a new one when something about it changed, so a change in this figure is exactly one errand ending and another beginning.
         self._issued: Dict[int, int] = {}
@@ -411,6 +413,9 @@ class OpsArena(Arena):
             # Both sides commission against the same tally: the mirror squad is the same force reflected, so what is wanted of it is identical.
             self._wanted[slot] = tally
             self._wanted[self.our_n + slot] = tally
+            # And the doctrine the force was drawn for, kept for the same two slots and for the same reason. Without it the squad is labelled by what the engagement arena's `_record` reads off its first unit, which is a different question with a different answer: `doctrine_for` offers a loose unit to ENGINEER, RAID, GARRISON and VANGUARD in that order, so a tank goes to GARRISON and a vanguard force drawn here comes back labelled a garrison. That is not a name — the label is what `task_mask` reads, so such a squad is offered DEFEND and ESCORT and never ATTACK or ENCIRCLE, in an arena built to measure whether ground is taken. A match does the opposite: its organisation layer musters in FORMATION_ORDER, fighting formations first, so an armour squad there is a vanguard with ATTACK on its head. The layer was being trained on one action space and measured in another.
+            self._drawn[slot] = doctrine
+            self._drawn[self.our_n + slot] = doctrine
             rows = self._rows(force, our_slot, self._scatter(our_stage, slot))
             our_rows += rows
             their_rows += [self._reflect_row(row, centre, their_slot) for row in rows]
@@ -446,10 +451,10 @@ class OpsArena(Arena):
         their_assign = self._assign(fresh, hostile=True, point=self._their_pt,
                                     slots=range(self.our_n, 2 * self.our_n))
         for slot, units in our_assign.items():
-            self.squads[slot] = self._record(slot, units, observation)
+            self.squads[slot] = self._staged(slot, units, observation)
             action.squads.append(SquadAssignment(squad=slot, units=units))
         for slot, units in their_assign.items():
-            self.enemy[slot] = self._record(slot, units, observation)
+            self.enemy[slot] = self._staged(slot, units, observation)
             action.squads.append(SquadAssignment(squad=slot, units=units,
                                                  owner=self._their_slot(observation)))
 
@@ -467,6 +472,15 @@ class OpsArena(Arena):
         self.until_ms = now + self.horizon_ms
         # The scored window opens here, so the tenure reading is a mean over exactly the horizon and not over whatever stretch of it the region block happened to ride a frame in.
         self._marked_ms = now
+
+    def _staged(self, slot: int, units, observation: Observation) -> SquadRecord:
+        """One staged squad, carrying the doctrine its force was drawn for rather than the one its first unit would be offered to.
+
+        The engagement arena reads the doctrine off the units because it draws no doctrine — it builds one ground-armour pool and the label is only a name there. Here the label is the action space: `task_mask` reads it, so a squad labelled a garrison is offered DEFEND and ESCORT and never ATTACK, and the script ladder dispatches on it too. The draw is the honest answer and it is already in hand.
+        """
+        record = self._record(slot, units, observation)
+        drawn = self._drawn.get(slot)
+        return record if drawn is None else replace(record, doctrine=drawn)
 
     def _assign(self, fresh, hostile: bool, point, slots) -> Dict[int, List[int]]:
         """The units of one side's staged squads, taken from what newly appeared near that side's staging point, of the right hostility, against each slot's order in turn. A consumable pool rather than the engagement arena's `_commissioned` per slot, because several squads of one side spawn at one point and a unit taken into one must not be taken into the next; the position filter is what keeps a garrison spawned out at a contest point from being swept into a staging squad."""
