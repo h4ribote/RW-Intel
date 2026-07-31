@@ -107,7 +107,8 @@ class Optimiser:
         old = torch.tensor([step.log_prob for step in steps], dtype=torch.float32, device=self.device)
         slots = seconds = None
         if self.two_headed:
-            slots = torch.stack([one_hot_slot(step.squad, device=self.device) for step in steps])
+            # The row the decider was asked about, and not the squad's own number: the two differ by the offset a side's numbering starts at, and rebuilding the one-hot from the number would update the network against a row it was never asked about.
+            slots = torch.stack([one_hot_slot(step.slot, device=self.device) for step in steps])
             seconds = (torch.tensor([step.second for step in steps], dtype=torch.long, device=self.device),
                        torch.tensor([list(step.second_mask) for step in steps], dtype=torch.float32,
                                     device=self.device))

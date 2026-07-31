@@ -899,7 +899,7 @@ def _write_steps(steps, path: Optional[str], layer: str) -> None:
                              separators=(",", ":")) + "\n")
         for step in steps:
             out.write(json.dumps({"state": [round(v, 5) for v in step.state], "action": step.action,
-                                  "second": step.second, "squad": step.squad, "at_ms": step.at_ms,
+                                  "second": step.second, "squad": step.squad, "slot": step.slot, "at_ms": step.at_ms,
                                   "mask": [int(value > 0) for value in step.mask],
                                   "second_mask": [int(value > 0) for value in step.second_mask],
                                   "reward": round(step.reward, 5), "tainted": step.tainted},

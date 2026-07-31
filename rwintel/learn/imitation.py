@@ -459,7 +459,11 @@ def _sample(row: dict, where: str) -> Sample:
                   action=int(row["action"]), second=int(row.get("second", -1)),
                   mask=tuple(row.get("mask") or ()),
                   second_mask=tuple(row.get("second_mask") or ()),
-                  squad=int(row.get("squad", 0)))
+                  # The row the layer was asked about. A teacher written before the row and the squad number were
+                  # told apart carries only the number, and on every such file the two are equal — the side that
+                  # was collected began its numbering at nought — so reading the number where the row is absent
+                  # fits exactly what those files meant.
+                  squad=int(row.get("slot", row.get("squad", 0))))
 
 
 def _check(sample: Sample, layer: str, where: str) -> None:

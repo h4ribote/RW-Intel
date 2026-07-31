@@ -423,10 +423,33 @@ class LearntOperations(Operations):
         The script layer keeps a squad on the errand it is already running unless a mission report gives a reason to change, because two regions of nearly equal score trade places whenever a shot lands in either and a squad re-tasked on that difference walks between them for ever. A learnt layer is being asked to make exactly that judgement itself, so overriding its answer with the rule would be measuring the rule. Nothing is lost by removing it: a contract that names the same region and task as the one already held is not re-issued, so a policy that decides to stay costs nothing.
 
         With no decider this class is recording what the script chose rather than replacing it, so the script's own rule has to stand or what is written down is not what the script does.
+
+        And what is written down has to be the answer this returns, not the one it was handed. The step is recorded where the choice is made, one call earlier, and that call is the SCORING of the board — which the rule then overrules whenever the squad is running a mission that has not stalled, failed, finished or expired. That overruling is not a detail of the rule: it is what makes the handwritten ladder's errand last a hundred and twenty-seven decisions instead of one, and it fires on the great majority of its decisions. A teacher written from the scoring alone is a teacher for a policy that re-scores the board every period and never holds an errand — which is not the ladder, and is a fair description of what fitting to it produced. So the label is corrected here to the contract that actually goes out.
         """
-        if self.decider is None:
-            return super()._settled(view, orders, squad, chosen, avoid)
-        return chosen
+        if self.decider is not None:
+            return chosen
+        settled = super()._settled(view, orders, squad, chosen, avoid)
+        self._relabel(squad, settled)
+        return settled
+
+    def _relabel(self, squad: SquadRecord, settled) -> None:
+        """Rewrites the decision waiting on this squad to name what the rule settled on, where that differs from what the scoring picked.
+
+        A region past the last row of the block cannot be written down at all — a label outside the head would be fitted as if it named some other place — so the decision is dropped rather than recorded wrongly, which is the same choice `_pick` makes when the scoring itself lands outside the block.
+        """
+        step = self.pending.get(squad.id)
+        if step is None:
+            return
+        if settled is None:
+            self.pending.pop(squad.id, None)
+            return
+        task, region = settled
+        slot = next((index for index, row in enumerate(self._slots) if row.id == region.id), -1)
+        if slot < 0:
+            self.pending.pop(squad.id, None)
+            return
+        step.action = slot
+        step.second = int(task)
 
     def _pick(self, view: WorldView, orders: OperationsOrders, squad: SquadRecord,
               avoid: Optional[int]) -> Optional[Tuple[Task, RegionState]]:
@@ -463,7 +486,8 @@ class LearntOperations(Operations):
                 state=state, action=choice.action, mask=list(self._regions),
                 second=choice.second, second_mask=list(tasks),
                 log_prob=choice.total_log_prob, value=choice.value,
-                squad=squad.id, at_ms=view.observation.game_time_ms)
+                squad=squad.id, slot=squad.id - self.base,
+                at_ms=view.observation.game_time_ms)
         return Task(choice.second), region
 
     def flush(self) -> None:

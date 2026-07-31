@@ -53,8 +53,10 @@ class Step:
     ret: float = 0.0
     #: True once anyone outside the command chain has touched the squad this decision was about.
     tainted: bool = False
-    #: Which squad it was about, so that interference discovered later can find it.
+    #: Which squad it was about, so that interference discovered later can find it. The squad's own number as the game and the intruder know it, and therefore not a row of anything.
     squad: int = -1
+    #: Which row of the squad block the decision was asked about, where a layer is asked one squad at a time. That is a different number from the squad's own, and the difference is the offset a side's numbering starts at: one process drives both sides of the constructed arena out of one numbering, so the other side's squads are some run of numbers that does not begin at nought. Kept apart from `squad` because the two are read by different things and were once the same field — the decider was asked with the offset row and the optimiser rebuilt the one-hot from the raw number, so the network was updated against a row it had not been asked about wherever the two differ. Minus one where the layer has no such row, which is every layer but the operational one.
+    slot: int = -1
     at_ms: int = 0
 
 

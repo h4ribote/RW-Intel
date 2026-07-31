@@ -35,6 +35,7 @@ from rwintel.control.policy.contracts import (
     SquadRecord,
     TaskContract,
 )
+from rwintel.control.policy.operations import Operations
 from rwintel.control.policy.strategy import (
     LOSS_ALLOWANCE_FLOOR,
     LOSS_ALLOWANCE_SHARE,
@@ -837,6 +838,71 @@ def test_a_layer_asks_about_each_squad_from_that_squads_own_errand():
     assert asked[0] != asked[1], "two squads on one board were handed the same errand"
     differ = [index for index, (a, b) in enumerate(zip(*asked)) if a != b]
     assert len(differ) == 2, "the two states should differ in the contracted flag of two rows and nothing else"
+
+
+def test_the_operational_teacher_records_the_contract_that_actually_goes_out():
+    """What a teacher writes down has to be what the layer did, and for the operational layer it was not.
+
+    The decision is recorded where the choice is made, and that call is the scoring of the board; the rule then overrules the scoring whenever the squad is running a mission that has not stalled, failed, finished or expired. That overruling is what makes the handwritten ladder hold an errand for a hundred-odd decisions instead of re-scoring every period, so it fires on most of them — and a teacher written from the scoring alone teaches a policy that never holds an errand at all.
+
+    Driven here on a board where the two differ by construction: the squad holds a running contract on one region while the scoring prefers the other.
+    """
+    rollout = Rollout()
+    layer = LearntOperations(None, _CATALOGUE, None, rollout=rollout, instance=0)
+    # Two regions, the far one worthless and the near one wanted, so the scoring prefers the near one.
+    regions = [_region(1, 0.0, 0.0, distance=100.0, theirs=800.0),
+               _region(2, 900.0, 0.0, distance=900.0, theirs=0.0)]
+    view = _view([_unit(1, 880.0, 0.0), _unit(2, 900.0, 0.0)], regions)
+    squad = _squad(id=0, members=(1, 2))
+    squad.doctrine = Doctrine.VANGUARD
+    squad.status = Status.ACTIVE
+    squad.contract.target_region = 2                      # already running an errand on the far region
+    orders = OperationsOrders(posture=Posture.ARM, priorities={1: 1.0, 2: 0.0}, offensive=True,
+                              loss_allowance=1000.0)
+
+    # The two really do differ on this board, or the test would pass on a policy that never corrected anything.
+    scored = Operations(None, _CATALOGUE)._pick(view, orders, squad, None)
+    assert scored is not None and scored[1].id != squad.contract.target_region, (
+        "the board was built so that the scoring and the running errand name different regions")
+
+    contracts, _ = layer.decide(view, orders, [squad], [], 30000)
+    step = layer.pending.get(0)
+    assert step is not None, "the teacher recorded nothing for a squad it decided about"
+    settled = next((index for index, row in enumerate(operational_slots(view))
+                    if row.id == squad.contract.target_region), -1)
+    assert step.action == settled, (
+        "the teacher wrote down the region the scoring preferred rather than the errand the rule kept")
+    assert not contracts, "an unchanged contract is not re-issued, which is the whole of what the rule did here"
+
+
+def test_a_decision_is_updated_against_the_row_it_was_asked_about():
+    """The row of the squad block a decision was asked about is not the squad's own number, and writing down only the number made the optimiser rebuild the one-hot from the wrong thing.
+
+    One process drives both sides of the constructed arena out of one numbering, so a side's squads are some run of numbers that need not begin at nought, and every layer offsets its rows by the first number it was ever handed. The decider is asked with the offset row. The step used to record the raw number, and the trainer built its one-hot from that, so wherever a side's numbering did not begin at nought the network was asked about one row and updated against another. Both are written down now, and each is read by whatever needs it — the raw number by the tainting, which has to find a squad an intruder named, and the row by the optimiser.
+    """
+    asked = []
+
+    class _Watching:
+        def choose(self, state, slot, region_mask, task_mask):
+            asked.append(slot)
+            return Choice(action=0, second=0)
+
+    rollout = Rollout()
+    layer = LearntOperations(None, _CATALOGUE, _Watching(), rollout=rollout, instance=0)
+    regions = [_region(1, 0.0, 0.0, distance=100.0), _region(2, 600.0, 0.0, distance=700.0)]
+    view = _view([_unit(1, 10.0, 0.0), _unit(2, 20.0, 0.0)], regions)
+    # A side whose numbering starts at four, which is what the arena hands its second side.
+    first, second = _squad(id=4, members=(1,)), _squad(id=5, members=(2,))
+    first.contract.target_region, second.contract.target_region = 1, 2
+    orders = OperationsOrders(posture=Posture.ARM, priorities={1: 1.0, 2: 1.0}, offensive=True,
+                              loss_allowance=1000.0)
+    layer.decide(view, orders, [first, second], [], 30000)
+
+    assert asked == [0, 1], "the decider is asked about the row, offset by where this side's numbering starts"
+    assert sorted(step.slot for step in layer.pending.values()) == [0, 1], (
+        "the optimiser would rebuild the one-hot from a row the network was never asked about")
+    assert sorted(step.squad for step in layer.pending.values()) == [4, 5], (
+        "the tainting has to find a squad by the number an intruder names it by")
 
 
 def test_the_operational_cut_reads_one_mirrored_board_the_same_way_from_either_side():
