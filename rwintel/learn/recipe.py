@@ -91,17 +91,26 @@ def rule_digests() -> dict:
     A teacher is a recording of a rule, and the rule is the half of it nothing could state. The eighth tactical departure is the case that showed it: the ladder answered a fifth of its boards by walking in on a squad that was outranged, that was measured to cost it 0.0675 and taken out, and a teacher recorded before the change states exactly the encoding one recorded after states. Fitting to the old file would produce a network imitating a rule that no longer exists, and reporting a perfectly ordinary accuracy for it.
 
     Walked from each layer's own deciding entry point, with the class handed in before its module so a method reaching its own helpers resolves. What is deliberately NOT here is the reporting half of these layers: what a teacher records is the choice, so what has to be digested is what makes the choice.
+
+    Two things beyond the rule itself belong here, and both were found missing by a review of the session that added them. One, the recording wrapper writes the label. The operational teacher used to write the region the SCORING picked and now writes the contract the rule settles on, which is a different answer on most boards — and that rewriting lives in `LearntOperations`, not in `Operations`, so a teacher recorded either side of the change stated the same digest. Two, what the rule is SHOWN is part of what it answers. The chain did not hand the strategic layer a contact reading at all, so the seven contact features were nought in every frame of every match and the rule's own answer to an air-heavy enemy could never fire; a teacher recorded either side of that change likewise stated the same digest. So the wrapper's recording path and the chain's supply of the board are walked with the rules they serve.
     """
+    from ..control import policy as chain_module
     from ..control.policy import operations as operations_module
     from ..control.policy import strategy as strategy_module
     from ..control.policy import tactics as tactics_module
+    from ..control.policy import view as view_module
+    from . import layers as layers_module
 
     return {
         "tactics": digest([tactics_module.Tactics, tactics_module], ["_departure"]),
-        "operations": digest([operations_module.Operations, operations_module],
-                             ["_plan", "_target", "_settled", "_pick", "_vanguard", "_garrison",
-                              "_raid", "_admit", "_priority", "_reach", "_price", "_changed"]),
-        "strategy": digest([strategy_module.Strategy, strategy_module],
+        "operations": digest([operations_module.Operations, layers_module.LearntOperations,
+                              operations_module, layers_module],
+                             ["_plan", "_target", "_settled", "_relabel", "_pick", "_vanguard",
+                              "_garrison", "_raid", "_admit", "_priority", "_reach", "_price",
+                              "_changed"]),
+        "strategy": digest([strategy_module.Strategy, strategy_module,
+                            view_module.WorldView, view_module, chain_module.ScriptPolicy,
+                            chain_module],
                            ["_transition", "_overrun", "_income_levelled_off", "_mix",
-                            "_priorities", "_score"]),
+                            "_priorities", "_score", "contacted", "plan"]),
     }

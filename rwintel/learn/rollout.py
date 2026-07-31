@@ -122,39 +122,41 @@ class Rollout:
         self.trace = trace
         self.live: Dict[object, Trajectory] = {}
         self.done: List[Trajectory] = []
-        #: Guards the finished list alone. The instance threads file trajectories into it while the trainer thread drains it on its own clock, and the drain used to take what it wanted and then REBIND the attribute to what was left, so a trajectory filed after the replacement list was built and before it was bound went onto a list nothing held any more and went with it. What would be lost is a finished trajectory — decisions collected, paid, and gone from the run with nothing in any census to say so — which is the class of silent loss this buffer's census exists to make impossible. The window was reasoned from the code and not observed: a loop filing eight thousand trajectories against a draining thread lost none, which is what a window of a few bytecodes under one interpreter lock ought to look like. It is shut rather than measured because the cost of shutting it is a lock taken around three list operations and the cost of leaving it is unbounded and invisible. The live dict needs no such guard, since each key belongs to one instance and only that instance's thread touches it.
+        #: Guards both collections against the threads that share them. The instance threads file trajectories into it while the trainer thread drains it on its own clock, and the drain used to take what it wanted and then REBIND the attribute to what was left, so a trajectory filed after the replacement list was built and before it was bound went onto a list nothing held any more and went with it. What would be lost is a finished trajectory — decisions collected, paid, and gone from the run with nothing in any census to say so — which is the class of silent loss this buffer's census exists to make impossible. Of the two hazards here, one was reproduced and one was not. The lost trajectory was not: a loop filing eight thousand of them against a draining thread lost none, which is what a window of a few bytecodes under one interpreter lock ought to look like, and it is shut because shutting it costs a lock around three list operations while leaving it costs something unbounded and invisible. **The raise was reproduced.** Driven the way a run drives this — eight instances filing, tainting, cutting and sealing while a trainer thread asks how much is outstanding — the census walks the live dict as another instance inserts its own key and dies with `dictionary changed size during iteration`, and what a run then has is a buffer that fills and is never drained. There is no test for it, and that is a decision rather than an omission: the same drive reproduces it two runs in six, so a test of it would pass with the fault present twice as often as it caught it, and a guard that reports the wrong answer most of the time is worse than none. The live dict is guarded for a plainer reason: each key belongs to one instance, but three methods walk the WHOLE dict from whichever thread calls them — the census of what is outstanding, the tainting, and the cut that ends an owner's trajectories — and a dict walked while another instance inserts or removes its own key raises where it stands. Taken around the mutations and around the walks, and never held across a call that takes it again.
         self._filed = threading.Lock()
         #: What the last drain took, kept so that whoever spends a batch can report how it was made up. Overwritten by each drain rather than accumulated, because the question it answers is about one update.
         self.census = Census()
 
     def __len__(self) -> int:
-        return sum(len(t.steps) for t in self.done) + sum(len(t.steps) for t in self.live.values())
+        with self._filed:
+            return (sum(len(t.steps) for t in self.done)
+                    + sum(len(t.steps) for t in self.live.values()))
 
     def add(self, key: object, step: Step) -> None:
-        trajectory = self.live.get(key)
-        if trajectory is None:
-            trajectory = self.live[key] = Trajectory(key=key)
-        trajectory.steps.append(step)
-        if step.done:
-            trajectory.finished = True
-            with self._filed:
+        with self._filed:
+            trajectory = self.live.get(key)
+            if trajectory is None:
+                trajectory = self.live[key] = Trajectory(key=key)
+            trajectory.steps.append(step)
+            if step.done:
+                trajectory.finished = True
                 self.done.append(trajectory)
-            del self.live[key]
+                del self.live[key]
 
     def close_with(self, key: object, terminal: float) -> bool:
         """Adds a terminal payment to the last decision of a live trajectory and ends it there, and says whether there was one to end.
 
         For the case where what ended the work is known only after the last decision about it was already paid and filed. A squad destroyed is the example this exists for: the period that discovers it is a period with no squad left to decide anything, so there is no outstanding decision to hang the ending on, and the last one there was has already gone into the trajectory as an ordinary step. Reaching back to it is the only way to say that the work ended rather than stopped being watched, and the difference between those two is the difference between a nought bootstrap and a value one.
         """
-        trajectory = self.live.get(key)
-        if trajectory is None or not trajectory.steps:
-            return False
-        trajectory.steps[-1].reward += terminal
-        trajectory.steps[-1].done = True
-        trajectory.finished = True
         with self._filed:
+            trajectory = self.live.get(key)
+            if trajectory is None or not trajectory.steps:
+                return False
+            trajectory.steps[-1].reward += terminal
+            trajectory.steps[-1].done = True
+            trajectory.finished = True
             self.done.append(trajectory)
-        del self.live[key]
+            del self.live[key]
         return True
 
     def cut(self, key: object, tail_value: Optional[float] = None,
@@ -165,12 +167,12 @@ class Rollout:
 
         The reason is written down and never read back by anything that decides: what it is for is the census, where a batch has to be able to say how much of itself no terminal ever reached and what took the rest away.
         """
-        trajectory = self.live.pop(key, None)
-        if trajectory is None or not trajectory.steps:
-            return
-        trajectory.tail_value = trajectory.steps[-1].value if tail_value is None else tail_value
-        trajectory.reason = reason
         with self._filed:
+            trajectory = self.live.pop(key, None)
+            if trajectory is None or not trajectory.steps:
+                return
+            trajectory.tail_value = trajectory.steps[-1].value if tail_value is None else tail_value
+            trajectory.reason = reason
             self.done.append(trajectory)
 
     def cut_all(self, tail_value: Optional[float] = None, owner: object = None,
@@ -181,7 +183,10 @@ class Rollout:
 
         Nothing is passed when the run itself is shutting down, which is the case the whole buffer is meant to be cut in.
         """
-        for key in list(self.live):
+        # The keys are taken under the guard and the cutting is done outside it, because `cut` takes the guard itself and this lock is not reentrant. A key that another thread finishes in between is simply not there to cut, which `cut` already answers by doing nothing.
+        with self._filed:
+            keys = list(self.live)
+        for key in keys:
             if owner is None or (isinstance(key, tuple) and key and key[0] == owner):
                 self.cut(key, tail_value, reason)
 
@@ -194,8 +199,8 @@ class Rollout:
         if not touched:
             return
         with self._filed:
-            finished = list(self.done)
-        for trajectory in finished + list(self.live.values()):
+            walk = list(self.done) + list(self.live.values())
+        for trajectory in walk:
             key = trajectory.key
             if not (isinstance(key, tuple) and key and key[0] == owner):
                 continue
