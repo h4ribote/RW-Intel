@@ -137,7 +137,7 @@ def main(argv=None) -> int:
     parser.add_argument("--garrison", type=float, default=GARRISON_SCALE,
                         help="credits a contested region's defender is drawn out of, which is what decides whether taking ground pays at all")
     parser.add_argument("--opening", type=float, default=OPENING_BASELINE,
-                        help="what point a squad's terminal is read from: one measures the errand against the opening ownership of the disc it was sent to, which is what the side score is a mean of, and nought measures it against the neutral half, which pays a squad for how the ground stands rather than for what it did to the ground and is the reading the layers that learnt to attack nothing were trained under")
+                        help="what point a squad's terminal is read from UNDER THE REGION CREDIT, which is the only one that consults it: one measures the errand against the opening ownership of the disc it was sent to, which is what the side score is a mean of, and nought measures it against the neutral half, which pays a squad for how the ground stands rather than for what it did to the ground and is the reading the layers that learnt to attack nothing were trained under. The marginal and board credits carry their own origin -- the disc read with none of this side's staged squads in it -- and take nothing from this")
     parser.add_argument("--credit", choices=CREDITS, default=CREDIT,
                         help="what a squad's terminal is, and there are three. 'board' is the default and reads "
                              "no contract at all: the sum, over every disc the episode scores, of the part this "
