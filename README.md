@@ -228,7 +228,7 @@ python -m rwintel.learn.ops_compare local\ops-eval-learnt.jsonl local\ops-eval-p
 | `--discount` / `--trace` | `tactics` | 1 決定あたりどれだけ先を割り引くか、と GAE がどれだけバイアスと分散を交換するか。既定はどちらも 1.0、すなわち交戦 1 件を割り引かない。`operations` は 0.99 と 0.95 に固定である |
 | `--batch` | `tactics` `operations` `clone` | 1 回の勾配の一歩に載せる行数 |
 | `--tactics` | `ops_run` `ops_train` | 訓練済み戦術層を盤面の**両側の下**に凍結して置く。**渡した実行は別の計器であり、journal がその層を名乗る** |
-| `--opening` | `ops_train` | 終端をどこから読むか。1(既定)が送られた disc の開始所有、0 が中立の半分 |
+| `--opening` | `ops_train` | 終端をどこから読むか。**`region` の読みだけがこれを見る。** 1(既定)が送られた disc の開始所有、0 が中立の半分。**`marginal` と `board` は自分の起点——この側の staged 部隊を一つも入れずに読んだ円板——を持つので、この引数から何も取らない** |
 | `--credit` | `ops_train` | 一部隊の終端の読み。**`board`(既定)は契約を一切読まず、採点される全円板について、この側の配備がその円板を動かした分のうちその部隊の持ち分を払う。** 残る二つは契約の名指した領域を読む——`region` はその領域の支配まるごと、`marginal` はその持ち分だけである。**契約を読む二つは、負けている地面から立ち去ることに金を払う**([docs/record/04-operations.md](docs/record/04-operations.md)) |
 | `--tenure` | `ops_train` | 地面を**いつ**読むか。`horizon`(既定)は地平の一枚だけを読むので、**最後にどこに立っているかが目的のすべてになり、係争点の間を往復し続けても代価は 0 である。** `tenure` は毎周期の読みを立っていた時間で重み付けた平均を払う——**試合における地面は収入の上流なので、早く取ることは遅く取ることより価値があり、気を変えることは行軍のぶんだけ高くつく。** 尺度も反対称性も同じで、**どちらを払う実行でも両方の読みが journal に書かれる** |
 | `--reading` | `ops_compare` | 対の差をどちらの読みで取るか(`side_score` / `side_tenure`)。`ops_run` は両方を自分で報告する |
