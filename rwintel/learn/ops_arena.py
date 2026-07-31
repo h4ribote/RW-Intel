@@ -79,6 +79,11 @@ CREDITS = ("region", "marginal", "board")
 #: Which of them a run uses unless it says otherwise. The reading that cannot be abstained out of, since every generation trained under the region reading has walked off the board given enough episodes.
 CREDIT = "board"
 
+#: How far a region's reflected centre may land from another region's centre for the two to be called a mirror pair, in world units.
+#:
+#: Without it, "the region nearest the reflection" pairs whatever is nearest however far that is, so a map whose region table is not symmetric — and the reflection is of the board, not of the table — would hand equal weight to two regions that are not each other's reflection at all. That is a prize one side has and the other does not, which is the asymmetry the mirrored draw exists to remove, and the self-play mean would have to absorb it. Regions are agglomerated at four hundred world units, so a quarter of that is comfortably inside one region and comfortably outside the next: measured on Hills, every one of the nine regions reflects onto a mutual partner within 16.3 units, so the tolerance rejects nothing there and would reject a spurious pair on a map that has one.
+MIRROR_TOLERANCE = 100.0
+
 #: The band an unscored region's priority is drawn from, against the contested band of 0.3 to 1.0. Overlapping from below rather than disjoint, so priority ranks the ground without labelling which of it is scored: a layer cannot read "this region is worth nothing to the board" off a weight, because no live region carries nothing, exactly as none does in a match. The top of the band sits inside the contested band so the two cannot be told apart by a threshold, and the bottom sits near the lowest weight a collected match put on a live region.
 QUIET_PRIORITY = (0.1, 0.6)
 
@@ -574,9 +579,15 @@ class OpsArena(Arena):
                     best, best_d2 = other.id, d2
             nearest[region.id] = best
         pairs: List[Tuple[int, int]] = []
+        by_id = {region.id: region for region in regions}
         for region in regions:
             other = nearest[region.id]
             if nearest.get(other) != region.id or other < region.id:
+                continue
+            point = self._mirror((region.x, region.y), centre)
+            partner = by_id[other]
+            if math.hypot(partner.x - point[0], partner.y - point[1]) > MIRROR_TOLERANCE:
+                # Mutual nearest and still not a pair: the reflection landed nowhere near this region, so calling the two a pair would put equal weight on ground the reflection does not carry onto ground.
                 continue
             pairs.append((region.id, other))
         return pairs
@@ -888,7 +899,7 @@ class OpsArena(Arena):
 
         `marginal` pays the squad its part of what this side's whole deployment moved on the region its contract names, split in proportion to the worth it still has standing there (`_part_of_movement`). Several squads on one region then divide what they jointly produced rather than each taking all of it, and a squad that added nothing to a region already won is paid nothing for it, because the origin the movement is read from — the disc with none of this side's staged squads in it — already contains whatever held the ground before they were sent. Its known cost is that a squad wiped out at the horizon has nothing left in the catchment and is paid nothing, however much of the enemy it took with it: what a board can be asked is who is standing on it, not who was ever sent.
 
-        The marginal reading is the change the squad's own units made to this side's score, on the scale the terminal is paid at: the other regions' terms are identical with and without it, so the one region's difference is the whole difference, and it is that difference before the side score's final division by the sum of the board's priorities — proportional to the change in the side score, by a factor fixed within an episode, rather than equal to it. That identity is the reason to prefer it — a squad is paid in the very quantity the arena is measured by, and in no part of it that another squad produced. It is not antisymmetric between the sides, and is not meant to be: both sides can truthfully say a contested disc would have been lost without them, so two opposing squads can both be paid well. A credit is not a score. Neither reading touches the side score the episode is measured by, which is what the self-play zero is a statement about.
+        The marginal reading is on the scale the terminal is paid at: what the side's deployment moved on one disc, weighted by that disc's priority, is a term of the very sum the side score is a mean of — before that sum's final division by the total of the board's priorities, so it is proportional to the change in the side score by a factor fixed within an episode rather than equal to it. What a squad takes is its share of that term, and what the side's staged squads take between them is the term entire. That is the reason to prefer it: a squad is paid in the quantity the arena is measured by, and the side is paid a disc's movement exactly once however many squads went there. What it is NOT is a statement that no part of what a squad takes was produced by another — the reading before it claimed that and bought it by paying a successful pile nothing. A squad standing on ground its allies would have taken anyway takes a share of it, bounded by its own worth as a fraction of the side's, and a squad with nothing left takes the figure it was frozen at rather than nothing. It is not antisymmetric between the sides, and is not meant to be: both sides' deployments move a contested disc, so squads facing each other can both be paid well. A credit is not a score. Neither reading touches the side score the episode is measured by, which is what the self-play zero is a statement about.
         """
         finish = getattr(ops, "finish", None)
         if finish is None:
@@ -926,7 +937,7 @@ class OpsArena(Arena):
         if hostile:
             bare, bare_opposing = bare_opposing, bare
         bare_total = bare + bare_opposing
-        # Where nothing at all is left, there is no reading to take, and the honest answer to "had none of them been sent" is the ownership the disc opened at, for the reason `_share_without` gives.
+        # Where nothing at all is left there is no reading to take, and the honest answer to "had none of them been sent" is the ownership the disc opened at. Read as the neutral half instead, the credit inverts on the very errand this arena exists to teach: our three tanks standing against a garrison read a share of three quarters against an origin of nought and are paid three quarters of the priority, and the moment they destroy the garrison the disc reads whole against an origin of a half — so finishing the fight cut the pay by a third while the side score rose from a quarter to a half. Read from the opening the same two boards pay three quarters and then the whole priority. What that gives up is the other side of the same ledger: a squad that clears its own side's disc of attackers and is the only thing left standing in it is paid nothing, because the disc would have been ours had nobody been sent. That is this arena's own stance on a defence that was not needed, applied to one that was, and it errs toward the errand the arena is for.
         origin = bare / bare_total if bare_total > 0 else opening
         return (now - origin) * (part / held)
 
@@ -948,21 +959,6 @@ class OpsArena(Arena):
             if total > 0.0:
                 worths[squad.id] = total
         return worths
-
-    def _share_without(self, unit_states, contest: "_Contest", members: Sequence[int]) -> float:
-        """What one contest's catchment would have read had this squad not been sent to it: read off whatever else is standing there, and where nothing else is standing, off the ownership the disc opened at.
-
-        The two halves of that sentence answer the same question by the only two means there are. While something else is in the catchment — an ally, the garrison, an enemy — the counterfactual is a reading of a board, and removing the squad's units from that board is exactly it. When the squad's units are the only things left, there is no board to read, and the honest answer to "had this squad never been sent" is that the disc would stand where it began, because the garrison that opened it is what the squad removed.
-
-        Reading the empty case as the neutral half instead inverted the credit on the very errand this arena exists to teach. Measured on one disc a garrison opened: our three tanks standing against its one read a share of three quarters, and the counterfactual with our three removed read nought, so the squad was paid three quarters of the priority. The same three tanks then destroy the garrison. The disc now reads whole, the arena's own side score rises from a quarter to a half — and the counterfactual with our three removed reads an empty disc, so under the neutral half the squad was paid one half. **Finishing the fight cut its pay by a third while raising the score it is paid in.** A layer taught by that learns to stand in a contested disc beside a live defender and never kill it, and to move on before it does — which is the shape of a layer whose errands last two decisions.
-
-        Read off the opening, the same two boards pay three quarters and then the whole priority, so taking the ground is worth more than half-taking it. What it gives up is the other side of the same ledger: a squad that clears its own side's disc of attackers, and is the only thing left standing in it, is paid nothing, because the disc would have been ours had nobody been sent. That is the arena's own stance on a defence that was not needed, applied to one that was; it is the cost of a counterfactual that cannot see what a squad destroyed, and it errs toward the errand the arena is for.
-        """
-        our_worth, enemy_worth = self._catchment_worths(unit_states, contest.point, without=set(members))
-        total = our_worth + enemy_worth
-        if total > 0:
-            return our_worth / total
-        return self.garrison_share.get(contest.region_id, 0.5)
 
     def close(self) -> None:
         for layer in (self.our_ops, self.their_ops, self.our_tac, self.their_tac):

@@ -795,11 +795,21 @@ def test_the_terminal_is_what_the_ground_came_to_against_where_it_opened_and_not
     assert abs(walked - 2.0 / 3.0) < 1e-9 and abs(walked - terminal) > 0.6, (
         "the path ledger paid the squad for a disc it was re-tasked away from")
 
-    # The other way a dense credit stops telescoping, and it needs no re-tasking at all: under the marginal reading a board's reading depends on which of the squad's units were standing in the disc, so an earlier board re-read with the members the squad has now is not the reading that board gave when it was current. Anything paying differences of readings has to hold the membership of the board it holds, or a squad that loses a tank is paid for the loss twice over.
-    contest = next(c for c in arena.contests if c.region_id == 4)
-    whole = reading(middle, 4) - arena._share_without(middle, contest, [10, 11])
-    survivor = reading(middle, 4) - arena._share_without(middle, contest, [10])
-    assert abs(whole - 2.0 / 3.0) < 1e-9 and abs(survivor - 1.0 / 6.0) < 1e-9
+    # The other way a dense credit stops telescoping, and it needs no re-tasking at all: under the movement reading a squad's figure depends on how much of it is standing in the disc, so an earlier board re-read with the members the squad has now is not the reading that board gave when it was current. Anything paying differences of readings has to hold the membership of the board it holds, or a squad that loses a tank is paid for the loss twice over.
+    arena.credit = "marginal"
+    arena.garrison_share = {4: 0.0, 9: 1.0}
+    both = _tasked(1, 4, [10, 11])
+    arena.squads = {1: both}
+    arena._frozen.clear()
+    whole = arena._standing(both, arena._shares(middle), +1.0, middle)
+    lost = _tasked(1, 4, [10])
+    arena.squads = {1: lost}
+    arena._frozen.clear()
+    survivor = arena._standing(lost, arena._shares(middle), +1.0, middle)
+    assert abs(whole - 2.0 / 3.0) < 1e-9, "the squad holding the disc is paid what its side moved there"
+    # Read with one member instead of two, the other tank is on the board and in no staged squad, so it sits inside the origin: the disc without this side's squads reads a half rather than nought, and the squad is paid only the sixth it added on top of it.
+    assert abs(survivor - 1.0 / 6.0) < 1e-9
+    assert survivor < whole, "the same board re-read with fewer members is a different reading"
 
 
 # ---- the reading the periods are paid off ---------------------------------------------------
