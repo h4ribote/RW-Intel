@@ -44,6 +44,7 @@ from rwintel.learn.ops_arena import (
     OUR_SQUADS,
     OURS,
     SCRIPT_TACTICS,
+    TENURE,
     THEIRS,
     OpsArena,
     OpsStatistics,
@@ -140,7 +141,7 @@ _CORNERS = [(4000.0, 4000.0), (4000.0, -4000.0), (-4000.0, 4000.0), (-4000.0, -4
 
 
 def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pairs=CONTEST_PAIRS,
-           sites=None, credit=CREDIT):
+           sites=None, credit=CREDIT, tenure=TENURE):
     """An arena assembled field by field, as everywhere the arena is exercised without a game. The heavy constructor builds command layers from the type catalogue the game sent at HELLO, which is not what the geometry and the scoring need."""
     arena = OpsArena.__new__(OpsArena)
     arena.session = session
@@ -152,6 +153,7 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena.horizon_ms = HORIZON_MS
     arena.opening_baseline = OPENING_BASELINE
     arena.credit = credit
+    arena.tenure = tenure
     arena.garrison_scale = GARRISON_SCALE
     arena.enemy_slot = None
     arena.phase = "opening"
@@ -170,6 +172,9 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena.our_reports = []
     arena.their_reports = []
     arena.side_score = 0.0
+    arena._accrued = {}
+    arena._side_accrued = 0.0
+    arena._marked_ms = None
     arena.refused = False
     arena.until_ms = 0
     arena.known = set()
@@ -507,7 +512,7 @@ def test_a_terminal_is_read_from_where_its_disc_started_and_not_from_the_neutral
             squad.contract = dataclasses.replace(_CONTRACT, squad=slot, target_region=region)
             squads[slot] = squad
         ledger = _Paid()
-        arena._finish_side(ledger, squads, shares, sign, [_unit(1, 0.0, 0.0), _unit(2, 2000.0, 0.0)])
+        arena._finish_side(ledger, squads, arena._standings(squads, shares, sign, [_unit(1, 0.0, 0.0), _unit(2, 2000.0, 0.0)]))
         return ledger.paid
 
     # Both errands come off: the assault turned a disc from theirs to ours and is paid the whole of its priority, and the defence left a disc exactly where it started and is paid nothing for it.
@@ -554,13 +559,13 @@ def test_the_two_credit_readings_pay_a_pile_of_squads_differently():
 
     arena.credit = "region"
     region_ops = _Paid()
-    arena._finish_side(region_ops, squads, shares, +1.0, units)
+    arena._finish_side(region_ops, squads, arena._standings(squads, shares, +1.0, units))
     assert abs(region_ops.paid[1] - (2.0 / 3.0 - 0.5)) < 1e-9
     assert region_ops.paid[1] == region_ops.paid[2], "the region reading pays the pile in full, squad by squad"
 
     arena.credit = "marginal"
     marginal_ops = _Paid()
-    arena._finish_side(marginal_ops, squads, shares, +1.0, units)
+    arena._finish_side(marginal_ops, squads, arena._standings(squads, shares, +1.0, units))
     # Without either squad the disc reads one tank ours against one hostile, which is a half; each is credited the sixth it added.
     assert abs(marginal_ops.paid[1] - (2.0 / 3.0 - 0.5)) < 1e-9
     assert abs(marginal_ops.paid[2] - marginal_ops.paid[1]) < 1e-9
@@ -574,11 +579,11 @@ def test_the_two_credit_readings_pay_a_pile_of_squads_differently():
     shares = {4: 3.0 / 4.0}
     piled = _Paid()
     arena.credit = "region"
-    arena._finish_side(piled, squads, shares, +1.0, units)
+    arena._finish_side(piled, squads, arena._standings(squads, shares, +1.0, units))
     assert abs(piled.paid[3] - (3.0 / 4.0 - 0.5)) < 1e-9
     marginal_piled = _Paid()
     arena.credit = "marginal"
-    arena._finish_side(marginal_piled, squads, shares, +1.0, units)
+    arena._finish_side(marginal_piled, squads, arena._standings(squads, shares, +1.0, units))
     assert 0.0 < marginal_piled.paid[3] < piled.paid[3]
 
 
@@ -606,7 +611,7 @@ def test_the_marginal_credit_is_the_change_the_squad_made_to_the_side_score():
         squads[squad_id] = squad
 
     paid = _Paid()
-    arena._finish_side(paid, squads, shares, +1.0, units)
+    arena._finish_side(paid, squads, arena._standings(squads, shares, +1.0, units))
 
     def _weighted(states) -> float:
         """The side score without its division by the total weight, which is the scale the terminal is paid on."""
@@ -646,7 +651,7 @@ def test_the_terminal_count_is_the_payments_that_landed_and_not_the_offers_made(
     rollout.add((0, 2), Step(state=[0.0], action=0, mask=[1.0], value=0.4, squad=2))
     rollout.cut((0, 2), reason="renewed")
 
-    arena._finish_side(layer, squads, {4: 1.0}, +1.0, [_unit(1, 0.0, 0.0), _unit(2, 10.0, 0.0)])
+    arena._finish_side(layer, squads, arena._standings(squads, {4: 1.0}, +1.0, [_unit(1, 0.0, 0.0), _unit(2, 10.0, 0.0)]))
     arena._tally()
 
     assert len(squads) == 2, "both squads have to be offered a payment or the count is not being told apart from the offers"
@@ -654,7 +659,7 @@ def test_the_terminal_count_is_the_payments_that_landed_and_not_the_offers_made(
     assert layer.terminals["horizon"] == 1
     # A layer that keeps no trajectories at all — every arm of the measuring runner — lands none of them, and nought is the truth for it rather than a fault.
     arena.our_ops = LearntOperations(None, None, None, rollout=None, instance=-1)
-    arena._finish_side(arena.our_ops, squads, {4: 1.0}, +1.0, [_unit(1, 0.0, 0.0)])
+    arena._finish_side(arena.our_ops, squads, arena._standings(squads, {4: 1.0}, +1.0, [_unit(1, 0.0, 0.0)]))
     arena._tally()
     assert arena.statistics.terminals == 0
 
@@ -733,7 +738,7 @@ def test_the_terminal_is_what_the_ground_came_to_against_where_it_opened_and_not
     squad = SquadRecord(id=1, doctrine=Doctrine.VANGUARD, members=[10, 11])
     squad.contract = dataclasses.replace(_CONTRACT, squad=1, target_region=9)
     ledger = _Paid()
-    arena._finish_side(ledger, {1: squad}, {4: reading(horizon, 4), 9: reading(horizon, 9)}, +1.0, horizon)
+    arena._finish_side(ledger, {1: squad}, arena._standings({1: squad}, {4: reading(horizon, 4), 9: reading(horizon, 9)}, +1.0, horizon))
     terminal = ledger.paid[1]
 
     assert abs(terminal) < 1e-9, "the disc this squad held at the horizon ended where it opened"
@@ -772,19 +777,21 @@ def _tasked(squad_id, region, members=()):
 def test_the_period_reading_and_the_horizon_reading_are_one_expression():
     """The invariant the whole dense credit rests on, and the one thing a later edit could break in silence.
 
-    Every operational period is paid the movement of a squad's scored figure and the horizon is paid the same figure once more, so the payments telescope to the horizon's reading — but only for as long as the two readings are the same reading. Were the horizon to keep an expression of its own, the identity would be an intention that two pieces of code had to be kept in step, and the first time they drifted every episode would return the terminal plus whatever the drift came to, with nothing in any log to say so. So the horizon calls `_standing` and this holds it to that: what `_finish_side` hands a layer is exactly what the period loop reads, under either credit.
+    Every operational period is paid the movement of a squad's scored figure and the horizon is paid the same figure once more, so the payments telescope to the horizon's reading — but only for as long as the two readings are the same reading. Were the horizon to keep an expression of its own, the identity would be an intention that two pieces of code had to be kept in step, and the first time they drifted every episode would return the terminal plus whatever the drift came to, with nothing in any log to say so. So both go through `_read`, and this holds them to it: the horizon is run end to end and what it pays a layer is compared against what the period loop's own expression says of the very same board.
     """
     for credit in ("region", "marginal"):
-        arena = _standing_board()
-        arena.credit = credit
         units = [_unit(1, 0.0, 0.0), _unit(2, 20.0, 0.0), _unit(3, 40.0, 0.0, hostile=1),
                  _unit(4, 2000.0, 0.0), _unit(5, 2030.0, 0.0, hostile=1, health=40.0)]
-        squads = {1: _tasked(1, 4, [1, 2]), 2: _tasked(2, 9, [4]), 3: _tasked(3, 7, [3])}
-        shares = arena._shares(units)
+        arena = _standing_board()
+        arena.credit = credit
+        arena.squads = {1: _tasked(1, 4, [1, 2]), 2: _tasked(2, 9, [4]), 3: _tasked(3, 7, [3])}
+        arena.enemy = {4: _tasked(4, 4, [3]), 5: _tasked(5, 9, [5])}
+        arena.our_ops, arena.their_ops = _Paid(), _Paid()
+        arena._score(_observation(units=units, game_time_ms=300000))
 
-        for sign in (+1.0, -1.0):
-            ledger = _Paid()
-            arena._finish_side(ledger, squads, shares, sign, units)
+        shares = arena._shares(units)
+        for ledger, squads, sign in ((arena.our_ops, arena.squads, +1.0),
+                                     (arena.their_ops, arena.enemy, -1.0)):
             for squad in squads.values():
                 assert ledger.paid[squad.id] == arena._standing(squad, shares, sign, units), (
                     "the horizon paid something the period loop does not read, so the payments cannot telescope")
@@ -976,6 +983,132 @@ def test_the_horizon_pays_only_what_the_periods_have_not():
     assert census.cut == {} and census.finished == 1
     assert census.paid_steps == census.steps == 5
     assert census.zero_advantage == 0
+
+
+# ---- the reading that prices when the ground was taken --------------------------------------
+
+def _held(arena, at_ms, ours_in_disc, enemy_in_disc):
+    """Drives one operational period on a board carrying a stated number of tanks a side inside the disc the enemy opened on, and returns the board it was driven on. Each side's tanks are that side's squad's members, so both sides' figures are read off units that are actually there."""
+    units = [_unit(10 + index, index * 20.0, 0.0) for index in range(ours_in_disc)]
+    units += [_unit(50 + index, 100.0 + index * 20.0, 0.0, hostile=1) for index in range(enemy_in_disc)]
+    units.append(_unit(90, 2000.0, 0.0))              # our garrison, still holding the disc we opened whole
+    arena.squads[1].members = [10 + index for index in range(ours_in_disc)]
+    if 5 in arena.enemy:
+        arena.enemy[5].members = [50 + index for index in range(enemy_in_disc)]
+    observation = _observation(units=units, game_time_ms=at_ms)
+    view = WorldView(observation=observation, catalogue=_CATALOGUE, regions=[])
+    arena._run(observation, view, Action(), at_ms)
+    return units
+
+
+def _tenure_board(tenure="tenure", credit="region"):
+    """An arena of two discs with one squad a side, wound up so that periods can be driven straight into it."""
+    arena = _standing_board(credit=credit)
+    arena.tenure = tenure
+    arena.our_ops, arena.their_ops = _Chain([], "ours"), _Chain([], "theirs")
+    arena.our_tac = arena.their_tac = _Still()
+    arena.orders = OperationsOrders(posture=Posture.ARM, priorities=dict(arena.priorities),
+                                    offensive=True, loss_allowance=1000.0)
+    arena.squads = {1: _tasked(1, 4, [])}
+    arena.enemy = {5: _tasked(5, 4, [])}
+    arena.until_ms = 999999
+    arena.horizon_ms = 8000
+    arena._marked_ms = 0
+    return arena
+
+
+def test_the_tenure_reading_is_the_mean_of_the_periods_weighted_by_how_long_each_stood():
+    """What the tenure reading is, stated as arithmetic and checked against the readings it is a mean of.
+
+    Each stretch of the horizon counts once, weighted by its own share of the horizon, and the weight is time rather than a count of readings — a mean over readings would depend on how often the region block happened to ride a frame, which is a property of the wire and not of the deployment. So a figure that stood for a quarter of the horizon enters at a quarter, whether it was read once in that quarter or ten times.
+    """
+    arena = _tenure_board()
+    readings = []
+    for at_ms, ours_in in ((2000, 0), (4000, 1), (6000, 2), (8000, 3)):
+        units = _held(arena, at_ms, ours_in, 3)
+        readings.append(arena._standing(arena.squads[1], arena._shares(units), +1.0, units))
+
+    # Four equal stretches of a two-thousand-millisecond horizon eighth apiece: the mean is the plain mean of the four.
+    assert abs(arena._accrued[1] - sum(readings) / 4.0) < 1e-12, (
+        "the tenure is not the time-weighted mean of the readings it was accrued from")
+    # And the last reading alone is not it, which is the whole difference between the two readings of an episode.
+    assert abs(arena._accrued[1] - readings[-1]) > 0.05
+
+    # The same ground held over stretches of unequal length is weighted by the length and not by the count.
+    uneven = _tenure_board()
+    _held(uneven, 6000, 0, 3)                          # three quarters of the horizon holding nothing
+    first = uneven._accrued[1]
+    units = _held(uneven, 7000, 3, 1)
+    last = uneven._standing(uneven.squads[1], uneven._shares(units), +1.0, units)
+    _held(uneven, 8000, 3, 1)
+    assert abs(uneven._accrued[1] - (first + 0.25 * last)) < 1e-12
+
+
+def test_the_tenure_reading_is_exactly_antisymmetric_between_the_sides():
+    """The self-play zero is what makes this arena a measurement, and it has to hold of the tenure reading exactly as it holds of the horizon reading, or a run paid off the tenure could not be gated at all.
+
+    It holds for the reason the horizon's does and needs no separate argument: every reading the mean is accrued from is taken off one board, before either side decides, and each of those readings is already a number and its negation. A mean of exact negatives is an exact negative. What this checks is that the accrual really is fed one reading of one board — an accrual driven per side, or one that read the board twice, would break it while every figure on its own still looked right.
+    """
+    arena = _tenure_board()
+    scores = []
+    for at_ms, ours_in, enemy_in in ((2000, 1, 3), (4000, 2, 3), (6000, 3, 2), (8000, 4, 1)):
+        units = _held(arena, at_ms, ours_in, enemy_in)
+        scores.append(arena._side_score(units))
+        assert abs(arena._accrued[1] + arena._accrued[5]) < 1e-15, (
+            "the two sides' tenures are not exact negatives, so the self-play zero is not a statement about the board")
+        assert abs(arena.our_ops.standings[-1][1] + arena.their_ops.standings[-1][5]) < 1e-15
+
+    # And the side score's own tenure, which is what a run pools, is the same mean of the same stretches. Antisymmetric for the reason each of its terms is: the other side's side score is this one's negated, so a mean of them is too.
+    assert abs(arena._side_accrued - sum(scores) / 4.0) < 1e-12
+
+
+def test_a_run_paid_the_tenure_returns_the_mean_and_not_the_last_reading():
+    """End to end on the real layer and the real buffer, exactly as the horizon reading is checked: what the whole episode returns has to be the quantity the run says it pays, and under the tenure setting that is the mean over the horizon and not the reading at it.
+
+    The two are made to differ by construction — the squad holds the disc for most of the episode and is driven off it at the end — so an episode that returned the last reading would return a visibly different number rather than the same one by luck.
+    """
+    arena = _tenure_board(credit="region")
+    arena.horizon_ms = 10000
+    rollout = Rollout(discount=FIGHT_DISCOUNT, trace=FIGHT_TRACE)
+    layer = LearntOperations(None, _CATALOGUE, None, rollout=rollout, instance=0, discount=1.0)
+    arena.our_ops = layer
+
+    # The disc stays in the enemy's hands for three quarters of the horizon and is taken at the last, so the mean over the episode and the reading at the end of it are visibly different numbers.
+    for period, (at_ms, ours_in, enemy_in) in enumerate(
+            ((2000, 0, 3), (4000, 0, 3), (6000, 0, 3), (8000, 3, 0))):
+        _held(arena, at_ms, ours_in, enemy_in)
+        layer.pending[1] = Step(state=[0.0], action=0, mask=[1.0], value=0.1 * (period + 1), squad=1)
+
+    units = [_unit(10, 0.0, 0.0), _unit(11, 20.0, 0.0), _unit(12, 40.0, 0.0), _unit(90, 2000.0, 0.0)]
+    arena.squads[1].members = [10, 11, 12]
+    arena._score(_observation(units=units, game_time_ms=10000))
+
+    trajectory, = rollout.done
+    total = sum(step.reward for step in trajectory.steps)
+    horizon = arena._standing(arena.squads[1], arena._shares(units), +1.0, units)
+    assert abs(total - arena._accrued[1]) < 1e-12, "the episode returned something other than its own tenure"
+    assert abs(horizon - 0.8) < 1e-9 and abs(total - 0.8 * 2.0 / 5.0) < 1e-9, (
+        "the two readings were built to differ, and the episode returned the reading at the horizon")
+    assert arena.statistics.side_score != arena.statistics.side_tenure
+
+
+def test_two_deployments_that_end_alike_are_told_apart_by_when_they_took_the_ground():
+    """The property the reading exists for, and the one the horizon reading cannot have.
+
+    Two deployments end the horizon on the same ground: one takes the disc in the first period and keeps it, the other spends the episode elsewhere and walks onto it at the last. A match pays these differently — ground is upstream of income, and a region held from the third minute pays its owner for the rest of the match — while an arena that reads the discs only when the clock stops calls them equal. So the horizon figures must agree and the tenures must not.
+    """
+    early, late = _tenure_board(), _tenure_board()
+    for at_ms, ours_in in ((2000, 3), (4000, 3), (6000, 3), (8000, 3)):
+        held = _held(early, at_ms, ours_in, 0)
+    for at_ms, ours_in in ((2000, 0), (4000, 0), (6000, 0), (8000, 3)):
+        walked = _held(late, at_ms, ours_in, 0)
+
+    assert abs(early._standing(early.squads[1], early._shares(held), +1.0, held)
+               - late._standing(late.squads[1], late._shares(walked), +1.0, walked)) < 1e-12, (
+        "the two deployments were built to end the horizon alike")
+    assert early._accrued[1] > late._accrued[1] + 0.3, (
+        "the tenure reading does not tell an errand that held the ground from one that arrived at the horizon")
+    assert early._side_accrued > late._side_accrued + 0.15
 
 
 def test_the_concentrating_arm_sends_every_squad_at_the_one_region_most_wanted():

@@ -28,7 +28,7 @@ from .deciders import NetworkOperations, operational_batcher
 from .layers import LearntOperations
 from .net import OperationalNet
 from .ops_arena import (CATCHMENT_RADIUS, CREDIT, CREDITS, GARRISON_SCALE, HORIZON_MS,
-                        OPENING_BASELINE, OpsArena)
+                        OPENING_BASELINE, TENURE, TENURES, OpsArena)
 from .ops_run import _arena_seed, frozen_tactics, pool, report, signal
 from .rollout import FIGHT_DISCOUNT, FIGHT_TRACE, Rollout
 from .train import Trainer
@@ -80,7 +80,7 @@ def train(arguments) -> int:
                         horizon_ms=arguments.horizon * 1000, our_squads=arguments.squads,
                         catchment_radius=arguments.radius, contest_pairs=arguments.pairs,
                         credit=arguments.credit, opening_baseline=arguments.opening,
-                        garrison_scale=arguments.garrison)
+                        tenure=arguments.tenure, garrison_scale=arguments.garrison)
 
     episode = EpisodeSettings(
         map=arguments.map, opponents=arguments.opponents, difficulty=arguments.difficulty,
@@ -146,6 +146,14 @@ def main(argv=None) -> int:
                              "full, and 'marginal' only the part this squad's own units account for. Both of "
                              "those let the layer choose its own terminal by choosing where to point last, "
                              "which is what made longer training weaker three times over")
+    parser.add_argument("--tenure", choices=TENURES, default=TENURE,
+                        help="when the ground a deployment holds is read. 'horizon' reads the discs at the last "
+                             "frame, so the whole episode is worth where the units are standing when the clock "
+                             "stops and marching between contests all episode costs nothing. 'tenure' reads them "
+                             "every period and pays the mean weighted by how long each reading stood, which is "
+                             "what a match pays for -- ground held is upstream of income, so taking a disc early "
+                             "is worth more than taking it late and changing one's mind costs the march. Both "
+                             "readings are journalled by every episode whichever one is paid")
     parser.add_argument("--max-seconds", type=int, default=0)
     parser.add_argument("--device", default=None)
     parser.add_argument("--load", default=None, help="parameters to start from, an imitation of the script or an earlier run")

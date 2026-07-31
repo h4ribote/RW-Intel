@@ -79,10 +79,12 @@ def _by_board(entries: Sequence[dict], name: str) -> Dict[int, dict]:
 
 def compare(first_path: str, second_path: Optional[str] = None, *, first_arm: Optional[str] = None,
             second_arm: Optional[str] = None, first_name: Optional[str] = None,
-            second_name: Optional[str] = None) -> Optional[PairedComparison]:
+            second_name: Optional[str] = None, reading: str = "side_score") -> Optional[PairedComparison]:
     """Two runs, or two arms of one run, paired board by board. None when they share no board or were not the same instrument.
 
     A run of several arms writes them all to one journal, so the two sides may be one file read twice under two arm names. Naming an arm is what makes that unambiguous: without it a journal of several arms would be read as one arm that played every board several times, which is exactly the repeated board the pairing refuses.
+
+    Which reading the difference is taken on is the caller's, and the two ask different questions of one set of boards: `side_score` is the discs as they stood at the horizon, `side_tenure` the mean of the same discs weighted by how long each reading stood. An episode written before the tenure reading existed carries no such field and reads as nought, which would be a difference of two arms' noughts rather than of the arms; so a comparison asked for a reading the episodes do not carry is refused rather than reported.
     """
     second_path = second_path or first_path
     first_entries = _of_arm(read(first_path), first_arm)
@@ -115,8 +117,15 @@ def compare(first_path: str, second_path: Optional[str] = None, *, first_arm: Op
                   "difference between two arenas and not between two arms; it is not reported")
         return None
 
-    firsts = [float((first_boards[board]["statistics"] or {}).get("side_score", 0.0)) for board in shared]
-    seconds = [float((second_boards[board]["statistics"] or {}).get("side_score", 0.0)) for board in shared]
+    missing = [name for name, boards in ((first_name, first_boards), (second_name, second_boards))
+               if any((boards[board]["statistics"] or {}).get(reading) is None for board in shared)]
+    if missing:
+        log.error("%s: at least one paired episode carries no %s, which was written by an arena that did not "
+                  "have that reading; a difference taken over it would be a difference of noughts and is not reported",
+                  ", ".join(missing), reading)
+        return None
+    firsts = [float((first_boards[board]["statistics"] or {}).get(reading, 0.0)) for board in shared]
+    seconds = [float((second_boards[board]["statistics"] or {}).get(reading, 0.0)) for board in shared]
     comparison = PairedComparison.of(firsts, seconds)
     report(comparison, first_name, second_name,
            unpaired=(len(first_boards) - len(shared), len(second_boards) - len(shared)))
@@ -209,6 +218,9 @@ def main(argv=None) -> int:
     parser.add_argument("--second-arm", default=None, help="which arm of the second")
     parser.add_argument("--name-first", default=None, help="what to call the first run in the report")
     parser.add_argument("--name-second", default=None, help="what to call the second")
+    parser.add_argument("--reading", choices=("side_score", "side_tenure"), default="side_score",
+                        help="which reading of an episode the difference is taken on: the discs as they stood at "
+                             "the horizon, or the mean of the same discs weighted by how long each reading stood")
     parser.add_argument("--verbose", action="store_true")
     arguments = parser.parse_args(argv)
 
@@ -216,7 +228,8 @@ def main(argv=None) -> int:
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
     comparison = compare(arguments.first, arguments.second,
                          first_arm=arguments.first_arm, second_arm=arguments.second_arm,
-                         first_name=arguments.name_first, second_name=arguments.name_second)
+                         first_name=arguments.name_first, second_name=arguments.name_second,
+                         reading=arguments.reading)
     return 0 if comparison is not None else 1
 
 

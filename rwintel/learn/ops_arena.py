@@ -78,6 +78,18 @@ CREDITS = ("region", "marginal", "board")
 #: Which of them a run uses unless it says otherwise. The reading that cannot be abstained out of, since every generation trained under the region reading has walked off the board given enough episodes.
 CREDIT = "board"
 
+#: When the ground a deployment holds is read: at the horizon alone, or over the whole episode.
+#:
+#: `horizon` reads the discs at the last frame and pays that, which is the reading this arena was built with. Under it the episode's whole objective is where the units are standing when the clock stops, and everything before that is worth exactly nothing: a squad that took a disc in the first minute and one that walked onto an empty disc in the last second are paid the same, and marching back and forth between two contests all episode costs nothing so long as the march ends somewhere. That is not what a match pays for. Ground in a match is upstream of income — a region held from the third minute pays its owner for the remaining twelve — so a layer that is free to change its mind is being trained against a clock that a match does not have.
+#:
+#: `tenure` reads the same discs every operational period and pays the time-weighted mean of those readings, which is the ground held integrated over the episode and divided by its length. It is on the same scale as the horizon reading — a side that holds exactly what it opened with, for the whole horizon, reads the same under both — and it stays exactly antisymmetric, because it is a mean of readings each of which is antisymmetric. What it prices that the horizon reading cannot is time: taking a disc early is worth more than taking it late, holding one is worth as much as taking it, and a squad that spends the episode marching between contests is paid for the ground it was standing on while it marched, which is none.
+#:
+#: The difference is measured rather than assumed, which is why both readings are journalled by every episode whichever one is paid. An arm is compared against another arm on whichever reading the comparison asks for, and the two readings of one run answer different questions about the same boards.
+TENURES = ("horizon", "tenure")
+
+#: Which of them a run pays unless it says otherwise.
+TENURE = "horizon"
+
 #: What a run calls the tactical layer that fought beneath both sides when that layer was the handwritten `Tactics` ladder — which is what the arena builds for itself when nothing else is handed to it, and what every measurement taken on this arena so far was made under. A run that froze trained tactical parameters under the arena instead names them by their content, so the two can never be mistaken for each other afterwards.
 SCRIPT_TACTICS = "script"
 
@@ -111,6 +123,22 @@ class _Contest:
 
 
 @dataclass
+class _Reading:
+    """One reading of every scored disc, and what each side's squads are to be paid off it.
+
+    Taken once per operational period and once more at the horizon, before either side decides, so that the two sides are paid off one reading of one board and their figures stay exact negatives. What is paid is the instantaneous standing where the run reads the horizon alone and the running tenure where it reads the whole episode; both are carried, because the reading a run pays and the readings it journals are separate choices and neither should have to be recomputed from the other.
+    """
+
+    shares: Dict[int, float]
+    side_score: float
+    our_paid: Dict[int, float]
+    their_paid: Dict[int, float]
+
+    def paid(self, ours: bool) -> Dict[int, float]:
+        return self.our_paid if ours else self.their_paid
+
+
+@dataclass
 class _Garrison:
     """A pre-placed defender, kept apart from the taskable squads so it is never handed to a command layer. GARRISON doctrine has real tasks, so a garrison passed to `Operations` would be tasked and finished, giving one side more squads than the other."""
 
@@ -129,6 +157,8 @@ class OpsStatistics:
     scored: bool = False
     #: The priority-weighted mean domination for this process's side, on [−0.5, +0.5]. Exactly the negative of the other side's every episode, so a run of the script chain against itself must pool this to nought.
     side_score: float = 0.0
+    #: The same domination read every operational period and averaged over the episode by how long each reading stood, on the same scale and with the same antisymmetry. It says what the side held over the horizon rather than what it held at the end of it, and the two differ by exactly the thing the arena could not see before: when the ground was taken and whether it was kept. Journalled by every episode whichever reading the run paid, so a comparison can be taken on either without running the boards again.
+    side_tenure: float = 0.0
     #: Contested regions and this side's total garrison worth, kept so a run can be read for what the draw put on the board.
     contests: int = 0
     garrison_value: float = 0.0
@@ -149,6 +179,8 @@ class OpsStatistics:
     garrison: float = 0.0
     #: Which tactical layer did the fighting beneath both sides: the handwritten ladder, or trained parameters frozen under the arena and named by their content. It belongs with the draw settings above and meets their test word for word — it never reaches the episode settings, and two runs made under different ones are two different arenas. It is a stronger case than the garrison scale rather than a weaker one, because the fighting under an operational choice is the whole of what turns a deployment into a share of a disc: a different fighter moves the disc tallies, the rate at which a garrison holds its own ground through the horizon, the reach a squad ends at, and therefore the horizon and the catchment radius that were both tuned to where an assaulting squad halts.
     tactics: str = SCRIPT_TACTICS
+    #: Which reading the squads of this episode were paid off. Not a draw setting — it changes nothing about the board and both readings are written down whatever it is — but it is what a trained layer was taught by, so an episode says it rather than leaving the training run's flag to be remembered.
+    tenure: str = TENURE
     #: Which operational layer stood on this side: the rule an arm names, or a digest of the parameters where the arm was a learnt one. Not a draw setting — the arms of one run differ in exactly this and must still pair — but the arm's identity, written down so that two runs whose arms share a nickname and not a policy can be refused rather than pooled. A path is a nickname that changes underneath itself, since a training run overwrites whatever its save names, so the parameters name themselves by their content.
     operations: str = ""
     #: Diagnostics that say whether the staged squads — the thing whose deployment the arena exists to measure — actually reached and contested the catchments, or whether the score was decided by the pre-placed garrisons alone. If the squads never register in a catchment the self-play zero is trivially met by the mirror garrisons and the arena resolves nothing.
@@ -181,6 +213,7 @@ class OpsStatistics:
 
     def as_dict(self) -> dict:
         return {"scored": self.scored, "side_score": round(self.side_score, 6),
+                "side_tenure": round(self.side_tenure, 6),
                 "contests": self.contests, "garrison_value": round(self.garrison_value, 1),
                 "shares": {int(r): round(s, 4) for r, s in self.shares.items()},
                 "held": {int(r): round(s, 4) for r, s in self.held.items()},
@@ -191,7 +224,7 @@ class OpsStatistics:
                 "their_reach": round(self.their_reach, 1),
                 "board": self.board, "horizon_ms": self.horizon_ms, "radius": round(self.radius, 1),
                 "squads": self.squads, "pairs": self.pairs, "garrison": round(self.garrison, 1),
-                "tactics": self.tactics, "operations": self.operations,
+                "tactics": self.tactics, "operations": self.operations, "tenure": self.tenure,
                 "terminals": self.terminals, "periods": self.periods, "errands": self.errands,
                 "on_priority": self.on_priority, "massed": self.massed,
                 "our_departures": {int(k): v for k, v in self.our_departures.items()},
@@ -201,7 +234,9 @@ class OpsStatistics:
 class OpsArena(Arena):
     """Runs one region-domination episode: deploy a mirror board about one centre, run both command chains over a bounded horizon with the economy frozen, score region domination antisymmetrically off a health-weighted catchment, and pay each squad what its errand changed on the region it was sent to.
 
-    That payment is made every operational period rather than once at the horizon. The arena reads its own discs each period and hands each side's layer the figure standing for each of its squads; the layer is paid the movement of that figure, and the horizon hands over the same figure once more as the last of the series. The payments are differences of one quantity and so telescope to the horizon's reading, which is the terminal this arena always paid — the objective is unchanged and only its density is. Paid once, the terminal reached the last errand of a squad and no other, and a layer that re-draws its region every period left almost every decision it took anchored by nothing.
+    That payment is made every operational period rather than once at the horizon. The arena reads its own discs each period and hands each side's layer the figure standing for each of its squads; the layer is paid the movement of that figure, and the horizon hands over the same figure once more as the last of the series. The payments are differences of one quantity and so telescope to its last reading, which is the terminal — the density of the payment is separate from what is being paid. Paid once, the terminal reached the last errand of a squad and no other, and a layer that re-draws its region every period left almost every decision it took anchored by nothing.
+
+    Which quantity that is, is the run's tenure setting. Read at the horizon it is the discs as they stand when the clock stops; read over the episode it is the mean of the same discs weighted by how long each reading stood. The second is the one a match's ledger resembles, since ground in a match pays its owner for as long as it is held, and it is the setting under which changing one's mind costs what it costs — a squad marching between two contests is standing on neither, and every period of the march reads it so.
 
     Subclasses the engagement arena so every geometry and spawn helper — `_sites`, `_site`, `_rows`, `_interleave`, `_commissioned`, `_record`, `_health_worth`, the catalogue and the seeded random — is inherited unchanged and the two arenas cannot drift in how they place or read a board.
     """
@@ -211,7 +246,7 @@ class OpsArena(Arena):
                  horizon_ms: int = HORIZON_MS, our_squads: int = OUR_SQUADS,
                  catchment_radius: float = CATCHMENT_RADIUS, contest_pairs: int = CONTEST_PAIRS,
                  opening_baseline: float = OPENING_BASELINE, credit: str = CREDIT,
-                 garrison_scale: float = GARRISON_SCALE) -> None:
+                 tenure: str = TENURE, garrison_scale: float = GARRISON_SCALE) -> None:
         super().__init__(session, seed=seed)  # inherits catalogue, random, _sites and every spawn helper
         # The layer under study on this side (a learnt operational layer, or the script for the baseline) and what it is measured against on the other (the script for a duel, its own policy for self-play). Built here rather than handed in already made, for the same reason the engagement arena builds its layers here: both sides must read the same type catalogue as the arena that spawns their units, or a unit would be sorted into a different role on each side. The tactical layer below both actually moves the units and is frozen.
         #
@@ -234,6 +269,9 @@ class OpsArena(Arena):
         if credit not in CREDITS:
             raise ValueError("the terminal a squad is paid is either %s" % " or ".join(CREDITS))
         self.credit = credit
+        if tenure not in TENURES:
+            raise ValueError("the ground a deployment holds is read either %s" % " or ".join(TENURES))
+        self.tenure = tenure
         self.garrison_scale = garrison_scale
 
         self.phase = "opening"
@@ -252,6 +290,11 @@ class OpsArena(Arena):
         self.our_reports: List = []
         self.their_reports: List = []
         self.side_score = 0.0
+        #: The running time-weighted totals the tenure reading is made of: each squad's standing and the side score, each multiplied by the share of the horizon its reading stood for and summed. Divided by nothing at the end, because each segment is weighted by its own share of the horizon as it is added, so the total is already a mean over the horizon and is on the scale of a single reading.
+        self._accrued: Dict[int, float] = {}
+        self._side_accrued = 0.0
+        #: The moment the last reading was taken, so a segment can be weighted by how long it stood. Set when the running phase opens rather than at the first operational frame, so the stretch before the first frame is weighted by the first frame's reading instead of being dropped — dropping it would make the mean a mean over a window whose length depends on when the region block first rode a frame.
+        self._marked_ms: Optional[int] = None
         self.refused = False
         self.until_ms = 0
         self.centre: Tuple[float, float] = (0.0, 0.0)
@@ -417,6 +460,8 @@ class OpsArena(Arena):
             return
         self.phase = "running"
         self.until_ms = now + self.horizon_ms
+        # The scored window opens here, so the tenure reading is a mean over exactly the horizon and not over whatever stretch of it the region block happened to ride a frame in.
+        self._marked_ms = now
 
     def _assign(self, fresh, hostile: bool, point, slots) -> Dict[int, List[int]]:
         """The units of one side's staged squads, taken from what newly appeared near that side's staging point, of the right hostility, against each slot's order in turn. A consumable pool rather than the engagement arena's `_commissioned` per slot, because several squads of one side spawn at one point and a unit taken into one must not be taken into the next; the position filter is what keeps a garrison spawned out at a contest point from being swept into a staging squad."""
@@ -478,7 +523,7 @@ class OpsArena(Arena):
             self.their_home_id, self._their_pt), observation)
 
         # What every scored disc reads on the board that has just arrived, taken once for the period and before either side decides, so the two sides are paid off one reading of one board and their figures stay exact negatives of each other. Outside the loop below rather than inside it, because the leader alternation would otherwise hand the two sides boards a decision apart.
-        shares = self._shares(observation.unit_states) if operational and self.orders is not None else None
+        reading = self._read(observation.unit_states, now) if operational and self.orders is not None else None
 
         sides = [(self.our_ops, self.our_tac, self.squads, our_view, OURS),
                  (self.their_ops, self.their_tac, self.enemy, their_view, THEIRS)]
@@ -493,8 +538,7 @@ class OpsArena(Arena):
                 # Where the arena's own reading of its scored discs reaches the layer, and it has to arrive before the decision is taken: settling is what pays the decision the last period left waiting, the decision is settled at the top of `decide`, and this is the board it is to be paid from. Discovered on the layer exactly as `finish` is, and for the same reason — what a squad's errand is worth is a statement about ground only whoever runs the contest can read, while the layer only sees periods. A script layer offers no `standing` and takes none, exactly as it offers no `finish`.
                 standing = getattr(ops, "standing", None)
                 if standing is not None:
-                    standing(self._standings(squads, shares, +1.0 if side == OURS else -1.0,
-                                             observation.unit_states))
+                    standing(reading.paid(side == OURS))
                 # Only the taskable squads are handed to the operational layer; the garrisons are not in `squads`, so a garrison is never tasked and never finished.
                 contracts, _ = ops.decide(board, self.orders, slist, reports, now)
                 for contract in contracts:
@@ -542,14 +586,54 @@ class OpsArena(Arena):
 
     # ---- scoring and per-decision terminal ---------------------------------------------
 
+    def _read(self, unit_states, now: int) -> "_Reading":
+        """Reads every scored disc once for this frame: the shares, the side score and each side's standings, and adds the stretch since the last reading to the running tenures.
+
+        One expression for the period loop and for the horizon both, so that the last of the series is arithmetically the same reading as the ones before it and the tenure covers the whole horizon and no more. The accrual happens here rather than at the caller for the same reason: a reading taken and not accrued would leave a stretch of the episode weighted by the reading before it, which is a quadrature error nothing downstream could see.
+        """
+        shares = self._shares(unit_states)
+        ours = self._standings(self.squads, shares, +1.0, unit_states)
+        theirs = self._standings(self.enemy, shares, -1.0, unit_states)
+        side = self._side_score(unit_states)
+        self._accrue(now, side, ours, theirs)
+        if self.tenure == "tenure":
+            return _Reading(shares, side,
+                            {key: self._accrued.get(key, 0.0) for key in ours},
+                            {key: self._accrued.get(key, 0.0) for key in theirs})
+        return _Reading(shares, side, ours, theirs)
+
+    def _accrue(self, now: int, side_score: float, ours: Dict[int, float],
+                theirs: Dict[int, float]) -> None:
+        """Adds the stretch since the last reading to every running tenure, weighted by the share of the horizon it stood for.
+
+        The reading just taken is what the stretch behind it is weighted by, so a figure counts from the moment it was first read and not from the moment it was next read: the alternative, weighting a stretch by the figure at its start, would pay a squad for ground it had not yet reached at the beginning of the very period it reached it in. Over a horizon read a hundred and fifty times the two quadratures differ by one period's reading in a hundred and fifty, which is below anything this arena resolves; the choice is made for what it means rather than for what it is worth.
+
+        Weighted as it is added rather than divided by a count at the end, and the weight is the stretch over the horizon rather than over the count of readings. A count would make the mean depend on how often the region block rode a frame, which is a property of the wire and not of the deployment; and a total divided at the end would have to know whether the episode reached its horizon, which is exactly the case the arena refuses to score.
+        """
+        if self._marked_ms is None:
+            self._marked_ms = now
+            return
+        elapsed = now - self._marked_ms
+        self._marked_ms = now
+        if elapsed <= 0 or self.horizon_ms <= 0:
+            return
+        weight = elapsed / float(self.horizon_ms)
+        self._side_accrued += weight * side_score
+        for figures in (ours, theirs):
+            for squad_id, figure in figures.items():
+                self._accrued[squad_id] = self._accrued.get(squad_id, 0.0) + weight * figure
+
     def _score(self, observation: Observation) -> None:
-        """At the horizon, read the antisymmetric side score and pay each squad the domination of the region it was sent to."""
+        """At the horizon, read the antisymmetric side score and pay each squad what its deployment came to, under whichever reading of the episode this run pays."""
         units = observation.unit_states
-        self.side_score = self._side_score(units)
-        shares = self._shares(units)
+        reading = self._read(units, observation.game_time_ms)
+        self.side_score = reading.side_score
+        shares = reading.shares
 
         self.statistics.scored = True
         self.statistics.side_score = self.side_score
+        self.statistics.side_tenure = self._side_accrued
+        self.statistics.tenure = self.tenure
         self.statistics.shares = dict(shares)
         self.statistics.held = {region: self.garrison_share.get(region, 0.5) for region in shares}
         self.statistics.priorities = {region: self.priorities.get(region, 0.0) for region in shares}
@@ -560,8 +644,8 @@ class OpsArena(Arena):
         (self.statistics.their_alive, self.statistics.their_in_catchment,
          self.statistics.their_reach) = self._reached(self.enemy, units)
 
-        self._finish_side(self.our_ops, self.squads, shares, +1.0, units)
-        self._finish_side(self.their_ops, self.enemy, shares, -1.0, units)
+        self._finish_side(self.our_ops, self.squads, reading.paid(True))
+        self._finish_side(self.their_ops, self.enemy, reading.paid(False))
         self._tally()
 
     def _reached(self, squads: Dict[int, SquadRecord], unit_states) -> Tuple[int, int, float]:
@@ -705,11 +789,10 @@ class OpsArena(Arena):
         return {squad.id: self._standing(squad, shares, sign, unit_states)
                 for squad in squads.values()}
 
-    def _finish_side(self, ops, squads: Dict[int, SquadRecord], shares: Dict[int, float], sign: float,
-                     unit_states=()) -> None:
-        """Pays every squad of one side what its errand moved on the region its final contract named, plus the opposite sign for the other side exactly as the engagement arena pays outcome and −outcome. A script layer keeps no trajectories and offers no `finish`, so this is a no-op for the self-play baseline; a learnt operational layer routes the terminal back to the operational decision that produced it.
+    def _finish_side(self, ops, squads: Dict[int, SquadRecord], figures: Dict[int, float]) -> None:
+        """Pays every squad of one side what its deployment came to, plus the opposite sign for the other side exactly as the engagement arena pays outcome and −outcome. A script layer keeps no trajectories and offers no `finish`, so this is a no-op for the self-play baseline; a learnt operational layer routes the terminal back to the operational decision that produced it.
 
-        The figure handed over is `_standing` on the horizon board, which is the same expression the period loop has been paying differences of all episode. So this is the last of a series of payments rather than the only one, and the layer subtracts what it has already been paid: the sum over the episode comes to this number and to nothing else. Nothing about the terminal, the side score or the antisymmetry is changed by the periods being paid — the horizon figure is what it always was.
+        The figures handed over are the horizon's own reading, taken by the one expression the period loop has been paying differences of all episode. So this is the last of a series of payments rather than the only one, and the layer subtracts what it has already been paid: the sum over the episode comes to this number and to nothing else. Which quantity that is — the discs as they stand at the horizon, or the mean of the discs over the horizon — is the run's tenure setting, and neither the terminal's arithmetic nor the antisymmetry knows which it is holding.
 
         There are two ways to say what one squad's deployment earned, and which one is in force is a construction argument because they teach different things.
 
@@ -725,7 +808,7 @@ class OpsArena(Arena):
         if finish is None:
             return
         for squad in squads.values():
-            finish(squad, self._standing(squad, shares, sign, unit_states), "horizon")
+            finish(squad, figures.get(squad.id, 0.0), "horizon")
 
     def _share_without(self, unit_states, contest: "_Contest", members: Sequence[int]) -> float:
         """What one contest's catchment would have read with a squad's surviving units taken out of it. An empty disc reads a half, as it does everywhere else, so a squad that was the only thing in a catchment is credited with the whole of taking it."""

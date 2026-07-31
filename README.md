@@ -226,5 +226,7 @@ python -m rwintel.learn.ops_compare local\ops-eval-learnt.jsonl local\ops-eval-p
 | `--tactics` | `ops_run` `ops_train` | 訓練済み戦術層を盤面の**両側の下**に凍結して置く。**渡した実行は別の計器であり、journal がその層を名乗る** |
 | `--opening` | `ops_train` | 終端をどこから読むか。1(既定)が送られた disc の開始所有、0 が中立の半分 |
 | `--credit` | `ops_train` | 一部隊の終端の読み。**`board`(既定)は契約を一切読まず、採点される全円板にわたってその部隊の生き残りが説明する分を払う。** 残る二つは契約の名指した領域を読む——`region` はその領域の支配まるごと、`marginal` はその部隊の分だけである。**契約を読む二つは、負けている地面から立ち去ることに金を払う**([docs/record/04-operations.md](docs/record/04-operations.md)) |
+| `--tenure` | `ops_train` | 地面を**いつ**読むか。`horizon`(既定)は地平の一枚だけを読むので、**最後にどこに立っているかが目的のすべてになり、係争点の間を往復し続けても代価は 0 である。** `tenure` は毎周期の読みを立っていた時間で重み付けた平均を払う——**試合における地面は収入の上流なので、早く取ることは遅く取ることより価値があり、気を変えることは行軍のぶんだけ高くつく。** 尺度も反対称性も同じで、**どちらを払う実行でも両方の読みが journal に書かれる** |
+| `--reading` | `ops_compare` | 対の差をどちらの読みで取るか(`side_score` / `side_tenure`)。`ops_run` は両方を自分で報告する |
 
 torch を要求するのは学習側だけであり、スクリプト方策だけを走らせる実行はその費用を払わない。環境の設計と定数は [docs/system/04-learning.md](docs/system/04-learning.md)、これまでに取った測定は [docs/record/03-tactics.md](docs/record/03-tactics.md) と [docs/record/04-operations.md](docs/record/04-operations.md) にある。**手書きの戦術層は上回ってある**——8 つ目の逸脱を外した梯子から模倣し直して 5,120 エピソード鍛えた層が、二つの種をまとめて確率最大で +0.0274 ± 0.0177、抽選で +0.0192 ± 0.0169 である。**それでも主張する価値のある改善は数百分の数であり、それを見るには片側で数千交戦が要る。****そのうえ、同じ重みを二度測っても ±0.02 出る**([測定の床](docs/record/03-tactics.md))。

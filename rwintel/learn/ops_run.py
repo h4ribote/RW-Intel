@@ -282,15 +282,18 @@ def load_arms(arms: Sequence[Arm], device_name: Optional[str] = None) -> List[Ar
     return loaded
 
 
-def pool(sessions, arm: Optional[str] = None) -> Summary:
-    """Every scored episode's side score as one count, one mean and one spread, over one arm of the run or over all of them. An episode cut off before its horizon carries no score and is skipped, so a run whose match length did not clear the horizon pools nothing rather than pooling a nought that was never measured."""
-    scores: List[float] = [float(record.statistics.get("side_score", 0.0))
+def pool(sessions, arm: Optional[str] = None, reading: str = "side_score") -> Summary:
+    """Every scored episode's side score as one count, one mean and one spread, over one arm of the run or over all of them. An episode cut off before its horizon carries no score and is skipped, so a run whose match length did not clear the horizon pools nothing rather than pooling a nought that was never measured.
+
+    Which reading is pooled is the caller's: `side_score` is the discs as they stood at the horizon and `side_tenure` the mean of the same discs over the episode. Both are written by every episode, so one run answers both questions and neither has to be taken on its own boards.
+    """
+    scores: List[float] = [float(record.statistics.get(reading, 0.0))
                            for session in sessions for record in session.records
                            if record.statistics.get("scored") and (arm is None or record.arm == arm)]
     return Summary.of(scores)
 
 
-def report(summary: Summary, arm: str = "script") -> None:
+def report(summary: Summary, arm: str = "script", reading: str = "side_score") -> None:
     """The run's pooled side score, as a mean and the two standard errors it has to sit inside.
 
     What a nonzero mean means depends on which arm produced it, and saying the wrong one of these is worse than saying nothing. For the script arm the two sides are the same chain, so the mean is the self-play zero: inside the interval is a board with no lean the mirror draw did not remove, and outside it is a lean to be found and fixed before the arena is trusted. For every other arm our side is deliberately not the enemy's chain, so a mean outside the interval is the arm beating the script — which is the measurement, not a fault — and warning about a lean there would be reporting the instrument working as if it were broken. The lean is read once, on the script arm, and every other arm is then read against it and against the other arms board by board with `ops_compare`.
@@ -298,9 +301,10 @@ def report(summary: Summary, arm: str = "script") -> None:
     if summary.n == 0:
         log.warning("no episode reached its horizon, so there is no side score to pool: is the match length longer than the horizon plus the settle and spawn waits?")
         return
+    named = "held over the episode" if reading == "side_tenure" else "held at the horizon"
     interval = 2.0 * summary.sd / math.sqrt(summary.n) if summary.n > 1 else 0.0
-    log.info("pooled side score over %d scored episode(s): %+.4f, 2 standard errors %.4f, interval %+.4f to %+.4f",
-             summary.n, summary.mean, interval, summary.mean - interval, summary.mean + interval)
+    log.info("pooled side score (%s) over %d scored episode(s): %+.4f, 2 standard errors %.4f, interval %+.4f to %+.4f",
+             named, summary.n, summary.mean, interval, summary.mean - interval, summary.mean + interval)
     if summary.n < 2:
         log.info("one episode has no spread, so it says nothing about how this arm stands; run several hundred")
         return
@@ -517,6 +521,8 @@ def measure(arguments) -> Dict[str, Summary]:
         log.info("---- %s ----", arm.label)
         summaries[arm.label] = pool(sessions, "ops-" + arm.label)
         report(summaries[arm.label], arm.label)
+        # The same boards read the other way. An arm that ends the horizon on the discs and an arm that held them the whole way there are the same figure above and differ here, which is the one question a run of this arena could not be asked before.
+        report(pool(sessions, "ops-" + arm.label, "side_tenure"), arm.label, "side_tenure")
         diagnose(sessions, "ops-" + arm.label, arguments.radius)
     if count > 1:
         # Every arm met every board, so the run is its own paired comparison and there is no reason to make anyone assemble it by hand from the journal afterwards. Read back off the file that was just written rather than off the sessions, so that what is reported is what was recorded. Imported here rather than at the top because the comparison reads this module for the stride that names a board, and the two would otherwise import each other.
@@ -527,6 +533,9 @@ def measure(arguments) -> Dict[str, Summary]:
             for second in arms[index + 1:]:
                 log.info("---- %s against %s, board by board ----", first.label, second.label)
                 compare(path, path, first_arm="ops-" + first.label, second_arm="ops-" + second.label)
+                log.info("---- %s against %s, board by board, held over the episode ----", first.label, second.label)
+                compare(path, path, first_arm="ops-" + first.label, second_arm="ops-" + second.label,
+                        reading="side_tenure")
     if frozen.batcher is not None:
         # Under a frozen tactical layer the fighting is the dominant inference load of the run and nothing else reports it: every squad of both sides asks it for a departure every tactical frame, against one operational request a squad a period. How that batches is the first thing to read a run's speed against, so it is said in the same words the engagement arena's runner says it in.
         log.info("the frozen tactical layer's batched inference averaged %.1f per call over %d call(s)",
