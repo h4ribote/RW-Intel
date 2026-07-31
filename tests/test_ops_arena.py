@@ -303,19 +303,35 @@ def test_the_mirror_layout_pairs_every_point_and_equalises_the_garrisons():
 # ---- the priorities are invariant under the mirror map --------------------------------------
 
 def test_the_synthesized_priorities_are_invariant_under_the_mirror_map():
-    """A weight drawn once per unordered mirror pair and set on both of its regions, so the priority a region carries equals the priority its mirror carries. Any unpaired or mismatched weight is an asymmetric board statement and a direct lean; drawing region by region instead would re-randomise the second member of a pair."""
+    """A weight drawn once per unordered mirror pair and set on both of its regions, so the priority a region carries equals the priority its mirror carries. Any unpaired or mismatched weight is an asymmetric board statement and a direct lean; drawing region by region instead would re-randomise the second member of a pair.
+
+    That holds of both dicts and for the same reason. The scored weights carry the contested regions; the dict the layers are told carries those and a weight on every other region the reflection pairs, so that a weight of nought stops being a label for unscored ground. Ground the reflection does not pair carries nothing in either, because a prize one side has and the other does not is the very asymmetry the mirrored draw exists to remove.
+    """
     session = _Session(_grid())
     # A seed whose draw places both contest pairs on this grid at the default catchment radius; the invariance under test does not depend on which seed, only on both pairs being placed.
     arena = _arena(session=session, seed=7, sites=_CORNERS)
+    arena.last_regions = list(_grid())
     arena._deploy(_observation(slot=0), Action(), 0)
     assert not arena.refused
 
     assert arena.priorities and arena.orders is not None
-    # The orders handed to both sides carry exactly these priorities.
-    assert arena.orders.priorities is arena.priorities
     for region, weight in arena.priorities.items():
         mirror = arena.mirror_of[region]
         assert arena.priorities[mirror] == weight
+
+    # The layers are told about more ground than the episode scores, and every weight in that dict is even under the reflection too.
+    wanted = arena.orders.priorities
+    assert wanted is arena.wanted and set(arena.priorities) <= set(wanted)
+    assert len(wanted) > len(arena.priorities), "the layer is still told that unscored ground is worth nothing"
+    for region, weight in arena.priorities.items():
+        assert wanted[region] == weight, "a scored region is worth what the episode scores it by"
+    by_position = {region.id: (region.x, region.y) for region in _grid()}
+    for region, weight in wanted.items():
+        point = arena._mirror(by_position[region], arena.centre)
+        mirror = min(by_position, key=lambda other: (by_position[other][0] - point[0]) ** 2
+                     + (by_position[other][1] - point[1]) ** 2)
+        assert abs(wanted.get(mirror, 0.0) - weight) < 1e-12, (
+            "region %d carries a weight its reflection does not" % region)
 
 
 # ---- garrisons never reach the command loop -------------------------------------------------
@@ -564,16 +580,19 @@ def test_the_two_credit_readings_pay_a_pile_of_squads_differently():
     assert region_ops.paid[1] == region_ops.paid[2], "the region reading pays the pile in full, squad by squad"
 
     arena.credit = "marginal"
+    arena.squads = squads
     marginal_ops = _Paid()
     arena._finish_side(marginal_ops, squads, arena._standings(squads, shares, +1.0, units))
-    # Without either squad the disc reads one tank ours against one hostile, which is a half; each is credited the sixth it added.
-    assert abs(marginal_ops.paid[1] - (2.0 / 3.0 - 0.5)) < 1e-9
+    # With none of this side's staged squads the disc holds one hostile tank alone and reads nought, so the deployment moved two thirds of it and the two squads standing there divide that in proportion to what each still has in the disc.
+    assert abs(marginal_ops.paid[1] - 1.0 / 3.0) < 1e-9
     assert abs(marginal_ops.paid[2] - marginal_ops.paid[1]) < 1e-9
+    assert abs(marginal_ops.paid[1] + marginal_ops.paid[2] - 2.0 / 3.0) < 1e-9, (
+        "the pile is paid exactly what it moved between them, no more and no less")
     # The third squad was sent to the same region and is not on the board at the horizon. Neither reading pays it: it has moved nothing since its last unit went, and the disc it was sent to was taken by others.
     assert region_ops.paid[3] == 0.0
     assert marginal_ops.paid[3] == 0.0
 
-    # A third squad piled onto the same taken region is paid in full by the region reading and almost nothing by the marginal one, which is the whole difference between them.
+    # A third squad piles onto the same region. The region reading hands each of the three the whole of that region's outcome, so the side is paid three times over for one disc; the marginal reading hands the three one disc's movement to divide, so the total is the movement whatever the size of the pile. That, and not the figure any one squad happens to take, is the difference between the two.
     units.append(_unit(4, 30.0, 0.0))
     squads[3].members = [4]
     shares = {4: 3.0 / 4.0}
@@ -581,10 +600,13 @@ def test_the_two_credit_readings_pay_a_pile_of_squads_differently():
     arena.credit = "region"
     arena._finish_side(piled, squads, arena._standings(squads, shares, +1.0, units))
     assert abs(piled.paid[3] - (3.0 / 4.0 - 0.5)) < 1e-9
+    assert abs(sum(piled.paid.values()) - 3.0 * (3.0 / 4.0 - 0.5)) < 1e-9
     marginal_piled = _Paid()
     arena.credit = "marginal"
     arena._finish_side(marginal_piled, squads, arena._standings(squads, shares, +1.0, units))
-    assert 0.0 < marginal_piled.paid[3] < piled.paid[3]
+    assert abs(sum(marginal_piled.paid.values()) - 3.0 / 4.0) < 1e-9
+    assert all(abs(value - 0.25) < 1e-9 for value in marginal_piled.paid.values()), (
+        "three equal squads on one disc divide its movement equally")
 
 
 def test_the_marginal_credit_is_the_change_the_squad_made_to_the_side_score():
@@ -985,6 +1007,41 @@ def test_the_horizon_pays_only_what_the_periods_have_not():
     assert census.zero_advantage == 0
 
 
+def test_finishing_the_fight_pays_a_squad_more_and_not_less():
+    """The credit has to move the same way the score does, and under the leave-one-out counterfactual it moved the opposite way on the errand this arena is for.
+
+    One disc a garrison opened, three tanks of ours in it against its one. The disc reads three quarters, the deployment moved it three quarters from an opening of nought, and the one squad standing there takes all of that. The same three then destroy the garrison: the disc reads whole and the side score rises from a quarter to a half. Asked what the disc would read with THIS squad's units removed, the answer was an empty disc at a neutral half, so the squad's pay FELL to a half — a third of its pay taken away for winning the fight, in the very quantity it is paid in. Asked instead what the disc moved and how much of that move this squad is standing on, it rises to the whole priority, which is the direction the score moved.
+    """
+    for credit in ("board", "marginal"):
+        arena = _arena(seed=5, credit=credit)
+        _contested(arena, 4, (0.0, 0.0), 1.0)
+        arena.garrison_share = {4: 0.0}
+        squad = _tasked(1, 4, [10, 11, 12])
+        arena.squads = {1: squad}
+        ours = [_unit(10, 0.0, 0.0), _unit(11, 20.0, 0.0), _unit(12, 40.0, 0.0)]
+
+        contested = ours + [_unit(50, 60.0, 0.0, hostile=1)]
+        arena._frozen.clear()
+        before = arena._standing(squad, arena._shares(contested), +1.0, contested)
+        arena._frozen.clear()
+        after = arena._standing(squad, arena._shares(ours), +1.0, ours)
+
+        assert abs(arena._side_score(contested) - 0.25) < 1e-9
+        assert abs(arena._side_score(ours) - 0.5) < 1e-9, "the score has to rise when the defender dies"
+        assert abs(before - 0.75) < 1e-9 and abs(after - 1.0) < 1e-9, (
+            "%s: the squad was not paid more for finishing the fight" % credit)
+
+    # And the other half of the same statement: a pile divides one disc's movement rather than each member taking it whole, which is what the leave-one-out reading was built for and what it stopped doing the moment the pile succeeded.
+    arena = _arena(seed=5, credit="marginal")
+    _contested(arena, 4, (0.0, 0.0), 1.0)
+    arena.garrison_share = {4: 0.0}
+    taken = [_unit(10, 0.0, 0.0), _unit(20, 20.0, 0.0)]      # an ally's tank is in the disc as well
+    piled, ally = _tasked(1, 4, [10]), _tasked(2, 4, [20])
+    arena.squads = {1: piled, 2: ally}
+    figures = arena._standings(arena.squads, arena._shares(taken), +1.0, taken)
+    assert abs(figures[1] - figures[2]) < 1e-9 and abs(sum(figures.values()) - 1.0) < 1e-9
+
+
 # ---- the reading that prices when the ground was taken --------------------------------------
 
 def _held(arena, at_ms, ours_in_disc, enemy_in_disc):
@@ -1042,6 +1099,24 @@ def test_the_tenure_reading_is_the_mean_of_the_periods_weighted_by_how_long_each
     last = uneven._standing(uneven.squads[1], uneven._shares(units), +1.0, units)
     _held(uneven, 8000, 3, 1)
     assert abs(uneven._accrued[1] - (first + 0.25 * last)) < 1e-12
+
+
+def test_a_squad_that_is_gone_accrues_no_further_tenure():
+    """A wiped squad's figure is frozen where its last unit left it, and that freeze belongs to the horizon reading alone.
+
+    There it prevents a punishment, since the horizon pays differences and a figure falling to nought at the moment of death would charge a squad for dying after it had earned. Carried into the tenure reading it becomes a payment for ground the squad is not standing on: a squad that takes a disc in the first period and is annihilated would accrue, over the rest of the horizon, exactly what a squad that held the same disc all the way accrues, and the one distinction the reading exists to make would not be made for anything that dies. At the shipped three-hundred-second horizon a squad wiped at ten seconds would keep about all of a full hold.
+    """
+    holds, dies = _tenure_board(), _tenure_board()
+    for at_ms in (2000, 4000, 6000, 8000):
+        _held(holds, at_ms, 3, 0)
+    _held(dies, 2000, 3, 0)
+    for at_ms in (4000, 6000, 8000):
+        _held(dies, at_ms, 0, 0)
+
+    assert dies._accrued[1] < holds._accrued[1] - 0.3, (
+        "a squad annihilated after one period accrued what a squad that held the disc to the horizon accrued")
+    # And it is not charged for having died either: the total stops growing rather than falling back, so the quarter of the horizon it did hold the disc for is still in it.
+    assert abs(dies._accrued[1] - 0.25 * holds._accrued[1]) < 1e-12
 
 
 def test_the_tenure_reading_is_exactly_antisymmetric_between_the_sides():
@@ -1430,13 +1505,16 @@ def test_the_board_reading_cannot_be_changed_by_renaming_the_errand():
     figures = []
     for region in (4, 9, 7, None):
         squad = _tasked(1, region, [1])
+        arena.squads = {1: squad}
         figures.append(arena._standing(squad, shares, +1.0, units))
     assert max(figures) - min(figures) < 1e-12, (
         "renaming the errand moved the pay by %.3e, so the layer can still choose its own terminal"
         % (max(figures) - min(figures)))
 
     # And the figure is not merely constant: it is what this squad's units account for across the scored board, so a squad that is holding something is paid and a squad standing nowhere is not.
-    idle = arena._standing(_tasked(2, 4, [9]), shares, +1.0, units)
+    idle = _tasked(2, 4, [9])
+    arena.squads = {2: idle}
+    idle = arena._standing(idle, shares, +1.0, units)
     assert abs(idle) < 1e-12, "a squad with nothing inside any catchment is paid for standing nowhere"
     assert abs(figures[0]) > 1e-6, "a squad inside a contested catchment is paid nothing at all"
 

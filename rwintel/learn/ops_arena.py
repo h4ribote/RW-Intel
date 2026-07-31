@@ -78,6 +78,9 @@ CREDITS = ("region", "marginal", "board")
 #: Which of them a run uses unless it says otherwise. The reading that cannot be abstained out of, since every generation trained under the region reading has walked off the board given enough episodes.
 CREDIT = "board"
 
+#: The band an unscored region's priority is drawn from, against the contested band of 0.3 to 1.0. Overlapping from below rather than disjoint, so priority ranks the ground without labelling which of it is scored: a layer cannot read "this region is worth nothing to the board" off a weight, because no live region carries nothing, exactly as none does in a match. The top of the band sits inside the contested band so the two cannot be told apart by a threshold, and the bottom sits near the lowest weight a collected match put on a live region.
+QUIET_PRIORITY = (0.1, 0.6)
+
 #: When the ground a deployment holds is read: at the horizon alone, or over the whole episode.
 #:
 #: `horizon` reads the discs at the last frame and pays that, which is the reading this arena was built with. Under it the episode's whole objective is where the units are standing when the clock stops, and everything before that is worth exactly nothing: a squad that took a disc in the first minute and one that walked onto an empty disc in the last second are paid the same, and marching back and forth between two contests all episode costs nothing so long as the march ends somewhere. That is not what a match pays for. Ground in a match is upstream of income — a region held from the third minute pays its owner for the remaining twelve — so a layer that is free to change its mind is being trained against a clock that a match does not have.
@@ -284,6 +287,8 @@ class OpsArena(Arena):
         self.mirror_of: Dict[int, int] = {}
         self.orders: Optional[OperationsOrders] = None
         self.priorities: Dict[int, float] = {}
+        #: What the layers are told the board is worth, which is the scored weights above plus a weight on every other region the reflection pairs. Kept apart from the scored weights because the two answer different questions and one dict answering both is what let a layer read the score off a feature.
+        self.wanted: Dict[int, float] = {}
         self.garrison_share: Dict[int, float] = {}    # region -> this side's share of the initial garrison worth, fixed at the draw
         self.our_home_id: Optional[int] = None
         self.their_home_id: Optional[int] = None
@@ -492,7 +497,16 @@ class OpsArena(Arena):
     # ---- orders ------------------------------------------------------------------------
 
     def _synthesize_orders(self) -> None:
-        """Draws the priorities. No strategic layer runs, so the weights are drawn from the seed one per unordered mirror pair and set on both of the pair's regions at once, which is what keeps the board even: a weight drawn region by region would re-randomise the second member and make it an asymmetric board statement. The priority dict is asserted invariant under the mirror map before the run."""
+        """Draws what the board is worth, in two dicts that answer two questions.
+
+        `self.priorities` is what the episode is SCORED by, and it carries the contested regions alone: one weight per unordered mirror pair, set on both of the pair's regions at once. Drawn per pair rather than per region because that is what keeps the board even — a weight drawn region by region would re-randomise the second member and make it an asymmetric board statement — and the dict is asserted invariant under the mirror map before the run.
+
+        The orders' dict is what the LAYER IS TOLD, and it carries every region the reflection can pair, contested or not. That difference is the whole point of it. A match's strategic layer scores every live region off its resources, its ownership and how near it is, and normalises: measured over twenty-seven thousand live region rows of a collected match, `region.priority` is never nought, runs from about 0.08 to 1 and sits at a median of a third. This arena used to hand the layer a dict carrying only the four scored discs, so `priority > 0` was a noise-free label for "ground you are paid for" — a feature that separates the board perfectly here and separates nothing at all in a match, where every region carries one. A layer that learnt to reject a region for carrying no priority learnt a gate that fires on five rows in nine here and on none there.
+
+        So the unscored regions are given weights too, from a band that overlaps the contested band from below rather than being disjoint from it. Priority then says what the ground is worth and stops saying which ground is scored, and what still separates the scored discs is the thing that separates them in a match: somebody's strength is standing on them, which the region row carries as its force edge and its enemy-present flag.
+
+        Only regions the reflection pairs may carry weight, and that is not a nicety. The two sides read one dict keyed by the map's own region ids, so a weight on a region whose reflection lands on no region at all is a prize one side has and the other does not — the exact asymmetry the mirrored draw exists to remove, and one the self-play mean would then have to absorb. A region that reflects onto itself is one statement about ground both sides see alike and may carry a weight of its own.
+        """
         priorities: Dict[int, float] = {}
         for pair in self.pairs:
             weight = self.random.uniform(0.3, 1.0)
@@ -503,9 +517,42 @@ class OpsArena(Arena):
             assert mirror is not None and priorities.get(mirror) == weight, (
                 "the synthesised priorities are not invariant under the mirror map")
         self.priorities = priorities
-        self.orders = OperationsOrders(posture=Posture.ARM, priorities=priorities,
+
+        wanted = dict(priorities)
+        for first, second in self._quiet_pairs():
+            weight = self.random.uniform(*QUIET_PRIORITY)
+            wanted[first] = weight
+            wanted[second] = weight
+        self.wanted = wanted
+        self.orders = OperationsOrders(posture=Posture.ARM, priorities=wanted,
                                        offensive=self.random.random() < 0.5,
                                        loss_allowance=self.random.uniform(*SQUAD_VALUE))
+
+    def _quiet_pairs(self) -> List[Tuple[int, int]]:
+        """Every unordered pair of regions the board's reflection maps onto each other and no contest was drawn on, each named once, in the map's own order so the draw is a function of the seed and not of a dict's iteration.
+
+        A region reflects onto whichever region's centre is nearest its own reflected centre, and only when that region's own reflection comes back to it — a one-sided nearest neighbour would pair a region with one that is paired to somebody else, and the two would then be handed different weights by whichever pair was drawn last. A region that comes back to itself is paired with itself and drawn once. What is left over is ground the reflection does not preserve, and it carries no weight at all.
+        """
+        regions = [region for region in (self.last_regions or []) if region.id not in self.priorities]
+        if not regions:
+            return []
+        centre = self.centre
+        nearest: Dict[int, int] = {}
+        for region in regions:
+            point = self._mirror((region.x, region.y), centre)
+            best, best_d2 = None, None
+            for other in regions:
+                d2 = (other.x - point[0]) ** 2 + (other.y - point[1]) ** 2
+                if best_d2 is None or d2 < best_d2:
+                    best, best_d2 = other.id, d2
+            nearest[region.id] = best
+        pairs: List[Tuple[int, int]] = []
+        for region in regions:
+            other = nearest[region.id]
+            if nearest.get(other) != region.id or other < region.id:
+                continue
+            pairs.append((region.id, other))
+        return pairs
 
     # ---- running both chains over the horizon ------------------------------------------
 
@@ -595,12 +642,22 @@ class OpsArena(Arena):
         ours = self._standings(self.squads, shares, +1.0, unit_states)
         theirs = self._standings(self.enemy, shares, -1.0, unit_states)
         side = self._side_score(unit_states)
-        self._accrue(now, side, ours, theirs)
+        self._accrue(now, side, self._still_there(self.squads, ours),
+                     self._still_there(self.enemy, theirs))
         if self.tenure == "tenure":
             return _Reading(shares, side,
                             {key: self._accrued.get(key, 0.0) for key in ours},
                             {key: self._accrued.get(key, 0.0) for key in theirs})
         return _Reading(shares, side, ours, theirs)
+
+    @staticmethod
+    def _still_there(squads: Dict[int, SquadRecord], figures: Dict[int, float]) -> Dict[int, float]:
+        """The same figures with a squad that has nothing left on the board reading nought.
+
+        The freeze that keeps a wiped squad's figure where its last unit left it belongs to the horizon reading and to that reading alone. There it prevents a punishment: the horizon pays differences of one figure, so a figure falling to nought at the moment of death would charge the squad for dying after it had already earned. The tenure reading pays no such difference — it adds what is being held, stretch by stretch — so a squad that no longer exists must add nothing, and the freeze applied to it would pay it for ground it is not standing on for the rest of the horizon. Measured on the arena's own fixture: a squad that takes a disc in the first of four periods and is annihilated accrues exactly what a squad that held the same disc to the horizon accrues, and at the shipped horizon a squad wiped at ten seconds keeps about all of a full hold. Nought is the honest figure, and it is not a punishment, because a total that stops growing is not a total that falls.
+        """
+        return {key: (value if squads[key].members else 0.0) if key in squads else value
+                for key, value in figures.items()}
 
     def _accrue(self, now: int, side_score: float, ours: Dict[int, float],
                 theirs: Dict[int, float]) -> None:
@@ -742,23 +799,25 @@ class OpsArena(Arena):
         return None
 
     def _standing(self, squad: SquadRecord, shares: Dict[int, float], sign: float,
-                  unit_states=()) -> float:
+                  unit_states=(), squads: Optional[Dict[int, SquadRecord]] = None) -> float:
         """What one squad's errand has moved on the disc its contract names, as the board just read stands, signed for the side.
+
+        The side's whole squad dict is handed in with the squad, because the two readings that divide what a deployment moved cannot be computed from one squad: what a squad is owed depends on how many others of its side are standing on the same disc. Defaulted to the side the sign names so a caller that is asking about a real side need not say it twice.
 
         This is the whole of the arena's credit and it is one expression called from two places: the period loop reads it every operational frame and the horizon reads it once more, so that the differences between successive readings telescope to the last reading exactly. Were the horizon to compute its own figure the identity would be an intention that two expressions had to be kept in step; written this way it is a fact about the code.
 
         Which reading it is — the region's own outcome, or only the part of it this squad's surviving units account for — is the credit the arena was constructed with, and what each teaches is in `_finish_side`. A region the board put no priority on moves no figure at all, so a squad sent to one is paid nought rather than being paid out of some other quantity.
         """
+        if squads is None:
+            squads = self.enemy if sign < 0.0 else self.squads
         if not squad.members:
             # A squad with nothing left on the board cannot move the disc it was sent to, so its figure is frozen where its last surviving unit left it and it is paid no further difference. Without this it goes on collecting, period after period, whatever its allies produce on that disc, and the horizon hands it the whole of a domination it took no part in — the free-rider term extended to a squad that no longer exists, which is precisely the misattribution this credit was built to remove. Frozen rather than nought, because a squad that destroyed a garrison and died doing it did move the disc, from the enemy's hands to nobody's, and that movement is in the side score whether or not anything of the squad survived to stand on it. The freeze is read before the contract is, so a dead squad whose layer goes on writing it errands cannot change its figure by naming a different region.
             return self._frozen.get(squad.id, 0.0)
         if self.credit == "board":
             # Every scored disc, and no contract read at all. The sum is over the discs rather than over the one a squad was sent to, so a squad that wandered onto a contest it was never given is paid for what it is doing there and a squad that was given one and left is not paid for having been given it.
-            figure = sign * sum(
-                self.priorities.get(contest.region_id, 0.0)
-                * (shares.get(contest.region_id, 0.5)
-                   - self._share_without(unit_states, contest, squad.members))
-                for contest in self.contests)
+            figure = sum(self.priorities.get(contest.region_id, 0.0)
+                         * self._part_of_movement(unit_states, contest, squad, sign, squads)
+                         for contest in self.contests)
             self._frozen[squad.id] = figure
             return figure
         region = squad.contract.target_region if squad.contract is not None else None
@@ -770,8 +829,8 @@ class OpsArena(Arena):
         if self.credit == "marginal":
             contest = self._contest(region)
             if contest is not None:
-                # The marginal reading carries its own origin — what the catchment would have read with this squad's units taken out of it — so the opening is not subtracted from it a second time.
-                figure = sign * weight * (share - self._share_without(unit_states, contest, squad.members))
+                # The marginal reading carries its own origin — what the disc would have read with none of this side's staged squads standing in it — so the opening is not subtracted from it a second time.
+                figure = weight * self._part_of_movement(unit_states, contest, squad, sign, squads)
                 self._frozen[squad.id] = figure
                 return figure
         # Where the errand's outcome is read from: the neutral half when the baseline is nought, the disc's own opening ownership when it is one. The baseline is inside the priority weighting rather than beside it, because it is the point one region's outcome is measured from and not a separate term added to it; weighting the outcome and not its origin would leave a standing payment on every disc that scaled with nothing.
@@ -786,7 +845,7 @@ class OpsArena(Arena):
 
         Total over the side's squads rather than only over the ones on scored ground: a squad contracted to a region the board put no priority on is present with a nought. What that spares the layer is a fallback of its own for a squad it finds missing, and a fallback is exactly what must not exist — a trajectory some of whose steps were paid in the arena's disc reading and some in the region block sums to neither quantity.
         """
-        return {squad.id: self._standing(squad, shares, sign, unit_states)
+        return {squad.id: self._standing(squad, shares, sign, unit_states, squads)
                 for squad in squads.values()}
 
     def _finish_side(self, ops, squads: Dict[int, SquadRecord], figures: Dict[int, float]) -> None:
@@ -810,11 +869,69 @@ class OpsArena(Arena):
         for squad in squads.values():
             finish(squad, figures.get(squad.id, 0.0), "horizon")
 
+    def _part_of_movement(self, unit_states, contest: "_Contest", squad: SquadRecord,
+                          sign: float, squads: Dict[int, SquadRecord]) -> float:
+        """This squad's part of what its side's whole deployment moved on one disc: the disc's share for that side, less what the same disc would read with none of that side's staged squads standing in it, divided among those squads in proportion to the worth each still has there.
+
+        Replaces a leave-one-out counterfactual that was degenerate in exactly the case this arena exists to teach. That reading asked what the disc would read with THIS squad's units removed, and a share saturates: once the defender is destroyed the disc reads whole whoever is standing in it, so removing one squad of a pile changes nothing and every member of a successful pile is paid nothing. Measured with the real expressions on one disc at priority 1: four squads massed on a garrisoned disc are each paid +0.0500 while the garrison lives, the side score standing at +0.300 — and each is paid **+0.0000** the moment they destroy it, with the side score at +0.500. The one errand the arena is built to teach paid the pile that carried it out exactly nothing, and the code's own account of the reading (`_finish_side`, and the `CREDITS` note that a pile is what taking ground is made of) described a payment that was not being made.
+
+        A share of what the side moved is the reading that survives both. Its origin is the disc read with none of the side's staged squads in it, so the garrison this side already had is inside the origin and adds nothing — a redundant defence still pays about nothing, which is the property the opening baseline was introduced for. Its total over the side's squads is exactly what the side's deployment moved on that disc, so the squads divide what they jointly produced rather than each taking all of it or, as before, none of it. A squad with nothing left there is a null term and takes nought. And it rises with the kill rather than collapsing at it, because destroying the last defender is what takes the disc's share to whole.
+
+        What it gives up against the leave-one-out reading is the counterfactual's one virtue: a squad standing on ground its allies would have taken anyway is now paid a share of that ground rather than nothing. On this arena that error runs the right way — a pile is how a defended disc is taken at all — and it is bounded by the squad's own worth as a fraction of the side's, where the old error was the whole payment.
+        """
+        hostile = sign < 0.0
+        ours, theirs = self._catchment_worths(unit_states, contest.point)
+        mine, opposing = (theirs, ours) if hostile else (ours, theirs)
+        opening = self.garrison_share.get(contest.region_id, 0.5)
+        if hostile:
+            opening = 1.0 - opening
+
+        staged = self._staged_worths(unit_states, contest, squads)
+        held = sum(staged.values())
+        part = staged.get(squad.id, 0.0)
+        if part <= 0.0 or held <= 0.0:
+            return 0.0
+        total = mine + opposing
+        now = mine / total if total > 0 else opening
+        # The origin: the same disc with none of this side's staged squads standing in it. Where that leaves the disc empty there is no reading to take, and the honest answer to "had none of them been sent" is the ownership the disc opened at, for the reason `_share_without` gives.
+        bare = mine - held
+        bare_total = total - held
+        origin = bare / bare_total if bare_total > 0 else opening
+        return (now - origin) * (part / held)
+
+    def _staged_worths(self, unit_states, contest: "_Contest", squads: Dict[int, SquadRecord]) -> Dict[int, float]:
+        """How much health-weighted worth each of one side's staged squads still has inside one catchment, by squad id. Read off the squad membership rather than off the unit rows' own squad field, because the arena owns the membership of both sides and the wire's field is only this process's seat."""
+        radius2 = self.radius * self.radius
+        by_id = {unit.id: unit for unit in unit_states}
+        worths: Dict[int, float] = {}
+        for squad in squads.values():
+            total = 0.0
+            for member in squad.members:
+                unit = by_id.get(member)
+                if unit is None:
+                    continue
+                if (unit.x - contest.point[0]) ** 2 + (unit.y - contest.point[1]) ** 2 > radius2:
+                    continue
+                share = 1.0 if unit.max_health <= 0 else unit.health / unit.max_health
+                total += self.catalogue.value(unit.type_index) * min(1.0, max(0.0, share))
+            if total > 0.0:
+                worths[squad.id] = total
+        return worths
+
     def _share_without(self, unit_states, contest: "_Contest", members: Sequence[int]) -> float:
-        """What one contest's catchment would have read with a squad's surviving units taken out of it. An empty disc reads a half, as it does everywhere else, so a squad that was the only thing in a catchment is credited with the whole of taking it."""
+        """What one contest's catchment would have read had this squad not been sent to it: read off whatever else is standing there, and where nothing else is standing, off the ownership the disc opened at.
+
+        The two halves of that sentence answer the same question by the only two means there are. While something else is in the catchment — an ally, the garrison, an enemy — the counterfactual is a reading of a board, and removing the squad's units from that board is exactly it. When the squad's units are the only things left, there is no board to read, and the honest answer to "had this squad never been sent" is that the disc would stand where it began, because the garrison that opened it is what the squad removed.
+
+        Reading the empty case as the neutral half instead inverted the credit on the very errand this arena exists to teach. Measured on one disc a garrison opened: our three tanks standing against its one read a share of three quarters, and the counterfactual with our three removed read nought, so the squad was paid three quarters of the priority. The same three tanks then destroy the garrison. The disc now reads whole, the arena's own side score rises from a quarter to a half — and the counterfactual with our three removed reads an empty disc, so under the neutral half the squad was paid one half. **Finishing the fight cut its pay by a third while raising the score it is paid in.** A layer taught by that learns to stand in a contested disc beside a live defender and never kill it, and to move on before it does — which is the shape of a layer whose errands last two decisions.
+
+        Read off the opening, the same two boards pay three quarters and then the whole priority, so taking the ground is worth more than half-taking it. What it gives up is the other side of the same ledger: a squad that clears its own side's disc of attackers, and is the only thing left standing in it, is paid nothing, because the disc would have been ours had nobody been sent. That is the arena's own stance on a defence that was not needed, applied to one that was; it is the cost of a counterfactual that cannot see what a squad destroyed, and it errs toward the errand the arena is for.
+        """
         our_worth, enemy_worth = self._catchment_worths(unit_states, contest.point, without=set(members))
         total = our_worth + enemy_worth
-        return our_worth / total if total > 0 else 0.5
+        if total > 0:
+            return our_worth / total
+        return self.garrison_share.get(contest.region_id, 0.5)
 
     def close(self) -> None:
         for layer in (self.our_ops, self.their_ops, self.our_tac, self.their_tac):
