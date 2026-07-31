@@ -1058,6 +1058,29 @@ def test_finishing_the_fight_pays_a_squad_more_and_not_less():
         assert abs(before - 0.75) < 1e-9 and abs(after - 1.0) < 1e-9, (
             "%s: the squad was not paid more for finishing the fight" % credit)
 
+    # A disc taken outright, by squads of several units each with health left over, is the case the whole reading exists for and the one an arithmetic shortcut loses.
+    #
+    # The origin is the disc read with none of this side's staged squads in it. Written as this side's worth less what its squads hold, it is two sums accumulated in different groupings — one running total over the board's rows against a total per squad added up afterwards — and their difference carries a residue of the last bits. Over six hundred random boards of two to four squads of two to four units, the two forms disagree on more than two in five, and the residue divides one leftover by another: the worst produces an origin of one where the honest answer is nought, which pays a side that has just taken a disc outright exactly nothing. Summed over the units that are left, an emptied disc is empty.
+    for trial in range(30):
+        arena = _arena(seed=200 + trial, credit="board")
+        _contested(arena, 4, (0.0, 0.0), 1.0)
+        arena.garrison_share = {4: 0.0}
+        rng = random.Random(trial)
+        squads, units, unit_id = {}, [], 10
+        for index in range(rng.randrange(2, 5)):
+            members = []
+            for _ in range(rng.randrange(2, 5)):
+                units.append(_unit(unit_id, (unit_id % 7) * 9.0, 0.0, health=rng.uniform(0.5, 100.0)))
+                members.append(unit_id)
+                unit_id += 1
+            squads[index] = _tasked(index, 4, members)
+        arena.squads = squads
+        figures = arena._standings(squads, arena._shares(units), +1.0, units)
+        assert abs(sum(figures.values()) - 1.0) < 1e-9, (
+            "board %d: a disc taken outright paid its takers %.6f of the priority between them"
+            % (trial, sum(figures.values())))
+        assert all(value > 0.0 for value in figures.values())
+
     # And the other half of the same statement: a pile divides one disc's movement rather than each member taking it whole, which is what the leave-one-out reading was built for and what it stopped doing the moment the pile succeeded.
     arena = _arena(seed=5, credit="marginal")
     _contested(arena, 4, (0.0, 0.0), 1.0)

@@ -920,9 +920,13 @@ class OpsArena(Arena):
             return 0.0
         total = mine + opposing
         now = mine / total if total > 0 else opening
-        # The origin: the same disc with none of this side's staged squads standing in it. Where that leaves the disc empty there is no reading to take, and the honest answer to "had none of them been sent" is the ownership the disc opened at, for the reason `_share_without` gives.
-        bare = mine - held
-        bare_total = total - held
+        # The origin: the same disc with none of this side's staged squads standing in it. Read as a sum over the units that are left rather than as this side's worth less what its squads hold, and that is not tidiness. The two are the same number in exact arithmetic and are accumulated in different groupings — one running total over the board's rows against a total per squad added up afterwards — so their difference carries a residue of the last bits. Where the staged squads are the whole of this side's worth, which is every disc a deployment has taken outright, the difference is meant to be nought and the reading is meant to fall through to the opening; a residue of a few parts in a quadrillion instead divides one residue by another and returns something between minus one and one, so a disc a side had just taken would pay it an arbitrary figure. Summed honestly, an emptied disc is empty.
+        without = {member for record in squads.values() for member in record.members}
+        bare, bare_opposing = self._catchment_worths(unit_states, contest.point, without=without)
+        if hostile:
+            bare, bare_opposing = bare_opposing, bare
+        bare_total = bare + bare_opposing
+        # Where nothing at all is left, there is no reading to take, and the honest answer to "had none of them been sent" is the ownership the disc opened at, for the reason `_share_without` gives.
         origin = bare / bare_total if bare_total > 0 else opening
         return (now - origin) * (part / held)
 
