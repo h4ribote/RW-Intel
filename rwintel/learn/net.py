@@ -2,7 +2,7 @@
 
 The tactical layer is asked for a decision five times a second per squad, and eight game instances at ten times speed put that at four hundred batches a second on one six gigabyte card. That budget, and not any view about what architecture suits a real-time strategy game, is what fixes the size here: two hidden layers of sixty-four for the tactical policy is what fits, and the design says so in advance. The operational layer runs at a tenth of the rate and reads the whole board, so it is allowed to be wider — but not deeper, because it is the same card.
 
-Both are actor-critic in one body with two heads. Sharing the trunk is what makes the value estimate cost nothing extra, which matters at this rate, and the value head exists at all because the advantage estimator needs it; nothing else reads it.
+All three are actor-critic in one body with two heads, the operational one's action head being the only one split in two (a region and a task). Sharing the trunk is what makes the value estimate cost nothing extra, which matters at this rate, and the value head exists at all because the advantage estimator needs it; nothing else reads it.
 
 The operational head is factorised into a region and a task rather than emitting the 144 combinations, because the two questions are different — where is worth going, and what to do on arrival — and because the legal set is a product of two small masks rather than a sparse subset of a large one. Masking is applied as an additive floor on the logits rather than by renormalising afterwards, so that an illegal action has no gradient at all rather than a vanishing one.
 

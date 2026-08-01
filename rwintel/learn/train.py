@@ -71,7 +71,7 @@ class Report:
 class Optimiser:
     """Proximal policy optimisation over the steps a rollout has finished with.
 
-    One class serves both layers. The only difference between them is that the operational layer chooses two things at once, so its log probability is the sum of two and its entropy bonus is the sum of two; everything else — the ratio, the clip, the value target, the gradient clipping — is identical, and writing it twice would be two things to keep in step for no gain.
+    One class serves all three layers. The only difference between them is that the operational layer chooses two things at once, so its log probability is the sum of two and its entropy bonus is the sum of two; everything else — the ratio, the clip, the value target, the gradient clipping — is identical, and writing it three times would be three things to keep in step for no gain.
     """
 
     def __init__(self, net: nn.Module, device=None, learning_rate: float = LEARNING_RATE,
@@ -250,6 +250,8 @@ class Trainer(threading.Thread):
         self._halt.set()
         self.join(timeout=5.0)
         self.rollout.cut_all()
+        # Sealed before it is drained, which is what the gated drain the loop above uses asks of every trajectory and what this one has to do for itself. Nothing is filtered by the seal here — this drain takes the buffer whole — so what it is for is the order: an episode's interference is marked on the way to the seal, and a run stopped by hand can leave a trajectory that reached neither. Sealing here states plainly that everything left is being taken as it stands.
+        self.rollout.seal()
         steps = self.rollout.drain()
         if not steps:
             return self.reports[-1] if self.reports else None

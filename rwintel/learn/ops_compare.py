@@ -39,7 +39,8 @@ def board_of(entry: dict) -> Optional[int]:
     An episode written by an arena that records its draw says so outright, and that is the answer. Older journals do not carry it, so it is derived instead the way `ops_run._arena_seed` builds it: the run's base seed, advanced by the instance stride and by however many episodes that instance had already finished. The seed a record carries is the run's, not the episode's — the per-episode advance is sent to the game and never written back into the settings — and the episode number is one-based, so the count of finished episodes at the draw was one less than it. That derivation is only right for a run of a single arm, which is why the field exists and why a multi-arm journal without it is refused rather than derived.
     """
     statistics = entry.get("statistics") or {}
-    if statistics.get("board"):
+    # Present rather than truthy: the field is the seed the board was drawn from, and nought is as good a seed as any. Asked the truthy way, an episode drawn at seed nought was read as an episode from a journal too old to carry the field at all, and fell through to a derivation that is only right for a single-arm run — so one board of a multi-arm run was paired by a rule the other boards were refused under.
+    if statistics.get("board") is not None:
         return int(statistics["board"])
     settings = entry.get("settings") or {}
     if "seed" not in settings or "instance" not in entry or "episode" not in entry:

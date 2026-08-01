@@ -99,7 +99,9 @@ def _arena_seed(arguments, session) -> int:
 
     What that costs is the sample size, and it costs it by a factor of thirty to fifty. The scatter of the fight-level mean was quoted as two standard errors over the number of fights, which for two thousand fights is about a fortieth; taken over the distinct draws instead it is about a seventh. Every left-right lean the arena has been charged with — the tenth of a point that came and went with the seed, the seven hundredths a lopsided draw was blamed for — sits comfortably inside that. There was no asymmetry to find. There were fifty fights being reported as two thousand.
 
-    The episode is folded in per arm rather than per record, so that the arms of a comparison run the very same fights as each other while each of them runs different fights from one episode to the next. That is what makes a policy and its baseline a paired measurement: the two meet the same sites, the same budgets and the same forces, and what is left between them is the play.
+    The episode is folded in per arm rather than per record, so that the arms of a comparison run the very same fights as each other while each of them runs different fights from one episode to the next. That is what makes a policy and its baseline a paired measurement: the two meet the same budgets, the same imbalance and the same two forces, and what is left between them is the play.
+
+    The site is the one part of a draw that is not paired, and it cannot be. Where a fight is put down is chosen from the places clearest of whatever is still standing, and what is still standing is what the arms made of the fights before it; a site that ignored the board would build fights on top of the survivors of earlier ones. So the site comes out of a second stream of its own (`Arena.placement`), which is what keeps a board-dependent draw from consuming the stream everything else is drawn from — before that, one arm stepped off the other's stream part way through an episode and every fight after it was a different fight.
     """
     arms = max(1, len(getattr(session, "arms", ()) or ()))
     return arguments.seed + INSTANCE_STRIDE * session.instance + len(session.records) // arms
@@ -181,6 +183,8 @@ def _withheld(arguments) -> list:
     """
     if not arguments.without:
         return []
+    from ..control.policy.tactics import Tactics
+
     departures = []
     for written in str(arguments.without).split(","):
         name = written.strip().upper()
@@ -189,6 +193,12 @@ def _withheld(arguments) -> list:
         if name not in Deviation.__members__:
             raise SystemExit(f"no departure named {written.strip()!r}: expected one of "
                              f"{', '.join(member.name.lower() for member in Deviation)}")
+        if Deviation[name] not in Tactics.ANSWERABLE:
+            # Refused rather than run, because the arm it would build is the baseline under another name. Withholding is defined as taking one of the ladder's branches away, and a departure the ladder has no branch for takes nothing away: the arm then decides identically to the baseline on every board, and its difference of nought is reported as this departure's contribution inside the ladder. Holding is what the ladder falls through to, and closing was measured out of the ladder and left in the action space for a learnt layer to use; both are pinnable and neither is withholdable.
+            raise SystemExit(f"the ladder has no branch that answers with {written.strip()!r}, so withholding it "
+                             f"would measure the ladder against itself: the withholdable departures are "
+                             f"{', '.join(sorted(member.name.lower() for member in Tactics.ANSWERABLE))} "
+                             f"(what a departure is worth as a constant policy is what --pin asks)")
         if Deviation[name] not in departures:
             departures.append(Deviation[name])
     return departures
@@ -601,7 +611,7 @@ def _report_difference(first_name: str, first: Summary, second_name: str, second
 def _fights_by_draw(sessions, key: str = "outcome") -> dict:
     """Every fight of every arm, keyed by the draw it was fought on: which instance, which round of the arms, and which fight of the episode.
 
-    The arms of a run are handed the same arena seed in the same round, so the fight under one key is the same fight in every arm — the same site, the same two budgets, the same imbalance, the same two forces. Keyed that way the arms can be differenced fight by fight, and the difference is then free of the only thing that makes the score scatter, which is how the fight was drawn rather than how it was fought.
+    The arms of a run are handed the same arena seed in the same round, so the fight under one key is the same draw in every arm — the same two budgets, the same imbalance, the same two forces. Keyed that way the arms can be differenced fight by fight, and the difference is then free of most of what makes the score scatter, which is how the fight was drawn rather than how it was fought. Not the site: where a fight is put down is chosen from the ground clearest of the survivors of the fights before it, so it is a fact about what each arm made of the board and is drawn from a stream of its own (`Arena.placement`). What a pair holds constant is the forces and the odds, on ground that may differ.
 
     The round is counted per arm rather than read off the episode number, because the arms alternate within an instance and the episode number counts both.
     """
@@ -765,6 +775,12 @@ def train_strategy(arguments) -> int:
     """
     from .net import StrategicNet
 
+    if arguments.opponents != 1:
+        # Refused rather than run, because with more than one opponent this layer's dense term stops being the running form of what it is finally paid. The match is scored against the STRONGEST opponent in each quantity, while the potential is read off the front report, and the report can only say what every enemy on the board is worth together: the wire's unit row carries a hostility flag and no owner, so nothing inside a match can split the enemies apart. With one opponent the two are the same number and the shaping points exactly where the terminal does; with three it points at their sum, and the opening of every match is then taught to do something other than what the ending pays for. Evaluation is free to put as many opponents on the board as it likes — nothing there reads the potential.
+        raise SystemExit("the strategic layer is trained against one opponent: its dense term is the running form of "
+                         "the match's own score, the score compares this side with the strongest opponent, and a "
+                         "report from inside a match cannot tell one opponent from another (pass --opponents 1)")
+
     device = _device(arguments.device)
     net = StrategicNet(**_given(width=arguments.width)).to(device)
     _load(net, arguments.load, device)
@@ -870,6 +886,8 @@ def collect(arguments) -> int:
     finally:
         journal.close()
     rollout.cut_all()
+    # Sealed before it is drained, as the training runner's last drain is and for the same reason: the gate exists so that nothing is taken before the episode that produced it has marked what an intruder touched, and a read that takes the buffer whole says so by sealing rather than by ignoring the gate.
+    rollout.seal()
     steps = rollout.drain(keep_tainted=True)
     log.info("collected %d decision(s)", len(steps))
     _write_steps(steps, arguments.record or "local/teacher.jsonl", arguments.layer)
@@ -998,7 +1016,12 @@ def main(argv=None) -> int:
     parser.add_argument("--instances", type=int, default=1)
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--map", default="Lake")
-    parser.add_argument("--opponents", type=int, default=1)
+    parser.add_argument("--opponents", type=int, default=1,
+                        help="computer players left in the room to play against. The room fills every free slot "
+                             "whatever is asked for and the agent moves the extras to the spectators, so this is "
+                             "the number that actually stands on the board. The strategic run refuses anything but "
+                             "one: its dense term reads this side against the sum of what it can see, while the "
+                             "match is scored against the strongest opponent, and the two are one number only here")
     parser.add_argument("--difficulty", type=int, default=1)
     parser.add_argument("--credits", type=int, default=0)
     parser.add_argument("--fog", type=int, default=2)
@@ -1019,7 +1042,10 @@ def main(argv=None) -> int:
                         help="departures to take away from the handwritten ladder, comma separated, as arms "
                              "of a duel. The other ablation, and a different question: pinning asks what a "
                              "departure is worth as a constant policy over every board, this asks what it is "
-                             "worth inside the ladder on the boards the ladder's own tests send to it")
+                             "worth inside the ladder on the boards the ladder's own tests send to it. Only the "
+                             "six the ladder can answer with are accepted; holding is what it falls through to "
+                             "and closing has no branch, so withholding either would measure the ladder against "
+                             "itself")
     parser.add_argument("--frozen", default=None,
                         help="trained layers to hold still beneath the one being trained, written "
                              "layer:path and separated by commas, as in "
@@ -1051,7 +1077,9 @@ def main(argv=None) -> int:
                              "them as arms of one comparison, which is how the question of whether the order "
                              "is what a left-right lean is made of gets answered")
     parser.add_argument("--width", type=int, default=None,
-                        help="hidden units per layer in the tactical network, which the measured cost of inference leaves room to raise")
+                        help="hidden units per layer in the network being built, tactical or strategic, which "
+                             "the measured cost of inference leaves room to raise. A file states its own width, so "
+                             "every run that reads parameters rather than making them takes the width from the file")
     parser.add_argument("--entropy", type=float, default=None,
                         help="how hard the objective pushes the policy towards choosing evenly, which a run starting from an imitation wants much less of than one starting from noise")
     parser.add_argument("--learning-rate", type=float, default=None)

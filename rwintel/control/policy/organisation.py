@@ -73,6 +73,8 @@ class Organisation:
         self.known_to_game: Set[int] = set()
         #: Slots handed to someone outside the chain. The cap belongs to this layer and to nowhere else, so a human or an intruder that wants a squad of its own asks for the slot here rather than picking a number; otherwise two commanders would eventually name the same one and the observation would describe whichever wrote last.
         self.reserved: Set[int] = set()
+        #: Squads destroyed this period, as against folded into a neighbour or broken up for spares. Written every update and read by the chain, which is the only place that can hand the ending to the layer that fought the squad.
+        self.wiped: Set[int] = set()
 
     def update(self, view: WorldView, shortfalls: List[Shortfall]) -> Tuple[List[SquadAssignment], List[SquadRecord], List[Replacement]]:
         """One period of organisation: fold in what the game reports, act on what happened, and say what the squads are and what they need."""
@@ -93,6 +95,8 @@ class Organisation:
         changed: Set[int] = set()
         disbanded: Set[int] = set()
         pool: List[Sighting] = []
+        # The squads that were destroyed rather than reorganised, cleared at the top of every period so that it names this period's dead alone. Kept as an attribute rather than returned, because the caller that has to act on it is the chain and the two things it hands back are what the layers below read.
+        self.wiped = set()
 
         returned = self._take_back(by_id, pool, changed)
         # A squad the operational layer says is too worn for a mission is considered for merging whatever its worth says, since it is the layer giving the missions that knows the squad cannot do one.
@@ -297,6 +301,9 @@ class Organisation:
                     continue
                 pool.extend(by_id[m] for m in record.members if m in by_id)
                 record.members = []
+            else:
+                # Nothing left to hand anywhere: this squad was destroyed, which is a different ending from being folded into a neighbour or broken up for spares and is the one the tactical layer is paid a terminal for. It has to be said here because it cannot be seen anywhere else — the squad is retired in the same period its last unit died, so the layer that fought it is never handed the board it died on and would otherwise read its own destruction as a squad that merely stopped being reported.
+                self.wiped.add(record.id)
             self._retire(record, disbanded)
 
     def _retire(self, record: SquadRecord, disbanded: Set[int]) -> None:

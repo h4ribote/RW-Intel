@@ -1,6 +1,6 @@
 """The command chain with one layer learnt and the rest frozen.
 
-This is the arrangement the design insists on for every training run: exactly one layer is being changed, everything else is the script, and the interference of an intruder is present because the operational layer has to be robust to it and because evaluation is done with it too. A run that moved two layers at once could not attribute the difference it measured to either of them, and the sample budget does not allow the number of runs it would take to find out which.
+This is the arrangement the design insists on for every training run: exactly one layer is being changed and every other layer is held still, and the interference of an intruder is present because the operational layer has to be robust to it and because evaluation is done with it too. Held still means the handwritten script unless the run names a trained layer to freeze, which is the second half of the learning order — a layer is meant to be learnt against the layers already improved beneath it, and `frozen` is where those go. A run that moved two layers at once could not attribute the difference it measured to either of them, and the sample budget does not allow the number of runs it would take to find out which.
 
 Building it by substitution rather than by assembly is what keeps the two comparable. The learnt policy is a script policy with one attribute replaced, so everything the comparison holds constant is held constant by construction rather than by care.
 """

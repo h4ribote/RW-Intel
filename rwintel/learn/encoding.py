@@ -4,7 +4,7 @@ Each layer gets its own cut, at its own abstraction, because that is how the des
 
 And no feature carries the map's own frame: a direction is always measured between two things standing on the board and never against the world's axes. A policy whose answer depends on which way round the board happens to be numbered is under-specified — it spends half its training experience learning the same thing twice in a different frame — and where one process drives both sides of a board laid out as a point reflection it is not even exchangeable between them, since the two sides then read exactly opposite directions for congruent situations and the same layer becomes two different fighters. The rule is stated here because it cannot be enforced by a scale or a width: it is a property of what a feature is made of, and the only guard on it is the pair of tests that encode a mirrored board from both sides and require the same answer.
 
-The action spaces are exactly the ones the script layers already emit, which is what makes a learnt layer a replacement rather than a parallel system: the departures for the tactical layer, and one region and one task for the operational layer. The tactical departures were five and are now seven, the two added ones being a withdrawal that commits the whole way out and a concentration that goes onto the longest-ranged enemy rather than the weakest — kinds of move the script already made, with a parameter a rule used to fix handed to the layer. Neither space is a free choice — a squad may only be sent where a region exists and only given a task its doctrine allows — so both come with a mask, and the mask is computed here from the same tables the script reads rather than being learnt as a soft preference. The tactical action count follows the departure enum, so widening the enum widens the head and the mask with it.
+The action spaces are exactly the ones the script layers already emit, which is what makes a learnt layer a replacement rather than a parallel system: the departures for the tactical layer, and one region and one task for the operational layer. The tactical departures were five and are now eight. Two of the three added are kinds of move the script already made with a parameter a rule used to fix handed to the layer: a withdrawal that commits the whole way out, and a concentration that goes onto the longest-ranged enemy rather than the weakest. The third is not — walking in until the squad's own shortest reach covers what is shooting at it is a move the ladder does not make at all. Neither space is a free choice — a squad may only be sent where a region exists and only given a task its doctrine allows — so both come with a mask, and the mask is computed here from the same tables the script reads rather than being learnt as a soft preference. The tactical action count follows the departure enum, so widening the enum widens the head and the mask with it.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ TACTICAL_FEATURES: Tuple[str, ...] = (
 
 TACTICAL_SIZE = len(TACTICAL_FEATURES)
 
-#: The departures, which are the whole tactical action space whether a script or a network is choosing. Seven since the space was widened from five; the count follows the enum so that the network head and the mask grow with it.
+#: The departures, which are the whole tactical action space whether a script or a network is choosing. Eight: five to begin with, then a full withdrawal and a concentration on the longest-ranged threat, and then walking in to close the range. The count follows the enum so that the network head and the mask grow with it.
 TACTICAL_ACTIONS = len(DEVIATIONS)
 
 
@@ -126,8 +126,8 @@ def tactical_state(squad: SquadRecord, members: Sequence[Sighting], threats: Seq
     our_reach = min(reaches) if reaches else 0.0
     their_reach = max(enemy_reaches) if enemy_reaches else 0.0
 
-    in_our_reach = sum(1 for t in threats if math.hypot(t.unit.x - squad.x, t.unit.y - squad.y) <= our_reach)
-    in_their_reach = sum(1 for m in members if math.hypot(m.unit.x - squad.x, m.unit.y - squad.y) <= their_reach) if their_reach > 0 else 0
+    in_our_reach = sum(1 for t in threats if _within(t, members))
+    in_their_reach = sum(1 for m in members if _within(m, threats))
 
     features: List[float] = [
         _clip(len(members) / SQUAD_SIZE_SCALE),
@@ -168,6 +168,20 @@ def tactical_state(squad: SquadRecord, members: Sequence[Sighting], threats: Seq
         1.0,
     ])
     return [_finite(value) for value in features]
+
+
+def _within(target: Sighting, shooters: Sequence[Sighting]) -> bool:
+    """Whether anything in `shooters` is close enough to shoot this unit, each shooter measured at its own reach.
+
+    Between the two units and not between a unit and its own side's centre, which is what the pair of exposure features was once written as on one of the two sides: how many of ours were inside the enemy's longest reach was measured as how many of ours stood within that distance of OUR OWN centre, so the count moved when the squad spread out and did not move when the enemy walked up to it. It read the squad's scatter — which the cut already carries as `spread` — under a name that promised exposure, and a departure chosen on it was answering the wrong question. Both counts are taken this way now, so the pair says the same kind of thing from each side: how much of one force the other can presently hit.
+
+    Each shooter at its own reach rather than at the side's longest, because a force is a mix and the piece that can reach is not usually the piece that is closest. And each pair asked whether it can touch at all, by the same rule the script layer decides what counts as a threat by: an aircraft over a line of tanks that cannot elevate is not being shot at however close it is.
+    """
+    airborne = target.kind is not None and target.kind.movement == "AIR"
+    return any(shooter.kind is not None and shooter.kind.armed
+               and (shooter.kind.hits_air if airborne else shooter.kind.hits_land)
+               and math.hypot(target.unit.x - shooter.unit.x, target.unit.y - shooter.unit.y) <= shooter.kind.range
+               for shooter in shooters)
 
 
 def _bearing(squad: SquadRecord, target: Optional[RegionState],
@@ -215,7 +229,7 @@ def _role_shares(sightings: Sequence[Sighting]) -> List[float]:
 STRATEGIC_FEATURES: Tuple[str, ...] = (
     "credits", "income", "income_growth", "income_started",
     "supply", "under_construction",
-    "military_edge", "region_edge", "held", "enemy_held", "contested",
+    "military_edge", "standing_edge", "region_edge", "held", "enemy_held", "contested",
     "lost_regions", "losing_periods", "enemy_bases", "driven_back",
     "elapsed",
     *tuple(f"posture_{posture.name.lower()}" for posture in POSTURES),
@@ -247,11 +261,15 @@ def strategic_state(report, regions: Sequence[RegionState], game_time_ms: int,
     """
     income = float(getattr(report, "income", 0.0))
     growth = 0.0
-    if len(income_history) >= 2 and income_history[0] > 0.0:
+    if len(income_history) >= 2:
+        # The window's own denominator is already floored at one, so a window that opens at nothing needs no case of its own — and giving it one is what made the opening of every match unreadable. An economy going from nothing to its first extractors and an economy that has been flat at nothing since the first frame both came out at exactly nought, which is the reading the plateau rule turns on, so the layer was told "levelled off" precisely while the economy was being built. The companion flag `income_started` is what separates a plateau at nothing from a plateau worth acting on.
         growth = (income_history[-1] - income_history[0]) / max(income_history[0], 1.0)
     # Fighters against fighters. The report carries both pairs, and the one that belongs in a feature called an edge is the one that compares like with like.
     ours = float(getattr(report, "military_value", 0.0))
     theirs = float(getattr(report, "enemy_military_value", 0.0))
+    # And everything standing against everything standing, which is the other pair the report carries and the one the match is scored on.
+    ours_standing = float(getattr(report, "our_value", 0.0))
+    theirs_standing = float(getattr(report, "enemy_value", 0.0))
     held = float(getattr(report, "held", 0))
     enemy_held = float(getattr(report, "enemy_held", 0))
     places = max(1, len(regions))
@@ -268,6 +286,8 @@ def strategic_state(report, regions: Sequence[RegionState], game_time_ms: int,
         _clip(float(getattr(report, "units", 0)) / getattr(report, "unit_cap", 0)) if getattr(report, "unit_cap", 0) else 0.0,
         _clip(float(getattr(report, "under_construction", 0)) / 8.0),
         _share(ours, theirs),
+        # Everything standing against everything standing, which is a different pair from the one above and is here because it is the pair this layer is PAID in. The match is scored on what the game reports as standing for each team, buildings and builders included, and the running form of that same quantity is the layer's whole shaping term — so a critic without it was being asked to predict a return built out of a number nowhere in its input, and could only fit the part of it the fighters' edge happens to correlate with. The two are not redundant: an economy of extractors and factories moves this one and not the other, which is precisely the difference a posture decides between.
+        _share(ours_standing, theirs_standing),
         _share(held, enemy_held),
         _clip(held / places),
         _clip(enemy_held / places),

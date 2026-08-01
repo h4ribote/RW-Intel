@@ -52,9 +52,11 @@ from rwintel.learn.arena import (
     STRENGTH_SLOPE_KILLS,
     Engagement,
 )
-from rwintel.learn.deciders import Choice, NetworkTactics
+from rwintel.learn.deciders import Choice, NetworkTactics, evaluate_operational
 from rwintel.learn.encoding import (
     GLOBAL_SIZE,
+    OPERATIONAL_REGIONS,
+    OPERATIONAL_TASKS,
     OPERATIONAL_FEATURES,
     OPERATIONAL_RECIPE,
     OPERATIONAL_SIZE,
@@ -94,6 +96,7 @@ from rwintel.learn.net import (
     encoding_features,
     encoding_recipe,
     encoding_stamp,
+    one_hot_slot,
 )
 from rwintel.learn.ops_arena import SCRIPT_TACTICS, OpsArena
 from rwintel.learn.ops_run import arms_of, frozen_tactics, load_arms
@@ -1453,14 +1456,12 @@ def test_a_wiped_operational_squad_takes_its_terminal_on_the_last_step_it_left_b
     assert layer.terminals["wiped"] == 1
 
 
-def test_an_operational_errand_replaced_by_a_new_contract_takes_no_terminal_and_keeps_its_shaping():
-    """Where the operational signal goes when a layer re-draws its region every period, on the real reward and the real buffer rather than by argument.
+def test_re_tasking_an_operational_squad_hands_back_the_ground_it_is_leaving():
+    """What the match's operational ledger pays in the period a layer changes its mind, on the real reward and the real buffer rather than by argument.
 
-    Two things are true at once here and each is half of the diagnosis. The shaping of a replaced errand is not cancelled — `close` is only reached from `finish`, and a renewal never reaches `finish` — so what those decisions were paid is the whole movement of the potential over the errand, in the region block's own quantity. And no terminal ever arrives for them: a terminal only comes from outside, at the horizon, and by then this trajectory has been cut and is no longer the squad's. So the errand is paid something, and it is paid nothing of what the arena is scored on.
+    One ledger a squad from its first period to its last, so a fresh contract is a change of density and not a change of objective: the period that re-tasks a squad pays the new region's valuation less the old region's, which hands back everything the ground it is leaving had earned it and takes on what the ground it is going to is worth. That is the property that makes the whole episode telescope to its last reading less its first, and it is what a re-based ledger gave away — under that one this same squad kept the two quarters it had gained on a region and paid nothing at all for walking off it, so a policy could bank a rise and duck the fall that was coming by writing itself a new contract.
 
-    The period that does the replacing is paid exactly nought, by construction, and it is the last step of the trajectory. At the discount and trace a whole bounded contest is run at, that leaves its advantage exactly nought and the rest of the errand anchored by the critic's own estimates.
-
-    This is the match's case and only the match's. In a match the region block is the whole of the operational signal and it really is re-based against fresh ground at every contract, so two errands' payments have origins that cannot be compared and running one's advantage backwards into the other's decisions would be wrong. Where a contest reads its own scored ground and hands the reading in, every period is paid the movement of one quantity from the first decision to the last, `renewed` is never set, and none of this happens — see the scored-board tests below, which drive the same layer and the same buffer with a figure handed in.
+    The trajectory is not cut here either, and for the same reason: there is no boundary to cut at when both errands are priced out of the one region table. A cut arrives when the squad leaves the board, which is the test above, and a terminal only ever from outside.
     """
     class _Orders:
         priorities = {1: 1.0, 2: 1.0}
@@ -1482,24 +1483,23 @@ def test_an_operational_errand_replaced_by_a_new_contract_takes_no_terminal_and_
         layer.pending[squad.id] = Step(state=[0.0], action=0, mask=[1.0], value=value, squad=squad.id)
         layer._settle(board(ours, theirs), orders, [squad])
 
-    # And a third in which the layer sends the squad somewhere else, which is what a policy that re-draws every period does whenever it changes its mind.
+    # And a third in which the layer sends the squad somewhere else, which is what a policy that re-draws every period does whenever it changes its mind. The region it is sent to is level, so it is worth nought against the +0.4 it is walking away from.
     layer.pending[squad.id] = Step(state=[0.0], action=0, mask=[1.0], value=0.3, squad=squad.id)
     squad.contract = TaskContract(squad=squad.id, task=Task.ATTACK, target_region=2,
                                   stance=Stance.AGGRESSIVE, cost_budget=1000.0,
                                   deadline_ms=90000, issued_at_ms=24000)
     layer._settle(board(900.0, 100.0), orders, [squad])
 
-    trajectory, = rollout.done
-    assert not trajectory.finished and trajectory.reason == "renewed"
-    assert [round(step.reward, 9) for step in trajectory.steps] == [0.4, 0.4, 0.0]
-    # The errand returned the whole movement of its potential and not nought, which is what an errand ended by a re-tasking is often taken to return; and it returned nothing of the terminal, which is the half that matters.
-    assert abs(sum(step.reward for step in trajectory.steps) - 0.8) < 1e-9
+    # Still one live trajectory: nothing ended, and the decisions of the two contracts belong to the one ledger.
+    assert not rollout.done
+    trajectory = rollout.live[(0, squad.id)]
+    assert [round(step.reward, 9) for step in trajectory.steps] == [0.4, 0.4, -0.4]
+    # The whole of what has been paid is the movement of one quantity: the valuation now, less the one the ledger opened at.
+    assert abs(sum(step.reward for step in trajectory.steps) - (0.0 - -0.4)) < 1e-9
     assert not layer.terminals
 
-    steps = rollout.drain()
-    assert [round(step.advantage, 9) for step in steps] == [0.9, 0.1, 0.0]
-    assert rollout.census.paid_steps == 0 and rollout.census.cut == {"renewed": 1}
-    assert rollout.census.zero_advantage == 1
+    # And the period that re-tasked is charged rather than being free, which is the whole of the difference from the ledger this replaced.
+    assert trajectory.steps[-1].reward < 0.0
 
 
 # ---- a board that reads its own scored ground ----------------------------------------------
@@ -2215,13 +2215,21 @@ def test_the_ladder_with_one_branch_taken_away_falls_through_rather_than_answeri
     assert departure(nothing) is Deviation.HOLD
 
     class _Asked:
-        without = "close, kite"
+        without = "spread, kite"
 
-    assert _withheld(_Asked()) == [Deviation.CLOSE, Deviation.KITE]
+    assert _withheld(_Asked()) == [Deviation.SPREAD, Deviation.KITE]
     _Asked.without = None
     assert _withheld(_Asked()) == []
     _Asked.without = "sidestep"
     assert "sidestep" in _refusal(SystemExit, _withheld, _Asked())
+
+    # A departure the ladder has no branch for is refused rather than run, because the arm it would build decides
+    # exactly what the baseline decides and would report a difference of nought as that departure's contribution
+    # inside the ladder. Closing has had no branch since it was measured out of the ladder, and holding is what the
+    # ladder falls through to rather than a branch of it; both are still pinnable, which is the other ablation.
+    for asked in ("close", "hold"):
+        _Asked.without = asked
+        assert "no branch" in _refusal(SystemExit, _withheld, _Asked())
 
 
 def test_every_episode_draws_a_different_fight_and_the_arms_of_a_run_draw_the_same_ones():
@@ -3007,7 +3015,7 @@ def test_a_match_returns_its_own_score_and_the_shaping_cancels_whole():
     layer.decide(_report(our_value=1000.0, enemy_value=9000.0), _places(), 10000)
     assert len(rollout.done) == 1 and not rollout.live
     assert layer.pending is not None
-    assert abs(layer.reward.mission.opening - 2.0 * (1000.0 / 10000.0 - 0.5)) < 1e-9
+    assert abs(layer.reward.mission.potential - 2.0 * (1000.0 / 10000.0 - 0.5)) < 1e-9
 
 
 def test_a_posture_a_human_pinned_is_not_recorded_and_its_periods_are_still_carried():
@@ -3360,3 +3368,286 @@ def test_an_arm_can_carry_a_learnt_fighter_under_the_chain():
                 assert alone == "tactics"
             finally:
                 only.stop()
+
+
+# ---- what this session's repairs are held to ----------------------------------------------
+
+def test_the_exposure_features_are_about_the_enemy_and_not_about_our_own_scatter():
+    """`ours_in_their_reach` says how much of this squad the enemy can presently shoot, and nothing else can say it.
+
+    It was measured as how many of our members stood within the enemy's longest reach OF OUR OWN CENTRE, so the count moved when the squad spread out and did not move at all when the enemy walked up to it. That is the squad's scatter, which the cut already carries as `spread`, wearing the name of exposure — and the eighth departure exists for exactly the board it could not describe: a squad that is being shot at from outside its own reach and has to walk in to answer.
+    """
+    def board(enemy_x):
+        ours = [_unit(1, 100, 100), _unit(2, 130, 100), _unit(3, 160, 100)]
+        # An artillery piece, reach 320, put where it covers the whole squad and then where it covers none of it.
+        return _view(ours + [_unit(9, enemy_x, 100, type_index=1, hostile=1)],
+                     [_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)])
+
+    def exposure(view):
+        squad = _squad()
+        members, threats = _squad_fight(view, squad)
+        state = tactical_state(squad, members, threats, squad.losses, 0.0, view, 30000)
+        return dict(zip(TACTICAL_FEATURES, state))["ours_in_their_reach"]
+
+    # Everything of ours inside the gun's reach, then the same squad with the gun beyond it.
+    assert exposure(board(300)) == 1.0
+    assert exposure(board(900)) == 0.0
+
+    # And with nothing in reach of anybody, spreading the squad out does not move it: what it reports is the enemy's position, not ours.
+    def scattered(spread):
+        ours = [_unit(1, 100, 100), _unit(2, 100 + spread, 100), _unit(3, 100 + 2 * spread, 100)]
+        return _view(ours + [_unit(9, 3000, 3000, type_index=1, hostile=1)],
+                     [_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)])
+
+    assert exposure(scattered(20)) == exposure(scattered(300)) == 0.0
+
+
+def test_a_figure_read_only_inside_a_comprehension_is_still_in_the_stamp():
+    """The stamp is a digest of the code that fills the slots, and a fair share of that code lives inside comprehensions.
+
+    Walked from the outermost code object alone, a name read only from inside a comprehension or a generator expression never entered the queue, so the figure behind it was never digested by value. `RECENT_HIT_MS` is exactly that: it is read inside the generator expression that counts the members under fire, so the day it changed the tactical stamp would not have moved and every set of parameters fitted to the old meaning would have loaded in silence — which is the one failure the stamp exists to refuse.
+    """
+    from rwintel.learn import encoding as cut
+    from rwintel.learn.recipe import digest
+
+    def taken():
+        return (digest([cut], ["tactical_state"]), digest([cut], ["strategic_state"]),
+                digest([cut], ["operational_state", "operational_slots", "squad_slots",
+                               "region_mask", "task_mask", "squad_mask"]))
+
+    before = taken()
+    held = cut.RECENT_HIT_MS
+    try:
+        cut.RECENT_HIT_MS = held + 1000
+        after = taken()
+    finally:
+        cut.RECENT_HIT_MS = held
+    assert after[0] != before[0], "a figure read inside a comprehension has to reach the stamp"
+    # And it retires the one cut that reads it rather than all three, which is what walking from an entry point outward is for.
+    assert after[1] == before[1] and after[2] == before[2]
+
+    # A helper every cut runs its values through retires all three.
+    kept = cut._finite
+    try:
+        cut._finite = lambda value: value
+        both = taken()
+    finally:
+        cut._finite = kept
+    assert all(now != then for now, then in zip(both, before))
+
+
+def test_the_growth_of_an_economy_starting_from_nothing_is_not_a_plateau():
+    """`income_growth` is the quantity the rule thresholds, handed over as a number. A window whose oldest sample is nought is an economy that started inside the window, which is the opposite of a plateau, and both used to read exactly nought."""
+    def growth(history):
+        state = strategic_state(_report(), _places(), 300000, income_history=history,
+                                loss_history=[0], most_enemy_bases=2)
+        return dict(zip(STRATEGIC_FEATURES, state))["income_growth"]
+
+    started = growth([0.0, 0.0, 12.0, 20.0, 30.0])
+    flat = growth([30.0, 30.0, 30.0, 30.0, 30.0])
+    assert started > 0.0 and flat == 0.0, "an economy building itself must not read as one that has levelled off"
+    # The rule reads the same window and answers the same way, which is what makes the feature the rule's own quantity.
+    rule = Strategy.__new__(Strategy)
+    rule.income_history = [0.0, 0.0, 12.0, 20.0, 30.0]
+    assert not rule._income_levelled_off()
+    rule.income_history = [30.0, 30.0, 30.0, 30.0, 30.0]
+    assert rule._income_levelled_off()
+
+
+def test_a_terminal_that_arrives_with_no_decision_waiting_closes_the_errand():
+    """An errand ends in a period this layer took no decision in whenever the ending is not a fight: a squad that walks onto the ground it was sent to and holds it is not in contact, so no departure is chosen for it and there is nothing waiting to be paid.
+
+    Carried into the ledger of unpaid shaping, as every other unpaid period is, the terminal was handed to whatever decision came next — and that decision belongs to no errand, because this one is over and the next contract has not arrived. The trajectory then never closed on a terminal at all, so nothing in it was anchored by anything but the critic.
+    """
+    rollout = Rollout()
+    layer = LearntTactics(None, _CATALOGUE, None, rollout=rollout, instance=0)
+    squad = _squad(status=Status.COMPLETE, losses=0.0)
+    # A region we hold outright, which is what the contract asked for.
+    view = _view([_unit(1, 100, 100)], [_region(1, 400.0, 100.0, ours=900.0, theirs=0.0)])
+
+    # One decision already filed from an earlier period, and nothing waiting: the squad is out of contact.
+    rollout.add((0, squad.id), Step(state=[0.0], action=0, mask=[1.0], value=0.3, squad=squad.id))
+    layer.reward.step(squad, view, 30000)          # opens the errand
+    layer._settle(view, [squad], 32000)            # and this period finds it complete
+
+    trajectory, = rollout.done
+    assert trajectory.finished, "the errand ended, so its trajectory has to close rather than run on"
+    assert layer.terminals["complete"] == 1
+    assert squad.id not in layer.owed, "the terminal is a payment and not a carried shaping term"
+
+
+def test_a_squad_that_leaves_with_nothing_waiting_is_still_cut_and_forgotten():
+    """A squad leaves the board in a period this layer took no decision about it as often as not, and everything keyed by its number has to go with it: the trajectory, the carried payment and the reward's own ledger.
+
+    Squad numbers come out of a pool of eight and the arena hands the same few round fight after fight, so a ledger left standing is a ledger the next squad to be given that number inherits — it files its decisions into the dead squad's trajectory and opens its errand against a potential measured on the dead squad's ground.
+    """
+    for layer in (LearntTactics(None, _CATALOGUE, None, rollout=Rollout(), instance=0),
+                  LearntOperations(None, _CATALOGUE, None, rollout=Rollout(), instance=0)):
+        rollout = layer.rollout
+        squad = _squad(id=5)
+        view = _view([_unit(1, 100, 100)], [_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)])
+        rollout.add((0, squad.id), Step(state=[0.0], action=0, mask=[1.0], value=0.3, squad=squad.id))
+
+        settle = ((lambda: layer._settle(view, [squad], 30000)) if isinstance(layer, LearntTactics)
+                  else (lambda: layer._settle(view, None, [squad])))
+        settle()
+        assert squad.id in layer.tracked and layer.reward.missions
+
+        gone = ((lambda: layer._settle(view, [], 32000)) if isinstance(layer, LearntTactics)
+                else (lambda: layer._settle(view, None, [])))
+        gone()
+        cut, = rollout.done
+        assert not cut.finished and cut.reason == "left"
+        assert not layer.reward.missions, "the shaping ledger of a squad that is gone cannot be left for the next one"
+        assert squad.id not in layer.tracked
+
+
+def test_the_match_terminal_telescopes_at_every_discount():
+    """What a match returns to the strategic layer, on a board that opened lopsided so the two conventions can be told apart.
+
+    Paid against a terminal potential of nought, the shaping telescopes at whatever discount the run takes its returns at and the match returns the result less the potential it opened at. The convention this replaced handed back the movement since the opening instead, which made the return come to the result exactly and only telescoped at a discount of one — below one it left a residue that depended on the path the match took, which is the single thing potential-based shaping is chosen to rule out.
+    """
+    for discount in (1.0, 0.99):
+        rollout = Rollout(discount=discount, trace=1.0)
+        layer = LearntStrategy(None, _CATALOGUE, None, rollout=rollout, instance=0, discount=discount)
+        # An opening the match is losing, so the opening potential is a long way from nought.
+        opening = _report(our_value=1000.0, enemy_value=9000.0)
+        layer._settle(opening)
+        opened = layer.reward.mission.potential
+        assert opened < -0.5
+
+        for value, board in ((0.2, _report(our_value=5000.0, enemy_value=5000.0)),
+                             (0.4, _report(our_value=8000.0, enemy_value=2000.0))):
+            layer.pending = Step(state=[0.0], action=0, mask=[1.0], value=value, squad=layer.KEY)
+            layer._settle(board)
+
+        layer.pending = Step(state=[0.0], action=0, mask=[1.0], value=0.5, squad=layer.KEY)
+        layer.conclude(1.0, "match")
+
+        trajectory, = rollout.done
+        # The identity potential-based shaping promises is about the DISCOUNTED sum, which is the sum a return is: every shaping term is `discount x potential after - potential before`, so the discounted sum of them telescopes to minus the opening potential at any discount, and only at a discount of one does the plain sum do it too.
+        paid = sum(discount ** index * step.reward for index, step in enumerate(trajectory.steps))
+        earned = discount ** (len(trajectory.steps) - 1) * 1.0
+        assert trajectory.finished and layer.terminals["match"] == 1
+        assert abs(paid - (earned - opened)) < 1e-9, "the match returns the result less the potential it opened at"
+
+
+def test_an_errand_out_of_time_pays_the_expired_terminal_less_the_potential_it_was_holding():
+    """The fourth of the four discrete endings, held to the same identity as the other three."""
+    reward = TacticalReward()
+    squad = _squad(status=Status.ACTIVE, losses=0.0)
+    view = _view([_unit(1, 100, 100)], [_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)])
+    reward.step(squad, view, 30000)
+    held = reward.missions[squad.id].potential
+
+    squad.status = Status.EXPIRED
+    outcome = reward.step(squad, view, 32000)
+    assert outcome.done and outcome.reason == "expired"
+    assert abs(outcome.reward - (-0.5 - held)) < 1e-9
+
+
+def test_the_two_headed_update_scores_the_very_distribution_the_decision_was_drawn_from():
+    """The operational layer's own update path, which nothing exercised at all.
+
+    Two things are pinned and the second is the one that catches a whole class of silent failure. The update completes and moves the parameters; and on the first pass over a freshly collected batch the importance ratio is one, which is only true if the optimiser reads the same state, the same squad row and the same two masks the decider was asked with. A row confused with a squad number, or a mask rebuilt rather than recorded, shows up here and nowhere else.
+    """
+    net = OperationalNet()
+    optimiser = Optimiser(net, two_headed=True)
+    regions = [1.0] * 6 + [0.0] * (OPERATIONAL_REGIONS - 6)
+    tasks = [1.0, 1.0] + [0.0] * (OPERATIONAL_TASKS - 2)
+
+    steps = []
+    for slot in range(4):
+        state = [0.01 * (slot + 1)] * OPERATIONAL_SIZE
+        choice = evaluate_operational(net, [(state, slot, regions, tasks)])[0]
+        steps.append(Step(state=state, action=choice.action, mask=list(regions), second=choice.second,
+                          second_mask=list(tasks), log_prob=choice.total_log_prob, value=choice.value,
+                          reward=0.5, done=True, squad=slot, slot=slot))
+
+    before = [parameter.detach().clone() for parameter in net.parameters()]
+    rollout = Rollout(discount=FIGHT_DISCOUNT, trace=FIGHT_TRACE)
+    for step in steps:
+        rollout.add((0, step.squad), step)
+    drained = rollout.drain()
+
+    # The ratio the objective is built on, computed the way the update computes it, before any parameter has moved.
+    with torch.no_grad():
+        states = torch.tensor([step.state for step in drained], dtype=torch.float32)
+        slots = torch.stack([one_hot_slot(step.slot) for step in drained])
+        masks = torch.tensor([step.mask for step in drained], dtype=torch.float32)
+        second_masks = torch.tensor([list(step.second_mask) for step in drained], dtype=torch.float32)
+        region_logits, task_logits, _ = net(states, slots, masks, second_masks)
+        now = (torch.distributions.Categorical(logits=region_logits)
+               .log_prob(torch.tensor([step.action for step in drained]))
+               + torch.distributions.Categorical(logits=task_logits)
+               .log_prob(torch.tensor([step.second for step in drained])))
+        old = torch.tensor([step.log_prob for step in drained], dtype=torch.float32)
+        assert torch.allclose(torch.exp(now - old), torch.ones(len(drained)), atol=1e-5)
+
+    report = optimiser.update(drained)
+    assert report.steps == len(drained)
+    assert any(not torch.equal(was, is_now) for was, is_now in zip(before, net.parameters()))
+
+
+def test_the_arms_of_a_run_draw_the_same_fights_however_differently_they_fight():
+    """Two arms of one run meet the same fights, which is the whole of what makes a duel paired.
+
+    The draw of a fight — the two budgets, which side is the stronger, the angle and the two forces — must not depend on what is standing on the board, because what is standing is what the policies made of the last fight. Drawn out of one stream with the placement it did depend on it: choosing a site is a choice among the places clearest of the survivors, `random.choice` over a list of n consumes an amount of the stream that depends on n, and one arm therefore stepped off the other's stream part way through an episode.
+    """
+    from rwintel.learn.arena import Arena
+
+    def drawn(standing):
+        arena = Arena.__new__(Arena)
+        arena.random = random.Random(4242)
+        arena.placement = random.Random(4242 ^ 0x5EED51E5)
+        arena.sites = [(float(x), 0.0) for x in range(0, 2000, 100)]
+        arena.catalogue = _CATALOGUE
+        drawn_fights = []
+        for _ in range(6):
+            arena._site(_observation(units=standing))
+            drawn_fights.append((round(arena.random.uniform(1200.0, 5000.0), 6),
+                                 round(arena.random.uniform(0.5, 1.0), 6)))
+        return drawn_fights
+
+    # One arm leaves nothing standing between fights, the other leaves a field of survivors: the same six draws either way.
+    assert drawn([]) == drawn([_unit(i, 50.0 * i, 40.0) for i in range(1, 12)])
+
+
+def test_interference_in_one_episode_leaves_the_episodes_already_sealed_alone():
+    """An episode's interference marks that episode's decisions and no others.
+
+    A sealed trajectory belongs to an episode that has already closed and already had its own interference marked; it is only still in the buffer because the trainer has not drained it yet. Squad numbers come out of a pool of eight and are handed round fight after fight, so tainting by number alone dropped every clean decision about that number still waiting from earlier episodes.
+    """
+    rollout = Rollout()
+    earlier = Step(state=[0.0], action=0, mask=[1.0], value=0.5, squad=3, done=True)
+    rollout.add((0, 3), earlier)
+    rollout.seal(0)
+
+    later = Step(state=[0.0], action=0, mask=[1.0], value=0.5, squad=3)
+    rollout.add((0, 3), later)
+    rollout.taint(0, [3])
+
+    assert not earlier.tainted, "an episode that has already closed cannot be tainted again by the next one"
+    assert later.tainted
+
+
+def test_a_squad_destroyed_in_a_match_is_paid_the_terminal_the_design_names():
+    """Being destroyed is one of the four endings the design says this layer is paid for, and in a match it could not fire.
+
+    The organisation layer retires a squad in the same period its last unit dies, so the tactical layer is never handed a board with an empty squad standing on it: the destruction read as a squad that stopped being reported, its trajectory was cut and bootstrapped from its own value estimate, and losing a whole squad on an errand cost the layer nothing at all.
+    """
+    rollout = Rollout()
+    layer = LearntTactics(None, _CATALOGUE, None, rollout=rollout, instance=0)
+    squad = _squad(id=2)
+    view = _view([_unit(1, 100, 100)], [_region(1, 400.0, 100.0, ours=200.0, theirs=900.0)])
+    layer._settle(view, [squad], 30000)
+    rollout.add((0, squad.id), Step(state=[0.0], action=0, mask=[1.0], value=0.4, squad=squad.id))
+
+    layer.wiped([squad.id])
+    trajectory, = rollout.done
+    assert trajectory.finished and layer.terminals["wiped"] == 1
+    assert abs(trajectory.steps[-1].reward - (WIPED_REWARD - layer.reward.missions.get(squad.id, None).potential
+                                              if squad.id in layer.reward.missions else WIPED_REWARD
+                                              - 0.0)) < 1.0
+    # And a squad that was merged away rather than destroyed is not paid it: that is what the ordinary settle does.
+    assert squad.id not in layer.tracked

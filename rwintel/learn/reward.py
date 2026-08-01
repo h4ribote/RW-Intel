@@ -2,7 +2,7 @@
 
 There is one rule and the rest follows from it: a layer is paid for how well it met the contract its superior handed down, and it never sees its superior's reward. Only the strategic layer is paid the match. That is what removes credit assignment across layer boundaries — the thing the design gives as its reason for not learning the interfaces between layers — and it is also what shortens the tactical horizon to the length of one errand rather than the length of a match, which is the only horizon this sample budget can learn over at all.
 
-Both layers are shaped potentially. A shaping term of the form gamma times the potential after minus the potential before cannot change which policy is optimal, whatever the potential is, so a term that turns out to have been a bad idea costs sample efficiency and never correctness. Everything continuous here is therefore in a potential, and only the discrete outcome of an errand — taken and held, out of time, or lost — is paid directly.
+All three layers are shaped potentially. A shaping term of the form gamma times the potential after minus the potential before cannot change which policy is optimal, whatever the potential is, so a term that turns out to have been a bad idea costs sample efficiency and never correctness. Everything continuous here is therefore in a potential, and only the discrete outcome of an errand — taken and held, out of time, or lost — is paid directly.
 
 That guarantee holds on one condition, and it is a convention rather than an observation: the potential of the state an errand ended in is taken to be nought. The shaping only telescopes to the difference of two potentials if the last term is nought less what was being held, and a last term that used the real potential of the ending board would leave a residue which depends on where the errand ended, which is exactly the dependence potential shaping exists to remove. The terminal states are not board positions the potential is defined on anyway, so what they are worth is this side's to decide, and nought is the choice that makes the arithmetic hold.
 
@@ -175,7 +175,7 @@ class StrategicReward:
 
     Everything below it is paid for meeting the contract handed down to it and never sees the result; this is where that stops. The rule's whole point is that credit assignment does not cross a layer boundary, and it does not have to here, because there is nothing above this layer to hand it a contract — what it is asked for IS the match, so what it is paid is the match.
 
-    One errand per match and not one per squad. The layer decides one thing about the whole side every ten seconds, so there is nothing to key a mission by: the errand opens with the match and closes with it, and `close`/`ended` are here for the outside terminal to telescope against exactly as the operational layer's are.
+    One errand per match and not one per squad. The layer decides one thing about the whole side every ten seconds, so there is nothing to key a mission by: the errand opens with the match and closes with it, and `close`/`ended` are here for the outside terminal to telescope against. What the two layers' `close` hand back is not the same figure, and the difference is deliberate: the operational one hands back the movement since its errand opened, so that a contest returns its terminal exactly, while this one hands back only the last valuation, so that the shaping telescopes at any discount and the match returns the terminal less the potential it opened at. See this class's own `close` for why that trade goes this way here.
 
     The potential is the running form of the very quantity the match is scored on. An episode that was cut off is scored on the military edge — the value standing on our side against the strongest opponent's, as a ratio — and that same edge can be read off any board in flight, so the shaping points exactly where the terminal points. That is the property the tactical layer's exchange term was chosen for and the one the operational layer's per-region potential had to be rewritten to get: a dense term that disagrees with the terminal teaches the opening of an episode to do the opposite of what the ending pays for.
 
@@ -198,9 +198,14 @@ class StrategicReward:
         return self.mission is not None and self.mission.ended
 
     def close(self) -> float:
-        """Hands back everything this errand has already been paid — the last valuation less the one it opened at — and forgets it, so that a caller ending it from outside pays `terminal − that` and the match's whole return comes to the terminal exactly. Nought where nothing is held, which is a match that ended before a first decision was taken."""
+        """Hands back the valuation this match was last held at and forgets it, so that a caller ending it from outside pays `terminal − that`. Nought where nothing is held, which is a match that ended before a first decision was taken.
+
+        The last valuation and not the movement since the opening, which is what it was. Handing back the movement made the match's whole return come to the terminal exactly, which reads well and is only true at a discount of one: the shaping paid over a match is the sum of `discount × potential after − potential before`, and that sum is the movement only when the discount is one. Below one the two differ by an amount that depends on the path the match took, so what was left standing in the return was a residue a policy could move — which is the single thing potential-based shaping is chosen to rule out, and this layer's discount is a run's to set.
+
+        Paid this way the match returns the terminal less the potential it opened at, at any discount. That opening is the board the match started on, before this layer had taken a decision, so it is a constant of the episode and not something a posture can move; what it costs is that the mean return of a run is no longer readable as the mean score of its matches, and what it buys is that the shaping cannot change which posture is best.
+        """
         mission, self.mission = self.mission, None
-        return mission.potential - mission.opening if mission is not None else 0.0
+        return mission.potential if mission is not None else 0.0
 
     def reset(self) -> None:
         self.mission = None
@@ -212,7 +217,8 @@ class StrategicReward:
         """
         potential = self._potential(report)
         if self.mission is None:
-            self.mission = _Mission(issued_at_ms=0, potential=potential, opening=potential)
+            # No opening is kept, because nothing here reads one: this layer's terminal is paid against the last valuation alone, which is what makes the shaping telescope at any discount. The field exists for the layer whose terminal cancels the opening as well — see `OperationalReward.close`.
+            self.mission = _Mission(issued_at_ms=0, potential=potential)
             return Outcome()
         if self.mission.ended:
             return Outcome()
@@ -235,9 +241,11 @@ class OperationalReward:
 
     The match is not in the potential. The design gives the terminal result of the match to the strategic layer alone, and a layer that could see it would be learning to win rather than to carry out the orders it was given — which sounds like an improvement until the strategic layer is changed and everything below it has to be learnt again. What is here instead is the strategic layer's own statement of what it wants: how much of the ground it called valuable is being stood on.
 
-    Per squad, and region-specific, because a single global board figure written identically into every squad's step was the disease. The per-decision advantage barely depended on which region a squad was sent to, so only the entropy bonus had a consistent gradient and the policy spread toward uniform while the return sat still: a dead gradient. The potential of a decision is the priority-weighted domination of the one region that decision's contract named — the share of that region that is ours, less an even split, times what the strategic layer said the region was worth — so a squad sent to a region it took and a squad sent to one it lost are paid differently, and the shaping already points where the choice does. Keyed by the contract's issue time exactly as the tactical layer's errand is, so a squad handed a new region begins a fresh mission and the two are not run into one trajectory.
+    Per squad, and region-specific, because a single global board figure written identically into every squad's step was the disease. The per-decision advantage barely depended on which region a squad was sent to, so only the entropy bonus had a consistent gradient and the policy spread toward uniform while the return sat still: a dead gradient. The potential of a decision is the priority-weighted domination of the one region that decision's contract named — the share of that region that is ours, less an even split, times what the strategic layer said the region was worth — so a squad sent to a region it took and a squad sent to one it lost are paid differently, and the shaping already points where the choice does.
 
-    Which board is in force decides which of two quantities a period is paid in, and it is one or the other and never both. In a match the region block above is the whole of the signal: there is no operational terminal at all — the match result is the strategic layer's — and nothing outside can read anything better, so the block's own movement is what the layer is taught by and a fresh contract opens a fresh errand against fresh ground. On a contest that scores its own ground the arena hands in a figure every period and `step` pays the movement of that instead, through `_scored`; the block is not added to it, because two densities of one objective can be summed and two different quantities cannot, and the block's residue over an errand is chosen by the policy exactly as a re-based ledger's would be.
+    One ledger a squad, opened when the squad is first seen and never re-based, whichever board is in force. It was once re-based at every fresh contract, on the ground that two contracts are two errands; what that missed is that both errands are priced out of the same table — the region block's priority times its domination — so the difference across the boundary is a difference of one quantity and the only thing re-basing did was decline to pay it. A policy could therefore keep what a region had earned it and walk away before the region lost it, which is the identical fault the scored ledger is written the way it is to prevent.
+
+    Which board is in force decides which of two quantities a period is paid in, and it is one or the other and never both. In a match the region block above is the whole of the signal: there is no operational terminal at all — the match result is the strategic layer's — and nothing outside can read anything better, so the block's own movement is what the layer is taught by. On a contest that scores its own ground the arena hands in a figure every period and `step` pays the movement of that instead, through `_scored`; the block is not added to it, because two densities of one objective can be summed and two different quantities cannot.
 
     The two are not the same figure and were once written here as though they were. On the constructed operations arena the scored figure is read off the unit rows — a health-weighted disc of fixed radius about a contest point — while the block is the game's own region cell at unit prices, a Voronoi block about a region centre with this side's free base counted into it: not the same table and not the same ground. Nothing would make them telescope against each other, which is why the switch is per board rather than per squad — a trajectory some of whose steps were paid in one and some in the other sums to neither.
 
@@ -278,25 +286,26 @@ class OperationalReward:
             return self._scored(squad, figure)
 
         contract = squad.contract
-        if contract is None:
-            self.forget(squad.id)
-            return Outcome()
+        potential = self._potential(squad, view, orders)
 
         mission = self.missions.get(squad.id)
-        if mission is None or mission.issued_at_ms != contract.issued_at_ms:
-            # A fresh contract is a fresh errand. The potential is taken now and paid from the next period, so the step that merely received the contract is not paid for the board it arrived on. It is kept as the opening as well, because what the errand returns has to be the terminal alone and the shaping has to cancel whole — see `close`.
-            replaced = mission is not None
-            opening = self._potential(squad, view, orders)
-            mission = _Mission(issued_at_ms=contract.issued_at_ms, potential=opening, opening=opening)
+        if mission is None:
+            # The first period this squad is seen in opens the ledger. The potential is taken now and paid from the next period, so the step that merely brought the squad into view is not paid for the board it arrived on. It is kept as the opening as well, so that what has been paid can be handed back whole — see `close`.
+            mission = _Mission(issued_at_ms=contract.issued_at_ms if contract is not None else 0,
+                               potential=potential, opening=potential)
             self.missions[squad.id] = mission
-            return Outcome(renewed=replaced)
+            return Outcome()
 
         if mission.ended:
             return Outcome()
 
-        potential = self._potential(squad, view, orders)
+        # One ledger from the first period to the last, never re-based on a fresh contract, which is the ledger the scored board already keeps and for the same reason. Re-basing paid nothing at all in the period that re-tasked a squad: the rise the old region had been paying for was kept and the fall that was coming was never charged, so a policy could bank a gain and duck a loss by writing a new contract — a change of objective wearing the clothes of a change of density, and one this layer could help itself to at will. Paid as a difference of the same quantity, the period that re-tasks a squad hands back the ground it is leaving and takes on the ground it is going to, in one number, and the whole episode telescopes to its last reading.
+        #
+        # A squad between contracts is paid rather than forgotten, for the same reason: it is holding no contracted ground, its potential is nought, and the honest payment is nought less what the ledger held. Dropped instead, the ledger would restart with that hand-back unpaid.
         reward = self.discount * potential - mission.potential
         mission.potential = potential
+        if contract is not None:
+            mission.issued_at_ms = contract.issued_at_ms
         return Outcome(reward=reward)
 
     def _scored(self, squad: SquadRecord, figure: float) -> Outcome:

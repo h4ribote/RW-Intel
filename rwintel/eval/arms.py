@@ -61,6 +61,19 @@ def _is_learnt(name: str) -> bool:
     return True
 
 
+def _width_of(state) -> dict:
+    """The hidden width the parameters in this file were fitted at, as the keyword every one of the three networks takes.
+
+    Read off the file rather than left at the module's default, because all three networks begin with one linear map from the features to the width, so a file states its own width and a default-width network refuses to take a wider one. Nothing here can build a fresh network — an arm is always a file — so there is no flag this can come to disagree with. An empty answer where the file has no first layer to read, which leaves the network at its default and the strict load below to refuse it.
+    """
+    from ..learn.net import INPUT_WEIGHT
+
+    weight = state.get(INPUT_WEIGHT) if isinstance(state, dict) else None
+    if weight is None or not hasattr(weight, "dim") or weight.dim() != 2:
+        return {}
+    return {"width": int(weight.shape[0])}
+
+
 def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tuple[Arm, object]:
     """A learnt layer, or a chain of them, loaded from files, as an arm of a match comparison.
 
@@ -113,8 +126,9 @@ def learnt(name: str, device: Optional[str] = None, greedy: bool = False) -> Tup
             layer, build_net, build_batcher, build_decider = kinds[prefix]
             if any(layer == held for held, _, _, _ in loaded):
                 raise ValueError(f"the {layer} layer is named twice in the arm {name!r}, so one of the two would never play")
-            net = build_net().to(where)
             state = torch.load(path, map_location=where)
+            # The width is read off the file rather than left at the module's default, exactly as the arena's frozen tactical layer reads it. A network trained wider than the default loaded into a default-width one raises on the shapes, so a run that swept the width could measure nothing it had trained: the option existed and the measurement it was for did not.
+            net = build_net(**_width_of(state)).to(where)
             # Refused for the same reason a missing file is: a number about parameters that read the board differently from the way they were fitted to read it is a plausible number about nothing, and the shapes all match, so nothing later in the run would notice.
             try:
                 avowal = load_encoded(net, state)
@@ -185,7 +199,7 @@ def concentrating(name: str = "ops-concentrate") -> Arm:
 
     The arena says this arm is worth measuring in a match. On the constructed board it beats the handwritten ladder by about 0.08 to 0.10 of the side score and takes about a fifth of the discs it could only gain by taking, against the ladder's twentieth — and taking ground is not an arena-shaped skill: income comes from extractors standing on resource points, so ground is upstream of the economy and the economy is where this chain loses. Measured over 480 matches, the chain finishes on 35.5 income against a difficulty-1 opponent's 77.9 and 9,157 credits of standing value against 25,662.
 
-    Whether the arena's advantage carries into a match is exactly what has never been measured, and the design says why it might not: that board scores holding and taking ground and nothing else, while a match asks what the ground was for. No network, so nothing is loaded and nothing has to be torn down.
+    Whether the arena's advantage carries into a match is what this arm was built to ask, and it has since been answered for this one: over 96 matches the concentrating chain scored 0.065 above the ladder's, which is the same direction and the same order as the 0.076 to 0.095 it stood above it on the constructed board (see the operational record). That is one arm on two maps rather than a general statement about the arena, and the design's reason for doubting it stands: that board scores holding and taking ground and nothing else, while a match asks what the ground was for. No network, so nothing is loaded and nothing has to be torn down.
     """
     from ..learn.policy import OPERATIONAL, LearningPolicy
 

@@ -341,6 +341,12 @@ class Arena:
         self.decision_order = decision_order
         self.catalogue = Catalogue(session.types, session.assets)
         self.random = random.Random(seed)
+        #: A second stream, for the one draw that has to look at the board: where to put the next fight.
+        #:
+        #: The draw of a fight — the two budgets, which side is the stronger, the angle, and the two forces — has to be the same for two arms of one run, because that is the whole of what makes a duel paired: the two arms meet the same fights and what is left between them is the play. Drawn out of one stream with the placement, it was not. Choosing a site is a choice among the places that are clearest of whatever is still standing, and what is still standing is a fact about how the previous fights went, so the number of candidates differs between two arms and `random.choice` over a list of n consumes an amount of the underlying stream that depends on n. One arm therefore stepped off the other's stream part way through an episode, and every fight after that was a different fight: the pairing went on subtracting them as though they were the same draw.
+        #:
+        #: Split, the k-th fight of an episode is the same draw on both arms, since every other consumption is a fixed count per fight. What cannot be paired is the site itself — where a fight is clear of the survivors is a fact about the board and the board is what the policies made of it — so what remains between two arms is the same forces at the same odds on possibly different ground, rather than different forces.
+        self.placement = random.Random(seed ^ 0x5EED51E5)
         # The layers are built here rather than handed in already made, because both sides have to read the same type catalogue as the arena that spawns their units: a layer classifying a unit from a different table would sort the same tank into a different role.
         self.tactics = tactics(session, self.catalogue) if tactics else Tactics(session, self.catalogue)
         self.opponent = opponent(session, self.catalogue) if opponent else Tactics(session, self.catalogue)
@@ -743,14 +749,15 @@ class Arena:
         if not self.sites:
             return None
         standing = [(unit.x, unit.y) for unit in observation.unit_states]
+        # Out of the placement stream and never out of the draw's, because how many candidates are clear enough to choose between is a fact about the board this policy made, and a choice among n of them consumes an amount of the stream that depends on n. See `placement`.
         if not standing:
-            return self.random.choice(self.sites)
+            return self.placement.choice(self.sites)
 
         def clearance(site: Tuple[float, float]) -> float:
             return min(math.hypot(site[0] - x, site[1] - y) for x, y in standing)
 
         best = max(clearance(site) for site in self.sites)
-        return self.random.choice([site for site in self.sites if clearance(site) >= best * 0.9])
+        return self.placement.choice([site for site in self.sites if clearance(site) >= best * 0.9])
 
     def _force(self, budget: float) -> List:
         """A random force worth about the budget, drawn from the types that can fight on the ground.
@@ -835,6 +842,10 @@ class Arena:
 
     def close(self) -> None:
         self._tally()
-        for layer in (self.tactics, self.opponent):
-            if hasattr(layer, "close"):
-                layer.close()
+        layers = [layer for layer in (self.tactics, self.opponent) if hasattr(layer, "close")]
+        # Both sides file what they are still owed payment for before either of them ends anything. The two layers of a self-played fight share one instance number and one buffer, and a trajectory is cut by owner, so closing them one after the other had the first side's cut reach into the second side's live errands — which still had their last decisions sitting unfiled — and split each of them in two.
+        for layer in layers:
+            if hasattr(layer, "park"):
+                layer.park()
+        for layer in layers:
+            layer.close()

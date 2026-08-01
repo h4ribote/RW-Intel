@@ -39,6 +39,18 @@ def value_digest(value: Any) -> str:
     return type(value).__name__
 
 
+def code_names(code) -> set:
+    """Every name one code object reads, its nested code objects included.
+
+    The nesting is not a corner of this codebase, it is where a fair share of the arithmetic lives: a comprehension and a generator expression each compile to a code object of their own, and a name read only from inside one appears in that object's names and nowhere in its parent's. Walked from the parent alone, `RECENT_HIT_MS` — read inside the generator expression that counts the members under fire — was never reached, so its value was not in the tactical digest and changing the figure retired nothing. The same hole covered every helper called only from inside a comprehension.
+    """
+    names = set(code.co_names)
+    for constant in code.co_consts:
+        if hasattr(constant, "co_code"):
+            names |= code_names(constant)
+    return names
+
+
 def code_digest(code, docstring: str = None) -> str:
     """One code object as a digest of what it does rather than of how it reads: the instructions, the names it touches and the constants it carries.
 
@@ -81,7 +93,8 @@ def digest(namespaces: Sequence[Any], entries: Sequence[str], length: int = 16) 
             parts.append("%s=%s" % (name, value_digest(value)))
             continue
         parts.append("%s:%s" % (name, code_digest(code, getattr(value, "__doc__", None))))
-        queue.extend(sorted(set(code.co_names)))
+        # The nested code objects' names as well as the outermost one's, so that a figure or a helper reached only from inside a comprehension is walked to its value rather than being left as a name in a digest of instructions. See `code_names`.
+        queue.extend(sorted(code_names(code)))
     return hashlib.sha256("\n".join(sorted(parts)).encode("utf-8")).hexdigest()[:length]
 
 

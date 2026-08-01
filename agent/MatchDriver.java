@@ -146,6 +146,7 @@ final class MatchDriver {
         // Taken out after the room has finished populating itself, because it fills every free slot with an AI whatever was asked for.
         if (settings.contestants > 0) chooseContestants();
         if (settings.arena) chooseSparringPartner();
+        else if (settings.contestants == 0 && settings.opponents > 0) chooseOpponents();
 
         if (settings.networked) {
             openedAtMs = System.currentTimeMillis();
@@ -250,6 +251,30 @@ final class MatchDriver {
         RwAgent.log("arena: sparring slot " + partner + " of " + slots + " slot(s), " + halted + " computer player(s) halted");
     }
 
+
+    /**
+     * Leaves an ordinary match with exactly the number of opponents it asked for, this process's own player still playing.
+     *
+     * The room does not offer that. Adding an AI is a request and filling the slots is what the room does next: it fills every free one whatever was asked for, so a match asked for with one opponent opens with eight of them. On a map for two that is nominal — everything past the second slot has nowhere to appear and stands at nothing all match — and the moment the map has four starting positions it is not: three opponents play, the score reads this side against the strongest of them, and every quantity a layer is handed reads this side against the sum of all three. Two of the three layers are trained on quantities that then answer a different question from the one the match is scored on.
+     *
+     * So the extras are moved to the spectators, exactly as the arena moves everything but its sparring partner. The opponents kept are the lowest-numbered computer players, because those are the slots a map gives starting positions to, and the local player is never touched: this is a match this side is playing rather than one it is watching, which is the whole of the difference from `chooseContestants`.
+     */
+    private void chooseOpponents() throws Exception {
+        int slots = engine.slotCount();
+        Object local = engine.local(engine.engine());
+        int kept = 0;
+        for (int i = 0; i < slots; i++) {
+            Object player = engine.playerAt(i);
+            if (player == null || player == local) continue;
+            if (kept < settings.opponents && engine.isAi(player)) {
+                kept++;
+                continue;
+            }
+            engine.setTeam(player, SPECTATOR);
+        }
+        RwAgent.log("match: " + kept + " opponent(s) of the " + settings.opponents
+                + " asked for, everyone else is watching");
+    }
 
     /** The slot an arena episode's opposing side is spawned for, or -1 outside an arena episode. The control process is told, because it is what decides which player each constructed unit belongs to. */
     int sparringSlot() {

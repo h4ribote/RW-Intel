@@ -204,6 +204,9 @@ class Rollout:
             key = trajectory.key
             if not (isinstance(key, tuple) and key and key[0] == owner):
                 continue
+            # An episode's interference marks that episode's decisions. A sealed trajectory belongs to an episode that has already closed and already had its own interference marked, and it is only still here because the trainer has not drained it yet. Squad numbers come out of a pool of eight and an arena hands the same few round fight after fight, so without this the intruder that seized squad 3 in this episode dropped every clean decision about squad 3 in the episodes still waiting in the buffer — the more instances a run has, and the longer a batch takes to fill, the more of them.
+            if trajectory.sealed:
+                continue
             for step in trajectory.steps:
                 if step.squad in touched:
                     step.tainted = True

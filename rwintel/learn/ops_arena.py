@@ -18,7 +18,9 @@ from ..wire import (
     BLOCK_REGIONS,
     Contract,
     Observation,
+    SQUAD_SLOTS,
     SquadAssignment,
+    Status,
     encode_action,
 )
 from ..control.policy.contracts import Doctrine, OperationsOrders, Posture, SquadRecord
@@ -61,6 +63,13 @@ STAGING_REACH = 800.0
 
 #: How many offsets are tried before an episode gives up on placing its contest pairs. A pair is rejected when its two points share a region, collide with a region already taken, sit within a catchment diameter of a point already placed, or reach anything that was already standing when the board was laid out.
 MAX_PAIR_ATTEMPTS = 400
+
+#: How a squad's mission status is read on this board, in the figures the game side reads it by for a match. They are restated here rather than imported because the game side is Java: a squad has lost enough when this share of its allowance is gone, and a region is stalled when this side's share of it has not moved by this much for this long.
+#:
+#: Derived here at all because this board's squads never pass the layer that would otherwise report them. The status was simply never written, so every squad on this board read ACTIVE from the first frame to the last however its errand went — and the inherited operational rule re-tasks a squad on exactly these statuses, so the ladder this arena measures learnt policies against issued one contract a squad and then held it for the whole horizon.
+LOSING_SHARE = 0.7
+STALL_MOVEMENT = 0.10
+STALL_WINDOW_MS = 30000
 
 #: What point a squad's terminal is read from, mixing the neutral half at nought with the opening ownership of the disc it was sent to at one. At nought the squad is paid the region's absolute domination, and that reading is why a layer trained on this arena learnt to attack nothing: measured on Hills at the default draw, a garrison holds its own disc through the horizon about 88 times in 100 whatever is sent there, while even four squads massed on one enemy disc take it only about 40 times in 100, so absolute domination pays a defender about +0.38 of a priority and an assailant about -0.10, and the best errand a squad can be given is one it was going to be paid for anyway. At one the terminal is what the errand changed on the ground it was sent to, which is the quantity the side score is a priority-weighted mean of, and the same two rates then pay an assault about +0.40 and a redundant defence about nothing.
 #:
@@ -259,6 +268,12 @@ class OpsArena(Arena):
                  catchment_radius: float = CATCHMENT_RADIUS, contest_pairs: int = CONTEST_PAIRS,
                  opening_baseline: float = OPENING_BASELINE, credit: str = CREDIT,
                  tenure: str = TENURE, garrison_scale: float = GARRISON_SCALE) -> None:
+        if our_squads > SQUAD_SLOTS:
+            # Refused before anything is built rather than degraded silently during the run, exactly as an unknown credit or tenure is, and before the board is touched because this is a statement about the settings alone. The operational cut writes one row per squad into a block of this many and the network names a squad to itself by a one-hot of the same width, so a ninth squad has no row to be described in and no slot to be asked about: it would be staged, fought, scored and paid its terminal while the layer deciding for it was handed a board on which it does not appear. The bound is the organisation layer's cap in a match, and this arena builds its squads itself and never passes that layer, so this is the only place the cap can be kept.
+            raise ValueError("a side cannot stage more than %d squad(s) here: the operational cut has %d squad row(s) "
+                             "and asks the layer about a squad by its row, so squad %d onwards would be decided for "
+                             "without appearing on the board the decision is taken from"
+                             % (SQUAD_SLOTS, SQUAD_SLOTS, SQUAD_SLOTS + 1))
         super().__init__(session, seed=seed)  # inherits catalogue, random, _sites and every spawn helper
         # The layer under study on this side (a learnt operational layer, or the script for the baseline) and what it is measured against on the other (the script for a duel, its own policy for self-play). Built here rather than handed in already made, for the same reason the engagement arena builds its layers here: both sides must read the same type catalogue as the arena that spawns their units, or a unit would be sorted into a different role on each side. The tactical layer below both actually moves the units and is frozen.
         #
@@ -320,6 +335,10 @@ class OpsArena(Arena):
         self._period = 0
         #: When each of this side's squads was last handed a contract, so that a fresh one can be told from the same one standing. A contract carries the moment it was issued and the operational layer only writes a new one when something about it changed, so a change in this figure is exactly one errand ending and another beginning.
         self._issued: Dict[int, int] = {}
+        #: For every squad on the board, both sides', the contract it is under and what it was worth when that contract was issued. That worth is the baseline its losses are measured from, which is the quantity its allowance is spent against and the one its LOSING status is read from.
+        self._at_issue: Dict[int, Tuple[int, float]] = {}
+        #: For every squad, this side's share of its contracted region when that share last moved, and when it last moved. The stall clock, kept per squad exactly as the game side keeps it.
+        self._balance: Dict[int, Tuple[float, int]] = {}
         self._sandbox_sent = False
         # The draw's settings are written into the statistics at construction rather than at scoring, so that an episode which never reaches its horizon still says under what instrument it was run. The name of the tactical layer beneath both sides is one of them: whoever builds the arena is the only one who knows which parameters the factory closes over, and the arena cannot read it back off a layer afterwards.
         self.statistics = OpsStatistics(board=seed, horizon_ms=horizon_ms, radius=catchment_radius,
@@ -607,6 +626,9 @@ class OpsArena(Arena):
             build_view(observation, self.catalogue, None, self.last_regions, invert=True),
             self.their_home_id, self._their_pt), observation)
 
+        # Where each squad's errand stands on the board that has just arrived, written before either side decides so that both sides' layers read the same board's verdict. It needs the two views and so cannot ride with the rest of the fold, which runs before there are any.
+        self._fold_status(our_view, their_view, now)
+
         # What every scored disc reads on the board that has just arrived, taken once for the period and before either side decides, so the two sides are paid off one reading of one board and their figures stay exact negatives of each other. Outside the loop below rather than inside it, because the leader alternation would otherwise hand the two sides boards a decision apart.
         reading = self._read(observation.unit_states, now) if operational and self.orders is not None else None
 
@@ -645,6 +667,8 @@ class OpsArena(Arena):
         if operational and self.orders is not None:
             # After both sides have decided, so that a period is counted against the contract that period's decision produced and the last decision before the horizon is counted at all.
             self._survey()
+        # Likewise after both sides have decided: a contract issued this period sets the worth its losses will be measured from, and that worth is the one the squad carries as it takes the errand on.
+        self._rebaseline()
         self._period += 1
 
     def _survey(self) -> None:
@@ -961,14 +985,24 @@ class OpsArena(Arena):
         return worths
 
     def close(self) -> None:
-        for layer in (self.our_ops, self.their_ops, self.our_tac, self.their_tac):
-            if hasattr(layer, "close"):
-                layer.close()
+        layers = [layer for layer in (self.our_ops, self.their_ops, self.our_tac, self.their_tac)
+                  if hasattr(layer, "close")]
+        # Everything files what it is still owed payment for before anything ends. Four layers on one board share one instance number and one buffer, and a trajectory is cut by owner, so closing them in turn had the first cut reach into the other three's live errands before their last decisions were filed.
+        for layer in layers:
+            if hasattr(layer, "park"):
+                layer.park()
+        for layer in layers:
+            layer.close()
 
     # ---- keeping both sides' squads in step with the board -----------------------------
 
     def _fold_all(self, observation: Observation) -> None:
-        """Recomputes value, position and membership for every squad from the unit rows, so a foreign-owned enemy squad is tracked without trusting a squad block this process may not own. Mirrors `Arena._fold` across both sides; the score reads `unit_states` and never the squad block, so this feeds the command layers, not the score."""
+        """Recomputes membership, worth, position, scatter and losses for every squad from the unit rows, so a foreign-owned enemy squad is tracked without trusting a squad block this process may not own. Mirrors `Arena._fold` across both sides; the score reads `unit_states` and never the squad block, so this feeds the command layers, not the score.
+
+        The scatter and the losses were not folded at all for a while, and neither was the mission status below, so every squad on this board read as unscattered, unhurt and ACTIVE from the first frame to the last however the fight went. What that cost is not one feature: the tactical cut carries the squad's spread, how much of its allowance has gone and a one-hot of its status — seven numbers — and the operational cut carries the same three per squad row over eight rows, fifty-six more, and every one of them was pinned at its opening value — and the inherited operational rule re-tasks a squad on exactly those statuses, so the ladder this arena measures learnt policies against never re-tasked anything for the whole horizon.
+
+        Derived here for both sides from the same rule rather than read from the squad block for ours, because the block covers this process's own seat and the sparring side is another player's: folding one side out of the game's own bookkeeping and the other out of a rule of our own would make the two sides two different instruments, which is the one thing this board cannot afford.
+        """
         alive = {unit.id for unit in observation.unit_states}
         by_id = {unit.id: unit for unit in observation.unit_states}
         for squads in (self.squads, self.enemy):
@@ -978,6 +1012,73 @@ class OpsArena(Arena):
                     squad.value = sum(self.catalogue.value(by_id[m].type_index) for m in squad.members)
                     squad.x = sum(by_id[m].x for m in squad.members) / len(squad.members)
                     squad.y = sum(by_id[m].y for m in squad.members) / len(squad.members)
+                    squad.spread = math.sqrt(sum((by_id[m].x - squad.x) ** 2 + (by_id[m].y - squad.y) ** 2
+                                                 for m in squad.members) / len(squad.members))
+                else:
+                    squad.value = 0.0
+                    squad.spread = 0.0
+                # What has gone since the contract in force was issued, which is the quantity the allowance is spent against and the one the LOSING status is read from. The baseline is taken when the contract is issued and not when the squad was formed, exactly as the game side takes it.
+                held = self._at_issue.get(squad.id)
+                squad.losses = max(0.0, held[1] - squad.value) if held is not None else 0.0
+
+    def _rebaseline(self) -> None:
+        """Records what each squad was worth at the moment its present contract was issued, which is what its losses are measured from. Called once a period after both sides have decided, so a contract issued this period is measured from the worth the squad had when it took it on, and a squad left without a contract carries no baseline and no losses."""
+        for squads in (self.squads, self.enemy):
+            for squad in squads.values():
+                contract = squad.contract
+                if contract is None:
+                    self._at_issue.pop(squad.id, None)
+                    continue
+                held = self._at_issue.get(squad.id)
+                if held is None or held[0] != contract.issued_at_ms:
+                    self._at_issue[squad.id] = (contract.issued_at_ms, squad.value)
+
+    def _fold_status(self, our_view: WorldView, their_view: WorldView, now: int) -> None:
+        """Writes each squad's mission status from the board, by the same ladder the game side writes it by for a match.
+
+        The order the cases are tried in is the game's and carries the same meaning: a mission that took its region and ran late is a slow success rather than a failure, and the allowance is the thing the operational layer has to hear about soonest. A squad with nothing left is ACTIVE rather than anything else, because what it is worth is a statement about the fight it died in and this field is a statement about the errand.
+
+        Each side is read off its own board, since a status is about the region the contract named as that side sees it.
+        """
+        for squads, board in ((self.squads, our_view), (self.enemy, their_view)):
+            regions = {region.id: region for region in board.regions}
+            for squad in squads.values():
+                contract = squad.contract
+                if contract is None:
+                    squad.status = Status.ACTIVE
+                    continue
+                target = regions.get(contract.target_region)
+                stalled = target is not None and self._stalled(squad, target, now)
+                if not squad.members:
+                    squad.status = Status.ACTIVE
+                elif target is not None and target.enemy_value <= 0.0 and self._standing_on(squad, board, target):
+                    squad.status = Status.COMPLETE
+                elif contract.deadline_ms > 0 and now > contract.deadline_ms:
+                    squad.status = Status.EXPIRED
+                elif contract.cost_budget > 0 and squad.losses > contract.cost_budget * LOSING_SHARE:
+                    squad.status = Status.LOSING
+                elif stalled:
+                    squad.status = Status.STALLED
+                else:
+                    squad.status = Status.ACTIVE
+
+    @staticmethod
+    def _standing_on(squad: SquadRecord, board: WorldView, target) -> bool:
+        """Whether the squad itself is on the region its contract named, rather than whether anything of this side's happens to be there. Nearest by centre, which is how the game side answers the same question."""
+        if not squad.members or not board.regions:
+            return False
+        nearest = min(board.regions, key=lambda region: math.hypot(region.x - squad.x, region.y - squad.y))
+        return nearest.id == target.id
+
+    def _stalled(self, squad: SquadRecord, target, now: int) -> bool:
+        """Whether neither side has shifted the balance of the contracted region for long enough that going on is unlikely to shift it either. The clock is kept per squad and run every period whatever else is true, for the reason the game side gives: a clock only updated on the periods no other status won would sit still through a spell of losing and then report a stall the instant the squad recovered."""
+        total = target.our_value + target.enemy_value
+        balance = 0.0 if total <= 0 else (target.our_value - target.enemy_value) / total
+        last, moved_at = self._balance.get(squad.id, (None, 0))
+        if last is None or abs(balance - last) >= STALL_MOVEMENT:
+            self._balance[squad.id] = (balance, now)
+            return False
+        return now - moved_at >= STALL_WINDOW_MS
 
     def _contacts(self, view: WorldView, observation: Observation) -> WorldView:
         """Writes each region's contact record from what is standing there for the side reading it, because the wire's record cannot be turned over and the inverted side would otherwise read this process's own fog as its own contacts.

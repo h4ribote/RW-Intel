@@ -128,6 +128,12 @@ class ScriptPolicy:
             assignments, self.squads, self.replacements = self.organisation.update(view, self.shortfalls)
             action.squads.extend(assignments)
             self.statistics.squads_formed += sum(1 for a in assignments if a.units)
+            # A squad destroyed is retired in the same period its last unit died, so the layer that fought it is never handed a board with an empty squad on it and cannot see the ending for itself. Handed down here, because this is the one place that holds both layers. A layer with nothing to do with it — the handwritten one — does not define this and nothing is called.
+            spent = getattr(self.organisation, "wiped", None)
+            if spent:
+                destroyed = getattr(self.tactics, "wiped", None)
+                if destroyed is not None:
+                    destroyed(sorted(spent))
 
         if self.last_strategic_ms is None or now - self.last_strategic_ms >= STRATEGIC_MS:
             self.last_strategic_ms = now

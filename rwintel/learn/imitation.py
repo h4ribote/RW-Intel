@@ -194,7 +194,7 @@ def feature_names(layer: str) -> Tuple[str, ...]:
 def feature_entry(layer: str) -> str:
     """What one name in a layer's feature list stands for, for a refusal that has to quote how many there are or which of them moved.
 
-    The tactical list names one number of the state apiece, so its entries are features and calling them that is exact. The operational list names blocks that the state is built by repeating, so its entries are not features and quoting them as though they were would tell somebody staring at a four-hundred-wide state that their file has forty-five of them.
+    The tactical list names one number of the state apiece, so its entries are features and calling them that is exact. The operational list names blocks that the state is built by repeating, so its entries are not features and quoting them as though they were would tell somebody staring at a four-hundred-wide state that their file has forty-odd of them.
     """
     if layer == TACTICAL:
         return "feature"

@@ -60,7 +60,7 @@ from rwintel.wire import (
     RegionState,
     UnitState,
 )
-from rwintel.wire.action import Stance, Task
+from rwintel.wire.action import Stance, Status, Task
 
 #: A catalogue with something in every doctrine's pool, so a draw of any of the three staged doctrines returns a force: an armour tank and an artillery piece the vanguard takes, an anti-air the garrison wants beside its armour, and a hover raider for the raid.
 _TYPES = [
@@ -148,6 +148,7 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena.session = session
     arena.catalogue = _CATALOGUE
     arena.random = random.Random(seed)
+    arena.placement = random.Random(seed ^ 0x5EED51E5)
     arena.our_n = our_n
     arena.radius = radius
     arena.contest_pairs = pairs
@@ -183,6 +184,8 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena._drawn = {}
     arena._period = 0
     arena._issued = {}
+    arena._at_issue = {}
+    arena._balance = {}
     arena._sandbox_sent = True
     arena.centre = (0.0, 0.0)
     arena._our_pt = None
@@ -1657,3 +1660,66 @@ def test_the_episode_counts_how_often_squads_share_a_region():
     arena.squads = {0: contracted(0, 9), 1: contracted(1, 9)}
     arena._survey()
     assert arena.statistics.massed == 4 and arena.statistics.on_priority == before
+
+
+def test_a_side_wider_than_the_squad_block_is_refused_before_the_board_is_built():
+    """The operational cut has eight squad rows and the network names a squad to itself by a one-hot of the same width, so a ninth squad has no row to be described in and no slot to be asked about.
+
+    Staged anyway, it would be deployed, fought, scored and paid its terminal while the layer deciding for it was handed a board on which it does not appear — a number in a journal that reads like every other number. The bound is the organisation layer's cap in a match, and this board builds its squads itself and never passes that layer, so this is the only place the cap can be kept.
+    """
+    from rwintel.wire import SQUAD_SLOTS
+
+    refused = ""
+    try:
+        OpsArena(None, our_squads=SQUAD_SLOTS + 1)
+    except ValueError as complaint:
+        refused = str(complaint)
+    assert "squad row" in refused, "a side wider than the squad block has to be refused, not staged"
+
+    # The width the block does have is not refused, and the refusal happens before the session is touched at all.
+    assert "squad row" not in _refusal_of(lambda: OpsArena(None, our_squads=SQUAD_SLOTS))
+
+
+def _refusal_of(call):
+    try:
+        call()
+    except Exception as complaint:      # the session is None here, so anything past the check is this test's own doing
+        return str(complaint)
+    return ""
+
+
+def test_both_sides_squads_carry_their_scatter_their_losses_and_where_their_errand_stands():
+    """What the fold hands the layers, on a board where a squad has been shot at and its deadline has passed.
+
+    The fold wrote membership, worth and position and nothing else, so every squad on this board read as unscattered, unhurt and ACTIVE from the first frame to the last. Six of the inputs both frozen layers read were pinned at their opening values — the tactical cut carries a squad's spread, how much of its allowance is gone and a one-hot of its status, and the operational cut carries the same three per squad row — and the inherited operational rule re-tasks a squad on exactly those statuses, so the ladder this arena measures learnt policies against never re-tasked anything for a whole horizon.
+    """
+    arena = _arena()
+    arena.squads = {0: _tasked(0, 4, [1, 2])}
+    arena.enemy = {1: _tasked(1, 4, [3, 4])}
+    for squad in list(arena.squads.values()) + list(arena.enemy.values()):
+        squad.value = 700.0
+    # Both sides' squads are strung out, which is a fact about the units and not about which seat is reading them.
+    units = [_unit(1, 0.0, 0.0), _unit(2, 300.0, 0.0), _unit(3, 1000.0, 0.0, hostile=1),
+             _unit(4, 1300.0, 0.0, hostile=1)]
+    arena._at_issue = {0: (0, 1500.0), 1: (0, 1500.0)}
+    arena._fold_all(_observation(units))
+
+    for squad in (arena.squads[0], arena.enemy[1]):
+        assert squad.spread > 0.0, "a squad whose members stand 300 apart is not unscattered"
+        assert squad.losses == 800.0, "the worth gone since the contract was issued has to reach the allowance it is spent against"
+
+    # And where the errand stands is written from the board, by the ladder the game side uses for a match.
+    board = build_view(_observation(units, [RegionState(id=4, resources=1, held_by_us=0, held_by_enemy=1,
+                                                        x=0.0, y=0.0, our_value=0.0, enemy_value=900.0,
+                                                        enemy_seen_at_ms=0, distance_from_home=100.0)]),
+                       _CATALOGUE, None)
+    arena._fold_status(board, board, now=30000)
+    assert arena.squads[0].status is Status.LOSING, (
+        "losses past the share of the allowance the game side calls losing have to read as losing, not %s"
+        % arena.squads[0].status)
+
+    # An allowance that has not gone, with the deadline past, is the other ending the rule reads off the contract.
+    arena._at_issue = {0: (0, 700.0), 1: (0, 700.0)}
+    arena._fold_all(_observation(units))
+    arena._fold_status(board, board, now=10 ** 9)
+    assert arena.squads[0].status is Status.EXPIRED

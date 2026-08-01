@@ -25,10 +25,13 @@ class _Session:
 
 
 def _entry(instance=0, episode=1, seed=60001, score=0.0, scored=True, arm="ops-learnt",
-           map_name="Hills", horizon_ms=300000, radius=400.0, squads=4, pairs=2, board=0,
+           map_name="Hills", horizon_ms=300000, radius=400.0, squads=4, pairs=2, board=None,
            tactics=None, operations=None):
-    statistics = {"scored": scored, "side_score": score, "board": board, "horizon_ms": horizon_ms,
+    statistics = {"scored": scored, "side_score": score, "horizon_ms": horizon_ms,
                   "radius": radius, "squads": squads, "pairs": pairs}
+    if board is not None:
+        # Left out of the record entirely rather than written as nought, for the reason the tactical layer below is: nought is a board a run at seed nought really draws, so a helper that wrote it to mean "no such field" would be testing the very confusion the reader was corrected of.
+        statistics["board"] = board
     if tactics is not None:
         # Left out of the record entirely rather than written as nothing, because that is what a journal from before the tactical layer was written down actually looks like, and reading those is the case the default exists for.
         statistics["tactics"] = tactics
@@ -59,6 +62,9 @@ def test_the_board_key_is_the_seed_the_runner_would_have_drawn():
 
     # Where the board is written down it is read rather than derived, whatever the instance and episode say.
     assert board_of(_entry(instance=3, episode=7, board=4242)) == 4242
+
+    # Including the board a run at seed nought draws, which is a written-down board like any other. Asked whether the field was truthy rather than whether it was there, that one episode alone fell through to the derivation — which is only right for a single-arm run, so one board of a multi-arm run was paired under a rule every other board of it was refused under.
+    assert board_of(_entry(instance=3, episode=7, board=0)) == 0
 
     # Different instances and different episodes are always different boards, which is what lets the pairing be a dictionary rather than an order.
     keys = {board_of(_entry(instance=i, episode=e)) for i in range(8) for e in range(1, 21)}

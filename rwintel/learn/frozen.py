@@ -48,7 +48,8 @@ def load_layer(layer: str, path: str, device=None) -> Tuple[Callable, object, st
 
     from .deciders import (NetworkOperations, NetworkStrategy, NetworkTactics, operational_batcher,
                            strategic_batcher, tactical_batcher)
-    from .net import EncodingRefused, OperationalNet, StrategicNet, TacticalNet, load_encoded
+    from .net import (INPUT_WEIGHT, EncodingRefused, OperationalNet, StrategicNet, TacticalNet,
+                      load_encoded)
 
     # The games this run is learning from are on these cores; a library that helps itself to all of them turns every inference into a fight with the simulation.
     torch.set_num_threads(2)
@@ -58,9 +59,13 @@ def load_layer(layer: str, path: str, device=None) -> Tuple[Callable, object, st
         OPERATIONAL: (OperationalNet, operational_batcher, NetworkOperations),
         STRATEGIC: (StrategicNet, strategic_batcher, NetworkStrategy),
     }[layer]
-    net = build_net().to(where)
+    state = torch.load(path, map_location=where)
+    # The width is read off the file, exactly as the arena's frozen tactical layer reads it and for the same reason: all three networks begin with one linear map from the features to the width, so a file states its own width, and a layer trained wider than the default could not be frozen beneath anything at all.
+    weight = state.get(INPUT_WEIGHT) if isinstance(state, dict) else None
+    width = {"width": int(weight.shape[0])} if weight is not None and getattr(weight, "dim", lambda: 0)() == 2 else {}
+    net = build_net(**width).to(where)
     try:
-        avowal = load_encoded(net, torch.load(path, map_location=where))
+        avowal = load_encoded(net, state)
     except EncodingRefused as refused:
         raise ValueError("the parameters at %s cannot be frozen as the %s layer: %s" % (path, layer, refused))
     if avowal:

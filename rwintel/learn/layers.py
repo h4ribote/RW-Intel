@@ -1,6 +1,6 @@
-"""The two learnt layers, each a script layer with one decision taken out and replaced.
+"""The three learnt layers, each a script layer with one decision taken out and replaced.
 
-Everything except the decision is inherited. The tactical layer's mission reports, its bookkeeping of what a squad has destroyed, the rule that a departure other than holding is re-issued every period; the operational layer's pricing of a mission against the strategic allowance, its deadlines, the rule that a contract is only re-issued when it differs from the one held — all of that is the same code running. What is overridden is one method each: which of the five departures, and which region under which task.
+Everything except the decision is inherited. The tactical layer's mission reports, its bookkeeping of what a squad has destroyed, the rule that a departure other than holding is re-issued every period; the operational layer's pricing of a mission against the strategic allowance, its deadlines, the rule that a contract is only re-issued when it differs from the one held — all of that is the same code running. What is overridden is one method each: which of the departures, and which region under which task.
 
 That is the design's own boundary and not a convenience. Layers are learnt one at a time against frozen neighbours, and a learnt layer must be substitutable for the script layer in the sense that the rest of the system cannot tell which is present. Inheriting rather than reimplementing is how that is guaranteed rather than hoped for: there is no second copy of the rules to drift.
 
@@ -22,7 +22,8 @@ from ..control.policy.view import WorldView
 from .deciders import Choice
 from .encoding import (POSTURES, operational_slots, operational_state, region_mask, strategic_state,
                        tactical_state, task_mask)
-from .reward import (DISCOUNT as REWARD_DISCOUNT, OperationalReward, StrategicReward, TacticalReward)
+from .reward import (DISCOUNT as REWARD_DISCOUNT, WIPED_REWARD, OperationalReward, StrategicReward,
+                     TacticalReward)
 from .rollout import Rollout, Step
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,8 @@ class LearntTactics(Tactics):
         self.pending: Dict[int, Step] = {}
         #: Shaping earned in a period where this squad had no decision waiting to be paid, carried to the next one that has. A layer does not take a decision about every squad every period — the inherited rule passes over a squad whose tactical command a human holds, and one none of whose members are in sight, while leaving its contract standing — and the reward advances that squad's potential regardless. Dropped, those periods punch holes in a sum that only means anything because it telescopes: what an errand returns is its terminal less the potential it opened at, and only if every increment in between was paid to something. Carried, the telescope closes again.
         self.owed: Dict[int, float] = {}
+        #: Every squad this layer has settled a period for and not yet seen leave. What it is for is `_gone`: the buffer, the carried payments and the reward's own ledger are all keyed by squad number, the numbers are reused, and something has to know which of them are still the board's.
+        self.tracked: set = set()
         #: How many errands were closed for each reason, so that a run can be asked whether its terminals are firing at all rather than having it guessed at from the shape of the returns. An errand that never terminates is paid nothing but shaping, and shaping sums to nothing, so a policy learning from trajectories that never close is learning from noise.
         self.terminals: Counter = Counter()
         self._view: Optional[WorldView] = None
@@ -64,6 +67,7 @@ class LearntTactics(Tactics):
         if self.rollout is None:
             return
         present = {squad.id for squad in squads}
+        self.tracked |= present
         for squad in squads:
             # What this squad has destroyed since its contract was issued, which the inherited layer already counts in order to judge the exchange for itself. It is a period behind, because the count for this period is made further down while the departure is being chosen, and a shaping term is a difference of two potentials so a lag applied to both ends of it cancels.
             track = self.tracks.get(squad.id)
@@ -79,6 +83,11 @@ class LearntTactics(Tactics):
                 if outcome.done:
                     self.terminals[outcome.reason] += 1
                 self.rollout.add((self.instance, squad.id), step)
+            elif outcome.done:
+                # An errand that ended in a period this layer took no decision in. The inherited rule passes over a squad whose tactical command a human holds and one none of whose members are in sight, leaving its contract standing, and the reward goes on reading the board for it either way — so the period that finds the contract complete, the deadline past or the squad losing can be a period with nothing of this layer's outstanding. Carried into `owed`, which is what every other unpaid period does, the terminal would be handed to whatever decision came next, and that decision belongs to no errand: this one is over and the next contract has not arrived. So the payment reaches back to the last decision there was and closes the trajectory on it, exactly as `finish` does for a squad that left the board.
+                payment = outcome.reward + self.owed.pop(squad.id, 0.0)
+                if self.rollout.close_with((self.instance, squad.id), payment):
+                    self.terminals[outcome.reason] += 1
             else:
                 self.owed[squad.id] = self.owed.get(squad.id, 0.0) + outcome.reward
             if outcome.renewed:
@@ -86,12 +95,21 @@ class LearntTactics(Tactics):
                 self.owed.pop(squad.id, None)
                 # A contract is the unit of work and so the unit of pay, so a squad handed a different one has begun a different errand and the decisions of the two must not share a trajectory: advantage estimation would otherwise run what the new errand earned backwards into decisions taken for the old. Cut rather than closed, because the errand that was replaced did not fail — it stopped being observed, and its last decision is bootstrapped from its own value estimate as any other unobserved ending is. What that decision is paid is nothing, since the potentials of two contracts are measured against different ground and different allowances and a difference between them is not a shaping term.
                 self.rollout.cut((self.instance, squad.id), reason="renewed")
-        for squad_id in [key for key in self.pending if key not in present]:
+        for squad_id in self._gone(present):
             # A squad that has left the board between periods cannot be paid from anything, so its last decision is cut off rather than scored, and anything carried for it goes with the errand.
+            self.tracked.discard(squad_id)
             self.pending.pop(squad_id, None)
             self.owed.pop(squad_id, None)
             self.rollout.cut((self.instance, squad_id), reason="left")
             self.reward.forget(squad_id)
+
+    def _gone(self, present: Sequence[int]) -> List[int]:
+        """Every squad this layer has been settling that the board no longer reports.
+
+        Read off every squad seen rather than off the decisions awaiting payment alone, which is what it was. A squad leaves the board in a period this layer took no decision about it as often as not — it is destroyed while out of contact, or the organisation layer folds it into another — and its trajectory was then left open with its shaping ledger and its carried payment standing. Squad numbers are handed round a small pool and the arena reuses them fight after fight, so the next squad to be given that number went on filing decisions into the trajectory of the one that died, and opened its errand against a potential measured on the dead squad's ground.
+        """
+        held = self.tracked | set(self.pending) | set(self.owed)
+        return [squad_id for squad_id in sorted(held) if squad_id not in present]
 
     def finish(self, squad: SquadRecord, terminal: float, reason: str) -> None:
         """Ends this squad's errand from outside, paying the decision still waiting on it as the last of the trajectory.
@@ -104,24 +122,39 @@ class LearntTactics(Tactics):
 
         A squad that no longer exists is the third case and the reason this cannot simply give up when nothing is outstanding. The period that finds it destroyed has no squad left to decide anything, so no decision is taken and none is left waiting; the last one there was has already gone into the trajectory as an ordinary step. The ending is therefore added to that step where it lies. Without this the trajectory would be cut instead, which asserts that the errand went on unobserved rather than that the squad died doing it, and being destroyed would then cost the layer nothing at all.
         """
-        if self.reward.ended(squad.id):
-            self.pending.pop(squad.id, None)
-            self.owed.pop(squad.id, None)
+        self._end(squad.id, terminal, reason)
+
+    def wiped(self, squads: Sequence[int]) -> None:
+        """Pays the terminal for squads the game destroyed outright, which the chain names because nothing else can.
+
+        A squad is retired by the organisation layer in the same period its last unit dies, so this layer is never handed a board with an empty squad standing on it, and the condition its own reward tests for — a contract held by a squad with nobody in it — cannot fire in a match at all. Without this, losing a whole squad on an errand read as a squad that stopped being reported: its trajectory was cut and bootstrapped from its own value estimate, so being destroyed cost the layer nothing. The design names being destroyed as one of the four endings this layer is paid for, and this is where a match makes that true.
+
+        Only destruction reaches here. A squad folded into a neighbour or broken up for spares is retired too and is not this: its units are alive and under somebody else's command, so its last decision is cut as any unobserved ending is, which is what `_settle` already does for it.
+        """
+        for squad_id in squads:
+            self._end(squad_id, WIPED_REWARD, "wiped")
+            self.tracked.discard(squad_id)
+
+    def _end(self, squad_id: int, terminal: float, reason: str) -> None:
+        """The three cases of an errand ended from outside, taken by squad number so that a caller holding a record and a caller holding only a number end an errand by the same code."""
+        if self.reward.ended(squad_id):
+            self.pending.pop(squad_id, None)
+            self.owed.pop(squad_id, None)
             if self.rollout is not None:
-                self.rollout.cut((self.instance, squad.id), reason="spent")
-            self.reward.forget(squad.id)
+                self.rollout.cut((self.instance, squad_id), reason="spent")
+            self.reward.forget(squad_id)
             return
-        payment = terminal + (0.0 - self.reward.close(squad.id)) + self.owed.pop(squad.id, 0.0)
-        step = self.pending.pop(squad.id, None)
+        payment = terminal + (0.0 - self.reward.close(squad_id)) + self.owed.pop(squad_id, 0.0)
+        step = self.pending.pop(squad_id, None)
         if step is None:
-            if self.rollout is not None and self.rollout.close_with((self.instance, squad.id), payment):
+            if self.rollout is not None and self.rollout.close_with((self.instance, squad_id), payment):
                 self.terminals[reason] += 1
             return
         step.reward = payment
         step.done = True
         self.terminals[reason] += 1
         if self.rollout is not None:
-            self.rollout.add((self.instance, squad.id), step)
+            self.rollout.add((self.instance, squad_id), step)
 
     def _departures(self, fights) -> List[Deviation]:
         """Every squad's departure in one ask of the decider, and one step recorded for each, in the order the squads were read.
@@ -154,6 +187,17 @@ class LearntTactics(Tactics):
                     value=choice.value, squad=fight.squad.id, at_ms=self._now)
         return [Deviation(choice.action) for choice in choices]
 
+    def park(self) -> None:
+        """Files every decision still waiting for payment into its trajectory, and ends nothing.
+
+        Split out of the flush below because one arena drives both sides out of one instance number and one buffer. Cutting is by owner, and both sides are the same owner, so the first side to flush cut the other side's live trajectories — trajectories whose last decisions were still sitting in that side's pending ledger and had not been filed. Those decisions then landed in a fresh trajectory of their own and the errand came apart in two, one half bootstrapped from a step that was not its last. Whoever closes a board with two layers on it parks both before either flushes.
+        """
+        if self.rollout is None:
+            return
+        for squad_id, step in list(self.pending.items()):
+            self.rollout.add((self.instance, squad_id), step)
+        self.pending.clear()
+
     def flush(self) -> None:
         """Ends every open errand at the end of an episode, without yet releasing the episode's trajectories to be drained. They did not fail; they stopped being observed, so they are bootstrapped rather than treated as terminal.
 
@@ -161,11 +205,10 @@ class LearntTactics(Tactics):
         """
         if self.rollout is None:
             return
-        for squad_id, step in list(self.pending.items()):
-            self.rollout.add((self.instance, squad_id), step)
-        self.pending.clear()
+        self.park()
         # Every errand open here is cut rather than ended, so whatever was carried for it is carried no further.
         self.owed.clear()
+        self.tracked.clear()
         # This instance's errands only. One buffer serves every instance of a run, and an episode ending here says nothing about the fight another instance is in the middle of.
         self.rollout.cut_all(owner=self.instance, reason="episode")
 
@@ -255,7 +298,7 @@ class LearntStrategy(Strategy):
     def conclude(self, terminal: float, reason: str = "match") -> None:
         """Ends the match's errand from outside, paying the decision still waiting on it as the last of the trajectory.
 
-        The match's own result, which is the only terminal this design ever pays a strategic decision and the only place a layer is paid the match at all. The payment is the result handed in plus the last shaping term taken against a terminal potential of nought, so the shaping over the match telescopes away and cannot change which policy is best.
+        The match's own result, which is the only terminal this design ever pays a strategic decision and the only place a layer is paid the match at all. The payment is the result handed in plus the last shaping term taken against a terminal potential of nought, so the shaping over the match telescopes away and cannot change which policy is best. The match therefore returns the result less the potential the match opened at, at whatever discount the run is taking its returns at — see `StrategicReward.close` for why that is the identity to want rather than the tidier one it replaced.
 
         The three cases are the ones the other two layers' finishers handle. An errand already paid its terminal has its still-waiting decision cut rather than paid twice. A match that ended with no decision waiting — the posture was pinned through its last period, or the match was called between periods — has the payment added to the last step there was. And a match that took no strategic decision at all has nothing to pay and nothing to cut.
         """
@@ -279,6 +322,14 @@ class LearntStrategy(Strategy):
         self.terminals[reason] += 1
         self.rollout.add((self.instance, self.KEY), step)
 
+    def park(self) -> None:
+        """Files the decision still waiting for payment, and ends nothing. One layer a side here, so no board parks two of these; it is defined for the same reason the other two layers define it, so that whoever closes a board can park everything before anything cuts."""
+        if self.rollout is None:
+            return
+        if self.pending is not None:
+            self.rollout.add((self.instance, self.KEY), self.pending)
+            self.pending = None
+
     def flush(self) -> None:
         """Ends the match's errand at the end of an episode without yet releasing it, for the reason the other two layers' flush is split from their close: the chain marks the episode's interference in between.
 
@@ -286,9 +337,7 @@ class LearntStrategy(Strategy):
         """
         if self.rollout is None:
             return
-        if self.pending is not None:
-            self.rollout.add((self.instance, self.KEY), self.pending)
-            self.pending = None
+        self.park()
         self.owed = 0.0
         self.rollout.cut_all(owner=self.instance, reason="episode")
         self.reward.reset()
@@ -313,6 +362,8 @@ class LearntOperations(Operations):
         self.pending: Dict[int, Step] = {}
         #: Shaping earned in a period where this squad had no decision waiting to be paid, carried to the next one that has, for the reason the tactical layer's ledger of the same name gives. It bites harder here: the inherited operational rule leaves a squad worn below the health it will task at all out of the decision entirely while its contract stands, and the arena wears squads down by construction.
         self.owed: Dict[int, float] = {}
+        #: Every squad this layer has settled a period for and not yet seen leave, which is what `_gone` reads. The tactical layer's ledger of the same name gives the reason.
+        self.tracked: set = set()
         #: How many errands were closed for each reason, so a run can be asked whether its terminals are firing. An operational errand takes its terminal only from outside, through finish, so this stays empty in a match and fills in the arena.
         self.terminals: Counter = Counter()
         #: What the board a contest is scored on last read for each of this side's squads, handed in from outside before the period's decisions are settled against it. None in a match, where there is no such board and the region block is the only signal there is. The switch is per board and not per squad on purpose: a trajectory whose steps were paid in two different quantities sums to neither.
@@ -363,13 +414,14 @@ class LearntOperations(Operations):
 
         Each decision is paid the shaping of the region its own contract named, not one board-wide figure shared out to all of them. The figure that paid all of them was the disease: what the strategic layer asks for is region by region, and a squad sent to a region it took has to be paid differently from one sent to a region it lost, or the advantage does not depend on the choice and the gradient is dead.
 
-        Where a contest reads its own ground and has handed its reading in, that is what a period is paid the movement of instead of the region block, and the same figure the contest pays at its horizon is then the last of the same series. A trajectory then has one currency from the first decision to the last, so there is no errand boundary left in it: a squad handed a new contract has its old ground handed back and its new ground taken on in one payment, and its trajectory runs on. In a match no such reading exists, the region block is re-based at every fresh contract, and the cut below is that case — two errands' payments there really do have incomparable origins.
+        Where a contest reads its own ground and has handed its reading in, that is what a period is paid the movement of instead of the region block, and the same figure the contest pays at its horizon is then the last of the same series. Either way a trajectory has one currency from the first decision to the last, so there is no errand boundary left in it: a squad handed a new contract has its old ground handed back and its new ground taken on in one payment, and its trajectory runs on. The match used to cut here on the ground that two contracts price against different regions, which is true and is not a reason: both prices come out of the one region table, so the difference across the boundary is a difference of one quantity and declining to pay it let a squad keep a rise and walk away from the fall.
 
         A squad gone from the board — folded into another by the organisation layer, disbanded, or wiped — is cut rather than ended: its last decision is bootstrapped from its own value estimate, as any decision that merely stopped being observed is, not closed against a terminal potential of nought. Marking it done would teach the critic that every state a squad turns over from, a routine merge of a healthy squad included, is worth nothing from here, corrupting the baseline every other squad's advantage is taken against. What ends an operational errand as a terminal comes only from outside, through finish, which the constructed arena calls at the horizon.
         """
         if self.rollout is None:
             return
         present = {squad.id for squad in squads}
+        self.tracked |= present
         for squad in squads:
             # Nothing where no contest reads this board, which is a match; the contest's reading where one does. Read per board rather than per squad, and the reading a contest hands in covers every squad it has, so the default here is a guard and not a path — a squad paid out of the region block for a period while its neighbours were paid out of the discs would leave a trajectory summing to neither quantity.
             figure = None if self._standing is None else self._standing.get(squad.id, 0.0)
@@ -381,15 +433,17 @@ class LearntOperations(Operations):
                 self.rollout.add((self.instance, squad.id), step)
             else:
                 self.owed[squad.id] = self.owed.get(squad.id, 0.0) + outcome.reward
-            if outcome.renewed:
-                # The match's case alone, and it arrives through the meaning of the flag rather than through a test of which board this is: `renewed` says that what has been paid so far is in a currency the next errand cannot inherit, and that is true of the region block, which is re-based against fresh ground whenever a contract is issued. A contest's scored figure has one origin for the whole episode and never sets it, so nothing here fires on that path and a trajectory paid off the discs is never cut. Whatever was carried belonged to the errand being cut, and cannot be paid into the errand replacing it.
-                self.owed.pop(squad.id, None)
-                self.rollout.cut((self.instance, squad.id), reason="renewed")
-        for squad_id in [key for key in self.pending if key not in present]:
+        for squad_id in self._gone(present):
+            self.tracked.discard(squad_id)
             self.pending.pop(squad_id, None)
             self.owed.pop(squad_id, None)
             self.rollout.cut((self.instance, squad_id), reason="left")
             self.reward.forget(squad_id)
+
+    def _gone(self, present: Sequence[int]) -> List[int]:
+        """Every squad this layer is still holding something for that the board no longer reports, read off everything held rather than off the decisions awaiting payment alone. The tactical layer's ledger of the same name gives the reason, and it bites harder here: this layer decides about a squad only when the inherited rule finds it taskable, so a squad worn below that line and then folded into another leaves nothing pending and everything else standing."""
+        held = self.tracked | set(self.pending) | set(self.owed)
+        return [squad_id for squad_id in sorted(held) if squad_id not in present]
 
     def finish(self, squad: SquadRecord, terminal: float, reason: str) -> None:
         """Ends this squad's errand from outside, paying the decision still waiting on it as the last of its trajectory. Structurally the tactical layer's finish: whoever runs the contest knows when it is over, the layer only sees periods.
@@ -490,15 +544,22 @@ class LearntOperations(Operations):
                 at_ms=view.observation.game_time_ms)
         return Task(choice.second), region
 
-    def flush(self) -> None:
-        """Ends every open period at the end of an episode, without yet releasing its trajectories to be drained. Split from the seal for the same reason the tactical layer's is: the operational chain marks the episode's interference between the two, and this is the layer an intruder actually interferes with."""
+    def park(self) -> None:
+        """Files every decision still waiting for payment into its trajectory, and ends nothing. The tactical layer's method of the same name gives the reason: one arena drives four layers out of one instance number and one buffer, and the first of them to cut would otherwise cut the others' errands out from under decisions they had not filed yet."""
         if self.rollout is None:
             return
         for squad_id, step in list(self.pending.items()):
             self.rollout.add((self.instance, squad_id), step)
         self.pending.clear()
+
+    def flush(self) -> None:
+        """Ends every open period at the end of an episode, without yet releasing its trajectories to be drained. Split from the seal for the same reason the tactical layer's is: the operational chain marks the episode's interference between the two, and this is the layer an intruder actually interferes with."""
+        if self.rollout is None:
+            return
+        self.park()
         # Every errand open here is cut rather than ended, so whatever was carried for it is carried no further.
         self.owed.clear()
+        self.tracked.clear()
         self.rollout.cut_all(owner=self.instance, reason="episode")
         self.reward.reset()
         # An episode's boards belong to that episode: whatever the last contest read says nothing about the next one's ground, and a reading left standing would be paid against a ledger that has just been cleared.

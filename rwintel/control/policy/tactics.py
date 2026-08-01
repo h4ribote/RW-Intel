@@ -1,12 +1,12 @@
 """The tactical layer: whether to depart from the contract, and how.
 
-This layer does not drive units. The engine already advances every squad on its contract with path finding, target acquisition and an engagement stance, and that is a competent baseline obtained for nothing; writing tactics as fresh unit control would throw it away and would put the inference count on the number of units rather than on the number of squads. So the only decision here is a departure, one of seven, one per squad, and a squad that is doing well gets no order at all.
+This layer does not drive units. The engine already advances every squad on its contract with path finding, target acquisition and an engagement stance, and that is a competent baseline obtained for nothing; writing tactics as fresh unit control would throw it away and would put the inference count on the number of units rather than on the number of squads. So the only decision here is a departure, one of eight, one per squad, and a squad that is doing well gets no order at all.
 
-Each departure answers one local factor, and the set began at five because the factors that decide a small fight in this game are being shot at, being covered by an area weapon, and out-reaching what is shooting back — plus concentrating, and doing nothing. Two more were added later, not as new kinds of move but as the one parameter a rule used to settle on their behalf: how far a withdrawal commits, and which enemy a concentration goes onto. Anything that cannot be read off those factors belongs to the operational layer, which is the layer that knows why the squad is where it is.
+Each departure answers one local factor, and the set began at five because the factors that decide a small fight in this game are being shot at, being covered by an area weapon, and out-reaching what is shooting back — plus concentrating, and doing nothing. Two more were added later, not as new kinds of move but as the one parameter a rule used to settle on their behalf: how far a withdrawal commits, and which enemy a concentration goes onto. An eighth was added as a kind of its own — walking in until this squad's own shortest reach covers what is shooting at it — and then measured out of the ladder again: it is in the action space for a learnt layer and this ladder has no branch that answers with it. Anything that cannot be read off those factors belongs to the operational layer, which is the layer that knows why the squad is where it is.
 
 The upward half matters as much. Once the fog is on, nothing above the fighting can see the enemy at all: the per player aggregates the higher layers read are our own side only, and learning what the enemy is fielding means having stood next to it. The squad in contact is therefore the only sensor the command chain has, and the mission report is the only wire it reports on. It is built properly here while the observation is still omniscient precisely so that turning the fog on changes what the report contains and not whether anything is listening.
 
-Rules rather than choices settle where a departure points: the engine picks the focus target and the fall-back position. What this layer picks is only which of the seven, which keeps the action space at the number of kinds whether a script or a network is deciding, and keeps it from ever asking for a continuous value.
+Rules rather than choices settle where a departure points: the engine picks the focus target and the fall-back position. What this layer picks is only which of the eight, which keeps the action space at the number of kinds whether a script or a network is deciding, and keeps it from ever asking for a continuous value.
 """
 
 from __future__ import annotations
@@ -176,6 +176,12 @@ class Tactics:
             if self._allowed(focused):
                 return focused
         return Deviation.HOLD
+
+    #: The departures this ladder's branches can actually answer with, which is what an ablation may take away from it.
+    #:
+    #: Not the whole action space, and the difference is the point. Holding is what the ladder falls through to and cannot be withheld — the fall-through is the ladder with everything taken away, not a branch — and closing has no branch at all since the eighth departure was measured out of the ladder and left in the action space for a learnt layer to use. An ablation naming either of those runs an arm that decides exactly what the baseline decides and reports the difference as a measurement of the departure, which is the one reading a `--without` run exists to produce and the one it cannot produce for these two.
+    ANSWERABLE = frozenset({Deviation.WITHDRAW, Deviation.WITHDRAW_FAR, Deviation.SPREAD,
+                            Deviation.KITE, Deviation.FOCUS, Deviation.FOCUS_THREAT})
 
     def _allowed(self, departure: Deviation) -> bool:
         """Whether this ladder may answer with a departure at all.
