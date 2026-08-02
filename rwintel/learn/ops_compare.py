@@ -20,17 +20,17 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..eval.journal import read
 from ..eval.sampling import PairedComparison, UNBOUNDED_EPISODES
-from .ops_arena import SCRIPT_TACTICS
+from .ops_arena import SCRIPT_TACTICS, STANDING_LEAVE
 from .ops_run import INSTANCE_STRIDE
 
 log = logging.getLogger(__name__)
 
 #: The episode settings that have to agree before two runs are the same instrument, and the arena draw settings that have to agree beside them. The seed is deliberately not among them: two runs at different base seeds simply share no board and pair on nothing, which the pair count says by itself. `tactics` is the last of the draw settings and the least obvious: the fighting beneath an operational choice is what turns a deployment into a share of a disc, so a run made under trained tactical parameters and one made under the handwritten ladder are two arenas whatever else they agree on.
 EPISODE_KEYS = ("map", "opponents", "difficulty", "credits", "starting_units", "fog", "income", "arena")
-DRAW_KEYS = ("horizon_ms", "radius", "squads", "pairs", "garrison", "tactics")
+DRAW_KEYS = ("horizon_ms", "radius", "squads", "pairs", "garrison", "tactics", "standing")
 
 #: What a draw setting a journal does not carry reads as, where it can only have been one thing. This is a deliberate exception to the rule that a missing field reads as None on both sides, and it is stateable exactly: a record carrying no radius could have been drawn at any radius its runner's flag allowed, whereas a record naming no tactical layer was written by a runner that had no way to put anything but the handwritten one under the arena. Without the exception every journal already written would stop pairing with every new one, which would be refusing over a difference that does not exist.
-DRAW_DEFAULTS = {"tactics": SCRIPT_TACTICS}
+DRAW_DEFAULTS = {"tactics": SCRIPT_TACTICS, "standing": STANDING_LEAVE}
 
 
 def board_of(entry: dict) -> Optional[int]:
@@ -80,7 +80,8 @@ def _by_board(entries: Sequence[dict], name: str) -> Dict[int, dict]:
 
 def compare(first_path: str, second_path: Optional[str] = None, *, first_arm: Optional[str] = None,
             second_arm: Optional[str] = None, first_name: Optional[str] = None,
-            second_name: Optional[str] = None, reading: str = "side_score") -> Optional[PairedComparison]:
+            second_name: Optional[str] = None, reading: str = "side_score",
+            across_instruments: bool = False) -> Optional[PairedComparison]:
     """Two runs, or two arms of one run, paired board by board. None when they share no board or were not the same instrument.
 
     A run of several arms writes them all to one journal, so the two sides may be one file read twice under two arm names. Naming an arm is what makes that unambiguous: without it a journal of several arms would be read as one arm that played every board several times, which is exactly the repeated board the pairing refuses.
@@ -92,9 +93,15 @@ def compare(first_path: str, second_path: Optional[str] = None, *, first_arm: Op
     second_entries = _of_arm(read(second_path), second_arm)
     first_name = first_name or first_arm or _arm_of(first_entries) or first_path
     second_name = second_name or second_arm or _arm_of(second_entries) or second_path
-    if first_name == second_name:
+    if first_name == second_name and second_path == first_path:
         log.error("both sides of the comparison name the same arm of the same run, which would pair every board with itself")
         return None
+    if first_name == second_name:
+        # One arm in two journals is the shape of a before-and-after: the same chain played on the same seeds under two
+        # constructions of the board. It is a comparison of the two boards rather than of two arms, which is a thing
+        # worth measuring and the one thing this refused outright. The two are named by their files so a report of it
+        # cannot be read as a comparison of arms.
+        first_name, second_name = "%s@%s" % (first_name, first_path), "%s@%s" % (second_name, second_path)
     log.info("%s: %d episode(s) journalled, %d scored", first_name, len(first_entries), len(_scored(first_entries)))
     log.info("%s: %d episode(s) journalled, %d scored", second_name, len(second_entries), len(_scored(second_entries)))
 
@@ -113,10 +120,15 @@ def compare(first_path: str, second_path: Optional[str] = None, *, first_arm: Op
     if len(signatures) > 1:
         for entry in sorted(signatures):
             log.error("instrument: episode %s, draw %s (%s)", entry[0], entry[1], ", ".join(DRAW_KEYS))
-        log.error("the paired episodes were not run under one instrument — the episode settings, the arena's draw or "
-                  "the tactical layer that fought beneath both sides differ — so the difference between them is a "
-                  "difference between two arenas and not between two arms; it is not reported")
-        return None
+        if not across_instruments:
+            log.error("the paired episodes were not run under one instrument — the episode settings, the arena's draw or "
+                      "the tactical layer that fought beneath both sides differ — so the difference between them is a "
+                      "difference between two arenas and not between two arms; it is not reported")
+            return None
+        # Asked for deliberately, which is the before-and-after case: what is being measured IS the change of
+        # instrument, on boards drawn from the same seeds. Reported with the difference named for what it is.
+        log.warning("the two sides were run under different instruments, and this comparison was asked for on that "
+                    "basis: what it measures is the change of board and not a difference between two arms")
 
     missing = [name for name, boards in ((first_name, first_boards), (second_name, second_boards))
                if any((boards[board]["statistics"] or {}).get(reading) is None for board in shared)]
@@ -222,6 +234,8 @@ def main(argv=None) -> int:
     parser.add_argument("--reading", choices=("side_score", "side_tenure"), default="side_score",
                         help="which reading of an episode the difference is taken on: the discs as they stood at "
                              "the horizon, or the mean of the same discs weighted by how long each reading stood")
+    parser.add_argument("--across-instruments", action="store_true",
+                        help="pair two runs that were made under different constructions of the board, which is what a before-and-after of a repair to the arena is. The difference is then a statement about the two boards and not about two arms, and the report says so")
     parser.add_argument("--verbose", action="store_true")
     arguments = parser.parse_args(argv)
 
@@ -230,7 +244,8 @@ def main(argv=None) -> int:
     comparison = compare(arguments.first, arguments.second,
                          first_arm=arguments.first_arm, second_arm=arguments.second_arm,
                          first_name=arguments.name_first, second_name=arguments.name_second,
-                         reading=arguments.reading)
+                         reading=arguments.reading,
+                         across_instruments=arguments.across_instruments)
     return 0 if comparison is not None else 1
 
 

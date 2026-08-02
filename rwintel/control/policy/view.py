@@ -127,6 +127,8 @@ def rehome(view: WorldView, home_id: Optional[int] = None,
     Two things move together and both are wrong for that side otherwise. Every region's distance from home is the wire's, measured from this process's base for the whole board, so an inverted view reads our marches as its own; and the anchor the tactical bearing is read against is that same base, so a squad and its exact reflection would be measured from one point instead of from two reflected ones and would read as two different fights.
 
     The point is taken as given rather than from the home region because a constructed engagement has no base to name a region by, and because two staging points that are exact reflections can sit nearest to regions that are not. Where a region is named as well, its distances are rewritten and it becomes the view's home; where only a point is given, the region table is left as the map wrote it, since nothing in the tactical cut reads a distance from home.
+
+    **The distances are measured from the point when there is one**, and that is the whole reason a point may be given beside a region. Measured from the home region's CENTRE instead, a mirrored board hands its two seats two sets of distances that are not reflections of each other: the two staging points are exact reflections by construction, but the region nearest each of them is whatever the map put there, and its centre is the mean of the ground that formed it. Both the operational cut's region distance and the handwritten ladder's march discount read this field, so the two seats were ranking the same ground by different costs — on the constructed board, every period, in the same direction.
     """
     if point is not None:
         view.home_point = point
@@ -135,7 +137,8 @@ def rehome(view: WorldView, home_id: Optional[int] = None,
     home = view.region(home_id)
     if home is None:
         return view
-    view.regions = [replace(region, distance_from_home=math.hypot(region.x - home.x, region.y - home.y))
+    origin = point if point is not None else (home.x, home.y)
+    view.regions = [replace(region, distance_from_home=math.hypot(region.x - origin[0], region.y - origin[1]))
                     for region in view.regions]
     view.home = view.region(home_id)
     if point is None:

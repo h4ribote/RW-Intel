@@ -118,7 +118,7 @@ def fit_weights(records: Iterable[Episode]) -> Optional[Weights]:
 
     The fit is a search over a coarse grid of non-negative weights summing to one. A candidate is judged on how many decided episodes it puts on the right side of zero, ties going to the candidate that does it by the wider margin — between two candidates that are right equally often, the one that is right less narrowly is the one more likely to stay right on the next episode.
 
-    One limit is worth knowing when reading a fitted result. The design asks for the score *just before* the decision, and what is recorded is the standing the episode ended with, which for a decided match is taken after the loser has already been destroyed. The fit is therefore against a board that is easier to call than the one the score is meant to be used on, and the weights it produces should be checked against cut-off episodes rather than trusted from the fit alone.
+    The board it is fitted on is the one recorded BEFORE the end wherever the episode carries one, and the final board only where it does not. That distinction is the whole of whether the fit answers the question it is for: the design asks that the score just before a decision agrees with who won it, and the board a decided match ENDS on has the loser already destroyed, so every weighting calls it correctly and the fit is against a question nobody has to ask. An episode recorded before the agent kept a rolling board, or one too short to have one, falls back to the final board and is the weaker evidence — which `fitted_on_the_end` reports rather than leaves to be assumed.
     """
     decided_records = [record for record in records if decided(record)]
     if not decided_records:
@@ -127,7 +127,8 @@ def fit_weights(records: Iterable[Episode]) -> Optional[Weights]:
     graded: List[Tuple[Components, float]] = []
     for record in decided_records:
         outcome = 1.0 if record.winner == viewpoint(record.standing, record.team) else -1.0
-        graded.append((components(record.standing, record.team), outcome))
+        board = getattr(record, "before", None) or record.standing
+        graded.append((components(board, record.team), outcome))
 
     best: Optional[Weights] = None
     best_key: Tuple[int, float] = (-1, 0.0)
@@ -143,6 +144,16 @@ def fit_weights(records: Iterable[Episode]) -> Optional[Weights]:
         if key > best_key:
             best, best_key = candidate, key
     return best
+
+
+def fitted_on_the_end(records: Iterable[Episode]) -> Tuple[int, int]:
+    """Of the decided episodes, how many carried a board from before the end and how many did not.
+
+    Reported beside a fitted weight because the two are not the same evidence: a board taken while both sides were still standing is the board the score is used on, and the board an episode ended on is one where the answer is already visible. A fit made mostly on the second is a fit that has not been asked the question.
+    """
+    decided_records = [record for record in records if decided(record)]
+    with_before = sum(1 for record in decided_records if getattr(record, "before", None))
+    return with_before, len(decided_records) - with_before
 
 
 # ---- internals -----------------------------------------------------------------------

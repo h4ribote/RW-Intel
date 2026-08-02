@@ -24,7 +24,8 @@ from ..data import AssetPaths
 from . import arms as arm_names
 from .journal import Journal, default_path, read
 from .sampling import Comparison, Summary, episodes_for, episodes_for_win_rate
-from .scoring import OPENING_WEIGHTS, Weights, components, decided, fit_weights, score
+from .scoring import (OPENING_WEIGHTS, Weights, components, decided, fit_weights,
+                      fitted_on_the_end, score)
 
 #: Differences worth quoting a sample size for. The design's own table, which is what makes a run's report comparable with it.
 REPORTED_DIFFERENCES = (0.05, 0.10, 0.20)
@@ -53,12 +54,17 @@ class Played:
     interference: dict = field(default_factory=dict)
     #: The settings the episode was played under. Carried for the same reason as the interference: a score is only the same quantity as another when it was produced the same way, and the default journal name does not distinguish the map, the difficulty or the cutoff, so a re-reported file can hold episodes of two different settings under one arm. Kept here so the report can see when it does.
     settings: dict = field(default_factory=dict)
+    #: Where the sides stood before the episode ended, which is the board the weights have to be fitted on. Empty for an episode recorded before the agent took one, and for one too short to have one.
+    before: Sequence[dict] = field(default_factory=tuple)
+    before_seconds: int = 0
 
     @classmethod
     def of(cls, record) -> "Played":
         return cls(arm=record.arm, winner=record.winner, team=record.team, timeout=record.timeout,
                    standing=record.standing, seconds=record.seconds, statistics=record.statistics,
-                   interference=record.interference, settings=getattr(record, "settings", {}) or {})
+                   interference=record.interference, settings=getattr(record, "settings", {}) or {},
+                   before=getattr(record, "before", ()) or (),
+                   before_seconds=int(getattr(record, "before_seconds", 0) or 0))
 
     @classmethod
     def from_dict(cls, entry: dict) -> "Played":
@@ -67,7 +73,9 @@ class Played:
                    standing=entry.get("standing", []), seconds=int(entry.get("seconds", 0)),
                    statistics=entry.get("statistics", {}),
                    interference=entry.get("interference", {}),
-                   settings=entry.get("settings", {}))
+                   settings=entry.get("settings", {}),
+                   before=entry.get("before", ()) or (),
+                   before_seconds=int(entry.get("before_seconds", 0) or 0))
 
 
 def report(played: Sequence[Played], weights: Weights) -> None:
@@ -122,8 +130,14 @@ def report(played: Sequence[Played], weights: Weights) -> None:
     if any(decided(e) for e in played):
         fitted = fit_weights(played)
         if fitted is not None:
+            before, ended = fitted_on_the_end(played)
             logging.info("weights fitted on the decided episodes: military %.2f economy %.2f record %.2f",
                          fitted.military, fitted.economy, fitted.record)
+            # Which board they were fitted on, because the two are not the same evidence. A board from before the end is the board the score is used on; the board an episode ended on already shows who won.
+            logging.info("%-10s   fitted on %d board(s) taken before the end and %d taken at it%s", "",
+                         before, ended,
+                         "" if not ended else "; the ones taken at the end are the weaker evidence, since a decided "
+                                              "match ends with the loser already destroyed")
     else:
         logging.info("no episode was decided, so the weights cannot be fitted and stay at the opening choice")
         logging.info("a win rate difference of 0.10 would need %d episode(s) per side, if one were ever observed",
@@ -197,18 +211,32 @@ def main(argv=None) -> int:
                         help="measure with the script intruder present, which is how the design says "
                              "evaluation is to be run: a number taken without interruption is not the "
                              "number the system will be operated at")
+    parser.add_argument("--weights", default=None,
+                        help="score the episodes with these weights instead of the opening ones, as military,economy,record. The journal keeps the materials rather than the score, so a run recorded under one set can be read again under the set a later fit produced")
     parser.add_argument("--verbose", action="store_true")
     arguments = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG if arguments.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
 
+    weights = OPENING_WEIGHTS
+    if arguments.weights:
+        try:
+            parts = [float(piece) for piece in arguments.weights.split(",")]
+        except ValueError:
+            parser.error("the weights are three numbers separated by commas: military,economy,record")
+        if len(parts) != 3 or any(part < 0.0 for part in parts):
+            parser.error("the weights are three non-negative numbers: military,economy,record")
+        weights = Weights(*parts)
+
     if arguments.source:
         played = [Played.from_dict(entry) for entry in read(arguments.source)]
         if not played:
             logging.error("no episodes in %s", arguments.source)
             return 1
-        report(played, OPENING_WEIGHTS)
+        # The materials are journalled rather than the score, so a file can be read again under whatever weights were
+        # fitted since. Without this the fit had nowhere to be used: it was reported and then thrown away.
+        report(played, weights)
         return 0
 
     try:

@@ -26,6 +26,9 @@ SQUAD_SLOTS = 8
 
 #: A unit's order kind when it has no order at all, which is what makes it free to be given one.
 NO_ORDER = 255
+
+#: The value of a unit row's `built` once the unit is finished. The engine reports the progress of a build as a byte and the game's own standing counts a unit only at this value.
+BUILT = 255
 #: A unit's squad when it belongs to none, and a unit's attack target when it has none.
 NO_SQUAD = 0xFFFF
 NO_TARGET = 0
@@ -88,6 +91,7 @@ class UnitState:
     y: float
     health: float
     max_health: float
+    #: How far along a build is, as the engine's own byte: BUILT is finished. The game's own scoring counts a unit's price only once it is finished, so anything comparing itself with that score has to read this.
     built: int
     #: Ordinal of the current order's kind, 255 when the unit has never had one, so zero is a real order and not "idle".
     order: int

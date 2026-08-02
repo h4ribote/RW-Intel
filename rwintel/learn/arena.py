@@ -27,6 +27,7 @@ from ..wire import (
 )
 from ..control.policy.catalogue import Catalogue
 from ..control.policy.contracts import Doctrine, SquadRecord, TaskContract
+from ..control.policy.operations import STANCE_FOR
 from ..control.policy.tactics import Tactics
 from ..control.policy.view import build as build_view, rehome
 
@@ -66,6 +67,24 @@ FORCE_VALUE = (1200.0, 5000.0)
 #:
 #: The second reading is what the setting now rests on, and it is about sharpness rather than fairness. Both floors are fair - the handwritten layer against itself comes back at +0.013 and +0.002 with two standard errors of about 0.03 - and the lower floor does make fights more decisive, from 31 per cent ending with a side destroyed to 37. What it does not do is make the measurement any sharper. Pinning a layer to one departure and taking the difference from the baseline on the very same fights, the loss it costs comes out at -0.0555 under the even floor and -0.0600 under the lopsided one, at two standard errors of 0.025 and 0.024, so the same claim costs the same number of fights either way. What the lopsided draw does move is the unpaired spread, from 0.57 to 0.63, which is paid for in sample size. There would be a reason to lower it - a layer that never meets a fight it ought to break off never learns to - but the arena's own arithmetic says the measurement gains nothing, so the floor stays where the design put it.
 IMBALANCE = (0.5, 1.0)
+
+#: How a squad's mission status is read on a constructed board, in the figures the game side reads it by for a match: a squad has lost enough when this share of its allowance is gone, and a region is stalled when this side's share of it has not moved by this much for this long. Restated here rather than imported because the game side is Java.
+#:
+#: Read here at all because the game side writes the status in ONE seat. The block a match reports is built from the region force totals as this process sees them, so a region's enemy worth is the worth of whatever is hostile to THIS side — and for the sparring squads of a constructed board that is their own force. Completion, which wants no enemy worth left on the contracted ground, could therefore fire for this side on the winning period of every fight and could not fire for the other side at all, since the only way for the ground it is standing on to hold no worth hostile to us is for that squad to be dead, and a squad with nothing left reads ACTIVE. Status is a five-wide one-hot of the tactical cut and three of the operational squad row, so a board whose two seats cannot read the same statuses is a board whose two seats are not exchangeable — which is the one property both constructed arenas rest on.
+LOSING_SHARE = 0.7
+STALL_MOVEMENT = 0.10
+STALL_WINDOW_MS = 30000
+
+#: The contracts a fight may be drawn under: every task the operational layer can issue, each with the stance its own table gives it, so a pair drawn here is a pair a match can emit and no other.
+#:
+#: Taken from that table rather than restated, because the two drifting apart would train the layer on a combination the chain cannot produce — the mistake the constructed operations arena made when it drew the posture's own consequences independently of the posture.
+#:
+#: Every fight used to be ATTACK with AGGRESSIVE, and that is not a small corner of the cut: the tactical encoding carries a six-wide task one-hot and a seven-wide stance one-hot, so thirteen of its fifty-eight features were constant for the whole of training — eleven always nought and two always one — while all thirteen move in a match. A layer trained that way reads, in every match decision, thirteen inputs it never saw vary. It is the same shape as the defect the operations arena was found to have, where half the staged squads were recorded as garrisons and were therefore never offered ATTACK, and that one was worth a large part of what that arena appeared to measure.
+#:
+#: Drawn uniformly over the six rather than in the proportions a match issues them. The proportions are a fact about a particular length of a particular match on a particular map — measured over one collected match the handwritten ladder issued DEFEND in 58 per cent of its decisions, RAID in 42 and ATTACK in none, because early in a match no region carries an enemy for a vanguard to be sent at — and an arena drawn to those proportions would teach the layer this match rather than the space of contracts. The argument is the one the operations arena draws its postures under: every one of them, because a match holds each of them for part of a match and the layer must have seen all of them.
+#:
+#: What the draw does NOT change is the geometry. The contract's target is the other side's ground whatever the task, because the engine's own default under any contract is to advance on the target with the contract's stance — the task decides nothing the engine does, it decides what the mission is called, what the encoding reads, and (through the stance) whether the squad shoots on the way. So every fight is still a fight: a GUARD_AREA squad advances and defends where it arrives, and a HOLD_FIRE squad advances without shooting, which is precisely the board on which withdrawing is the right departure and the one the layer had never been shown.
+CONTRACTS = tuple((task, STANCE_FOR[task]) for task in sorted(STANCE_FOR, key=int))
 
 #: This side's departure is decided and submitted before the other side's, every period, which is the arrangement the arena ran under while a left-right lean was being measured in the fighting itself.
 OURS_FIRST = "ours"
@@ -184,6 +203,15 @@ class Engagement:
     #: A count is not enough on its own. Two things arrive on the board that nobody commissioned: the headquarters and the builder a spawn-point player begins an episode with, which appear a step or two apart so that the wait for the opening board to settle can pass between them, and the units of an engagement that was abandoned as stillborn, whose spawn commands are never withdrawn and which turn up while the next fight is being formed. Both were measured: the builder joined this side's squad in about seven of every ten first fights, worth five hundred credits it never had to lose, and those fights scored a tenth of a point above every other fight in the run. Neither can join a squad that is filled against the order that was actually placed.
     our_wanted: Dict[int, int] = field(default_factory=dict)
     their_wanted: Dict[int, int] = field(default_factory=dict)
+    #: What each side's mission is, drawn with the rest of the fight and held here until the squads exist to be given it.
+    #:
+    #: Drawn at the draw rather than at the forming, and that is the whole of why it lives on the record. Everything a fight consumes from the shared stream has to be consumed whether or not the fight lives: the forming is skipped entirely for a stillborn engagement — one whose ground the engine would not build on, which is a fact about the SITE and the site comes out of the placement stream that is deliberately not paired — so a draw taken there is taken by one arm and not by the other, and every later fight of the episode is then a different fight while the pairing still matches the two up by index.
+    our_share: float = 0.0
+    their_share: float = 0.0
+    our_task: Task = Task.ATTACK
+    their_task: Task = Task.ATTACK
+    our_stance: Stance = Stance.AGGRESSIVE
+    their_stance: Stance = Stance.AGGRESSIVE
     ours_left: int = 0
     theirs_left: int = 0
     #: What each side was still worth when the fight was called, which is what turns a fight into a score rather than a tally of who was left standing.
@@ -268,6 +296,8 @@ class Statistics:
     stall_ms: int = STALL_MS
     imbalance_floor: float = IMBALANCE[0]
     score: str = BY_HEALTH
+    #: The seed this episode's fights were drawn from, which is the draw's name. Written down for the reason the constructed operations arena writes its board id down: a paired comparison matches two arms fight by fight, and without the seed it is matching them by position in a list and trusting that two runs drew alike. They need not have — the seed is set per instance and per episode — and a comparison that pooled two draws would be subtracting unrelated fights while reporting an interval as though it had not.
+    seed: int = 0
     terminals: Dict[str, int] = field(default_factory=dict)
     #: Every fight of the episode, one row each, and all of them.
     #:
@@ -306,6 +336,7 @@ class Statistics:
                 "health_outcome_sd": round(self.health_outcome_sd, 4),
                 "separation": round(self.separation, 1), "stall_ms": self.stall_ms,
                 "imbalance_floor": round(self.imbalance_floor, 4), "score": self.score,
+                "seed": self.seed,
                 "terminals": dict(self.terminals), "history": self.history}
 
 
@@ -352,9 +383,11 @@ class Arena:
         self.opponent = opponent(session, self.catalogue) if opponent else Tactics(session, self.catalogue)
         # The draw is written into the statistics at construction rather than at scoring, so that an episode which produced no fight at all still says under what instrument it was run.
         self.statistics = Statistics(separation=separation, stall_ms=stall_ms,
-                                     imbalance_floor=imbalance_floor, score=score)
+                                     imbalance_floor=imbalance_floor, score=score, seed=seed)
         self.enemy_slot = enemy_slot
 
+        #: For every squad on the board, this side's share of its contracted region when that share last moved, and when it last moved. The stall clock, kept per squad exactly as the game side keeps it.
+        self._balance: Dict[int, Tuple[float, int]] = {}
         self.squads: Dict[int, SquadRecord] = {}
         self.phase = "opening"
         self.engagement: Optional[Engagement] = None
@@ -427,6 +460,12 @@ class Arena:
         our_budget = budget if ours_first else budget * weaker
         their_budget = budget * weaker if ours_first else budget
 
+        # The two missions and the two allowances, drawn here with everything else the fight is made of. See `Engagement.our_share`: a draw taken at the forming is skipped whenever the fight turns out to be stillborn, and one arm's stream then runs ahead of the other's for the rest of the episode.
+        our_share = self.random.uniform(*BUDGET_SHARE)
+        their_share = self.random.uniform(*BUDGET_SHARE)
+        our_task, our_stance = self.random.choice(CONTRACTS)
+        their_task, their_stance = self.random.choice(CONTRACTS)
+
         angle = self.random.uniform(0, 2 * math.pi)
         offset = (math.cos(angle) * self.separation / 2, math.sin(angle) * self.separation / 2)
         our_place = (site[0] - offset[0], site[1] - offset[1])
@@ -438,7 +477,8 @@ class Arena:
             return
 
         our_rows = self._rows(our_force, self._our_slot(observation), our_place)
-        their_rows = self._rows(their_force, self._their_slot(observation), their_place)
+        # The other side's scatter is the reflection of this side's rather than a copy of it. The two places are exact reflections about the site, so laying both sides' machines out at the same absolute angles makes the second side a TRANSLATION of the first and not a mirror of it: the two forces face the fight from different internal geometries, and which of a squad's machines is nearest the enemy is then decided by which seat it sits in.
+        their_rows = self._rows(their_force, self._their_slot(observation), their_place, mirror=True)
         self.session.scenario(self._interleave(our_rows, their_rows))
 
         self.known = {unit.id for unit in observation.unit_states}
@@ -448,7 +488,10 @@ class Arena:
                                      our_ordered=sum(kind.price for kind in our_force),
                                      their_ordered=sum(kind.price for kind in their_force),
                                      our_count=len(our_force), their_count=len(their_force),
-                                     our_wanted=_tally(our_force), their_wanted=_tally(their_force))
+                                     our_wanted=_tally(our_force), their_wanted=_tally(their_force),
+                                     our_share=our_share, their_share=their_share,
+                                     our_task=our_task, their_task=their_task,
+                                     our_stance=our_stance, their_stance=their_stance)
         self.statistics.engagements += 1
         self.statistics.spawned += len(our_force) + len(their_force)
         self.phase = "spawning"
@@ -495,10 +538,15 @@ class Arena:
         for squad_id, other in ((OURS, THEIRS), (THEIRS, OURS)):
             squad = self.squads[squad_id]
             target = self._region_of(self.squads[other])
-            # Drawn inside the loop so that the two sides get separate allowances, as they would from an operational layer pricing two missions against what each is for.
-            budget = max(200.0, squad.value * self.random.uniform(*BUDGET_SHARE))
-            contract = TaskContract(squad=squad_id, task=Task.ATTACK, target_region=target,
-                                    stance=Stance.AGGRESSIVE, cost_budget=budget,
+            # Drawn with the fight rather than here, so that the shared stream is consumed by the same amount whether or not the fight lives. The two sides get separate allowances and separate missions, as they would from an operational layer pricing two missions against what each is for; the allowance is a share of the squad's worth, which is not known until the squad has formed, so the share is what was drawn and this is where it is spent.
+            drawn = self.engagement
+            share = (drawn.our_share if squad_id == OURS else drawn.their_share) if drawn is not None else 0.75
+            task = (drawn.our_task if squad_id == OURS else drawn.their_task) if drawn is not None else Task.ATTACK
+            stance = ((drawn.our_stance if squad_id == OURS else drawn.their_stance)
+                      if drawn is not None else Stance.AGGRESSIVE)
+            budget = max(200.0, squad.value * share)
+            contract = TaskContract(squad=squad_id, task=task, target_region=target,
+                                    stance=stance, cost_budget=budget,
                                     deadline_ms=deadline, issued_at_ms=now)
             squad.contract = contract
             action.contracts.append(Contract(
@@ -507,6 +555,8 @@ class Arena:
                 deadline_ms=contract.deadline_ms, issued_at_ms=contract.issued_at_ms,
                 override=True))
 
+        # The stall clock belongs to the fight, not to the squad number: there are only two of those and they are handed to every fight of the episode in turn, so a clock left standing would let a squad open its fight already holding the last one's balance and read as stalled before it had moved.
+        self._balance.clear()
         self.phase = "fighting"
         self.until_ms = deadline
         self._alive = len(ours) + len(theirs)
@@ -531,6 +581,9 @@ class Arena:
         # The reflection of this side's anchor, so that the layer fighting from the other seat measures the same fight from the mirrored origin.
         if self.engagement is not None:
             rehome(their_view, point=self.engagement.their_place)
+        # Where each side's errand stands on the board that has just arrived, written before either side decides so that both read the same board's verdict, and written off each side's own view.
+        self._fold_status(view, their_view, now)
+
         sides = [(self.tactics, ours, view), (self.opponent, theirs, their_view)]
         if not self._ours_leads():
             sides.reverse()
@@ -641,9 +694,12 @@ class Arena:
             if squad.contract is None:
                 continue
             target = self._region_of(self.squads[other])
-            if target == squad.contract.target_region:
+            if (target == squad.contract.target_region and squad.contract.task == Task.ATTACK
+                    and squad.contract.stance == Stance.AGGRESSIVE):
                 continue
-            squad.contract = replace(squad.contract, target_region=target, issued_at_ms=now)
+            # Attacking aggressively whatever the fight was drawn under, because this is the board being cleared and not a mission: a squad left holding its fire would stand in the next fight's way for as long as the sweep runs. Written into the record as well as onto the wire, so what the squad is recorded as carrying is what it was actually sent. No decision is taken in this phase — the layers are not asked while a board is being swept — so nothing is trained on it.
+            squad.contract = replace(squad.contract, task=Task.ATTACK, stance=Stance.AGGRESSIVE,
+                                     target_region=target, issued_at_ms=now)
             action.contracts.append(Contract(
                 squad=squad_id, task=Task.ATTACK, stance=Stance.AGGRESSIVE,
                 target_region=target, cost_budget=squad.contract.cost_budget,
@@ -664,7 +720,60 @@ class Arena:
             squad.x, squad.y = state.x, state.y
             squad.spread = state.spread
             squad.losses = state.losses
-            squad.status = Status(state.status)
+            # The status is NOT taken from the block. Everything above is a statement about the squad's own units and means the same whoever owns them; the status is a statement about the ground its contract names, and the block's is read in this process's seat alone. It is written instead by `_fold_status`, off each side's own view, once both views exist.
+
+    def _fold_status(self, our_view, their_view, now: int) -> None:
+        """Writes each side's mission status from that side's own board, by the ladder the game side writes it by for a match.
+
+        The order the cases are tried in is the game's and carries the same meaning: a mission that took its region and ran late is a slow success rather than a failure, and the allowance is the thing an operational layer has to hear about soonest. A squad with nothing left is ACTIVE rather than anything else, because what it is worth is a statement about the fight it died in and this field is a statement about the errand.
+
+        Both seats by one rule, which is the whole point of doing it here at all: see the note on LOSING_SHARE for what reading it out of the game's own block did to the mirror.
+        """
+        for squad_id, board in ((OURS, our_view), (THEIRS, their_view)):
+            squad = self.squads.get(squad_id)
+            if squad is None:
+                continue
+            squad.status = self._mission_status(squad, board, now)
+
+    def _mission_status(self, squad: SquadRecord, board, now: int) -> Status:
+        """One squad's mission status, read off the board the side commanding it is looking at."""
+        contract = squad.contract
+        if contract is None:
+            return Status.ACTIVE
+        regions = {region.id: region for region in getattr(board, "regions", ())}
+        target = regions.get(contract.target_region)
+        # Run whatever else is true, for the reason the game side gives: a clock only updated on the periods no other status won would sit still through a spell of losing and then report a stall the instant the squad recovered.
+        stalled = target is not None and self._stalled(squad, target, now)
+        if not squad.members:
+            return Status.ACTIVE
+        if target is not None and target.enemy_value <= 0.0 and self._standing_on(squad, board, target):
+            return Status.COMPLETE
+        if contract.deadline_ms > 0 and now > contract.deadline_ms:
+            return Status.EXPIRED
+        if contract.cost_budget > 0 and squad.losses > contract.cost_budget * LOSING_SHARE:
+            return Status.LOSING
+        if stalled:
+            return Status.STALLED
+        return Status.ACTIVE
+
+    @staticmethod
+    def _standing_on(squad: SquadRecord, board, target) -> bool:
+        """Whether the squad itself is on the region its contract named, rather than whether anything of this side's happens to be there. Nearest by centre, which is how the game side answers the same question."""
+        regions = getattr(board, "regions", ())
+        if not squad.members or not regions:
+            return False
+        nearest = min(regions, key=lambda region: math.hypot(region.x - squad.x, region.y - squad.y))
+        return nearest.id == target.id
+
+    def _stalled(self, squad: SquadRecord, target, now: int) -> bool:
+        """Whether neither side has shifted the balance of the contracted region for long enough that going on is unlikely to shift it either. The clock is kept per squad and run every period whatever else is true."""
+        total = target.our_value + target.enemy_value
+        balance = 0.0 if total <= 0 else (target.our_value - target.enemy_value) / total
+        last, moved_at = self._balance.get(squad.id, (None, 0))
+        if last is None or abs(balance - last) >= STALL_MOVEMENT:
+            self._balance[squad.id] = (balance, now)
+            return False
+        return now - moved_at >= STALL_WINDOW_MS
 
     @staticmethod
     def _commissioned(fresh: Sequence, hostile: bool, wanted: Optional[Dict[int, int]]) -> List[int]:
@@ -784,15 +893,20 @@ class Arena:
             spent += kind.price
         return force
 
-    def _rows(self, force: Sequence, slot: int, place: Tuple[float, float]) -> List[List[float]]:
-        """One spawn row per unit for one side: type, player slot, position, count. Units are scattered a little so that they do not all arrive on the same point and spend the first seconds pushing each other apart. Returned a row at a time rather than run together, because the two sides' rows are interleaved before either order is sent."""
+    def _rows(self, force: Sequence, slot: int, place: Tuple[float, float],
+              mirror: bool = False) -> List[List[float]]:
+        """One spawn row per unit for one side: type, player slot, position, count. Units are scattered a little so that they do not all arrive on the same point and spend the first seconds pushing each other apart. Returned a row at a time rather than run together, because the two sides' rows are interleaved before either order is sent.
+
+        `mirror` turns the scatter through the half turn the board itself is built on, which is what the second side of a reflected pair wants: the same offsets negated, so the two forces are congruent about the point between them rather than one being the other slid across the board.
+        """
         rows: List[List[float]] = []
+        sign = -1.0 if mirror else 1.0
         for index, kind in enumerate(force):
             angle = 2 * math.pi * index / max(1, len(force))
             radius = 40.0 + 12.0 * index
             rows.append([float(kind.index), float(slot),
-                         place[0] + math.cos(angle) * radius,
-                         place[1] + math.sin(angle) * radius, 1.0])
+                         place[0] + sign * math.cos(angle) * radius,
+                         place[1] + sign * math.sin(angle) * radius, 1.0])
         return rows
 
     @staticmethod

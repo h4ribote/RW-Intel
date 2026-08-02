@@ -9,6 +9,7 @@ This module builds the board and runs both command chains over a bounded horizon
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -28,7 +29,11 @@ from ..control.policy.strategy import LOSS_ALLOWANCE_FLOOR, LOSS_ALLOWANCE_SHARE
 from ..control.policy.operations import Operations
 from ..control.policy.tactics import Tactics
 from ..control.policy.view import WorldView, build as build_view, rehome
-from .arena import Arena, MAX_UNITS, MINIMUM_FORCE, OURS, SETTLE_MS, SPAWN_WAIT_MS, THEIRS
+from .arena import (Arena, LOSING_SHARE as _LOSING_SHARE, MAX_UNITS, MINIMUM_FORCE, OURS, SETTLE_MS,
+                    SPAWN_WAIT_MS, STALL_MOVEMENT as _STALL_MOVEMENT,
+                    STALL_WINDOW_MS as _STALL_WINDOW_MS, THEIRS)
+
+log = logging.getLogger(__name__)
 
 #: How long an episode runs the two chains before it is scored, in game milliseconds. Long enough for a staged squad to march to a contest and fight the garrison, short enough that survivors do not wander into a catchment they were not sent to. Measured: at 120 s the staged squads have not resolved the contests — they survive but are still short of the garrisons — and the score is decided by the mirror garrisons alone, which cancel, giving a trivial self-play zero. At 300 s the squads reach and contest, the domination shares spread, and the choice moves the score. Swept as arms and picked by the resolution gate.
 HORIZON_MS = 300000
@@ -58,18 +63,22 @@ CONTEST_MAX = 700.0
 #: How far each staged squad's spawn point is offset from its side's one staging point, so several squads on a side do not all land on the same spot. Reflected exactly for the mirror side, so the two boards stay congruent.
 SQUAD_STAGGER = 120.0
 
+#: How near a contest point a freshly spawned unit is taken to be that contest's garrison rather than a staged squad's machine. Comfortably beyond the garrison's own scatter about its point and comfortably inside the catchment, so it names the garrison and nothing else.
+GARRISON_REACH = 250.0
+
+#: How near the point it was ordered at a mirrored opening unit has to stand to be counted as having arrived. A few tiles, because the engine settles a building onto its own grid rather than onto the point it was asked for, and far inside the clearance a contest disc or a staging point is drawn at, so nothing but the reflection itself can answer for it.
+MIRROR_ARRIVAL = 120.0
+
 #: How far from a staging point a freshly spawned unit is taken to belong to that side's squads. Comfortably beyond the squad stagger and internal scatter, and comfortably inside the march to a contest, so a garrison spawned at a contest point is never swept into a staging squad.
 STAGING_REACH = 800.0
 
 #: How many offsets are tried before an episode gives up on placing its contest pairs. A pair is rejected when its two points share a region, collide with a region already taken, sit within a catchment diameter of a point already placed, or reach anything that was already standing when the board was laid out.
 MAX_PAIR_ATTEMPTS = 400
 
-#: How a squad's mission status is read on this board, in the figures the game side reads it by for a match. They are restated here rather than imported because the game side is Java: a squad has lost enough when this share of its allowance is gone, and a region is stalled when this side's share of it has not moved by this much for this long.
-#:
-#: Derived here at all because this board's squads never pass the layer that would otherwise report them. The status was simply never written, so every squad on this board read ACTIVE from the first frame to the last however its errand went — and the inherited operational rule re-tasks a squad on exactly these statuses, so the ladder this arena measures learnt policies against issued one contract a squad and then held it for the whole horizon.
-LOSING_SHARE = 0.7
-STALL_MOVEMENT = 0.10
-STALL_WINDOW_MS = 30000
+#: How a squad's mission status is read on a constructed board, restated from the game side because the game side is Java. Kept on the engagement arena now that both constructed boards read it from each side's own view rather than out of a squad block written in one seat, and re-exported here because this is where the figures were first written down.
+LOSING_SHARE = _LOSING_SHARE
+STALL_MOVEMENT = _STALL_MOVEMENT
+STALL_WINDOW_MS = _STALL_WINDOW_MS
 
 #: What point a squad's terminal is read from, mixing the neutral half at nought with the opening ownership of the disc it was sent to at one. At nought the squad is paid the region's absolute domination, and that reading is why a layer trained on this arena learnt to attack nothing: measured on Hills at the default draw, a garrison holds its own disc through the horizon about 88 times in 100 whatever is sent there, while even four squads massed on one enemy disc take it only about 40 times in 100, so absolute domination pays a defender about +0.38 of a priority and an assailant about -0.10, and the best errand a squad can be given is one it was going to be paid for anyway. At one the terminal is what the errand changed on the ground it was sent to, which is the quantity the side score is a priority-weighted mean of, and the same two rates then pay an assault about +0.40 and a redundant defence about nothing.
 #:
@@ -107,6 +116,15 @@ TENURES = ("horizon", "tenure")
 
 #: Which of them a run pays unless it says otherwise.
 TENURE = "horizon"
+
+#: What is done about the free base every player with a starting position is given, which stands on this process's side alone because the sparring partner is a slot with no starting position.
+#:
+#: `mirror` spawns the reflection of everything standing when the board is laid out, owned by the other side, so the opening board is congruent unit for unit exactly as the staged squads and the garrisons are. `leave` is what this arena did before the reflection was placed, and it is kept as an arm rather than deleted because it is the only way to measure what the free base was doing.
+#:
+#: What it was doing is not small, and drawing the discs clear of the base does not answer it. The discs are what the episode is SCORED on; the base is what the layers READ. A vanguard's candidates are the regions carrying enemy strength, so the region this side's own base stands in is a candidate for the other side and for no one else — the other side sees an enemy force there and this side sees its own. While the operational ladder never re-tasked on this board the pull went nowhere, because the first contract of the episode was drawn when the contests outweighed everything and it then stood to the horizon. Once the squad statuses were written the ladder re-tasks on every stall, and a stalled squad re-picks against a candidate set that is asymmetric between the seats.
+STANDING_MIRROR = "mirror"
+STANDING_LEAVE = "leave"
+STANDINGS = (STANDING_MIRROR, STANDING_LEAVE)
 
 #: What a run calls the tactical layer that fought beneath both sides when that layer was the handwritten `Tactics` ladder — which is what the arena builds for itself when nothing else is handed to it, and what every measurement taken on this arena so far was made under. A run that froze trained tactical parameters under the arena instead names them by their content, so the two can never be mistaken for each other afterwards.
 SCRIPT_TACTICS = "script"
@@ -220,6 +238,13 @@ class OpsStatistics:
     #: `periods` is the operational decisions this side's squads were given over the episode, one per squad per operational frame it held a contract; `errands` is how many distinct contracts those decisions were divided into. Their ratio is the length of an errand in decisions, which is a description of how decisive an arm is — the handwritten ladder holds a squad on the errand it is running while a learnt layer re-draws every period. It is no longer a bound on how far the arena's payment reaches: every period is paid its own movement now, so the whole of the decision mass is reached whatever the ratio comes to. Written down per episode and per arm because the figure differs by arm and cannot be quoted once for the arena.
     periods: int = 0
     errands: int = 0
+    #: The same three counts for the other seat. Under the script arm both seats run one ladder on boards that are one reflection of each other, so a difference between the two columns is the board handing the two seats different decisions rather than the arms differing — which is what the pooled self-play score cannot separate on its own. Under any other arm the columns are two different policies and the comparison is against the script arm's columns instead.
+    their_periods: int = 0
+    their_errands: int = 0
+    their_on_priority: int = 0
+    their_massed: int = 0
+    #: What was done about the free base a starting position is given: `mirror` placed its reflection for the other side, `leave` left this side holding it alone. A draw setting in the strict sense — two runs made under different ones are two different boards — so it is journalled beside the horizon and the catchment.
+    standing: str = STANDING_MIRROR
     #: Of those decisions, how many named ground the episode is scored on. Counted against the SCORED weights and not against the dict the layers are told, which are two dicts now that unscored regions carry a weight too: what makes this figure worth writing down is that it says whether an arm went where the payment is, and a count of decisions that named any weighted region would say only that it went somewhere. Because it reads the scored weights, its meaning is unchanged by the unscored ones and figures taken before they existed still compare.
     #:
     #: It exists to separate two ways of ending up far from the scored ground, which the reach alone cannot tell apart. A layer that re-draws its errand every few periods never arrives anywhere, and ends mid-board with its contracts pointing at contests it kept leaving. A layer that contracts unscored ground is not going anywhere that counts in the first place — and the reward makes that a real temptation, because a squad sent to a region with no priority is paid exactly nought, while one sent to hold ground it already owns can only be paid less than nought. The first is answered by pricing the re-drawing; the second by the reward's own floor. Nothing in the record said which was happening.
@@ -248,6 +273,9 @@ class OpsStatistics:
                 "tactics": self.tactics, "operations": self.operations, "tenure": self.tenure,
                 "terminals": self.terminals, "periods": self.periods, "errands": self.errands,
                 "on_priority": self.on_priority, "massed": self.massed,
+                "their_periods": self.their_periods, "their_errands": self.their_errands,
+                "their_on_priority": self.their_on_priority, "their_massed": self.their_massed,
+                "standing": self.standing,
                 "our_departures": {int(k): v for k, v in self.our_departures.items()},
                 "their_departures": {int(k): v for k, v in self.their_departures.items()}}
 
@@ -267,7 +295,8 @@ class OpsArena(Arena):
                  horizon_ms: int = HORIZON_MS, our_squads: int = OUR_SQUADS,
                  catchment_radius: float = CATCHMENT_RADIUS, contest_pairs: int = CONTEST_PAIRS,
                  opening_baseline: float = OPENING_BASELINE, credit: str = CREDIT,
-                 tenure: str = TENURE, garrison_scale: float = GARRISON_SCALE) -> None:
+                 tenure: str = TENURE, garrison_scale: float = GARRISON_SCALE,
+                 standing: str = STANDING_MIRROR) -> None:
         if our_squads > SQUAD_SLOTS:
             # Refused before anything is built rather than degraded silently during the run, exactly as an unknown credit or tenure is, and before the board is touched because this is a statement about the settings alone. The operational cut writes one row per squad into a block of this many and the network names a squad to itself by a one-hot of the same width, so a ninth squad has no row to be described in and no slot to be asked about: it would be staged, fought, scored and paid its terminal while the layer deciding for it was handed a board on which it does not appear. The bound is the organisation layer's cap in a match, and this arena builds its squads itself and never passes that layer, so this is the only place the cap can be kept.
             raise ValueError("a side cannot stage more than %d squad(s) here: the operational cut has %d squad row(s) "
@@ -299,6 +328,9 @@ class OpsArena(Arena):
         if tenure not in TENURES:
             raise ValueError("the ground a deployment holds is read either %s" % " or ".join(TENURES))
         self.tenure = tenure
+        if standing not in STANDINGS:
+            raise ValueError("the free base a starting position is given is either %s" % " or ".join(STANDINGS))
+        self.standing = standing
         self.garrison_scale = garrison_scale
 
         self.phase = "opening"
@@ -313,6 +345,8 @@ class OpsArena(Arena):
         self.priorities: Dict[int, float] = {}
         #: What the layers are told the board is worth, which is the scored weights above plus a weight on every other region the reflection pairs. Kept apart from the scored weights because the two answer different questions and one dict answering both is what let a layer read the score off a feature.
         self.wanted: Dict[int, float] = {}
+        #: Who holds each region the reflection pairs, as +1 for this side and −1 for the other, written from the board's construction and turned over for the seat opposite. The wire's own ownership is nought everywhere here because the field has no economy, and two of the ladder's doctrine filters read nothing else.
+        self.ownership: Dict[int, float] = {}
         self.garrison_share: Dict[int, float] = {}    # region -> this side's share of the initial garrison worth, fixed at the draw
         self.our_home_id: Optional[int] = None
         self.their_home_id: Optional[int] = None
@@ -333,17 +367,22 @@ class OpsArena(Arena):
         #: Which doctrine each staged slot's force was drawn for, so the squad carries the doctrine it was built as rather than the one its first unit would be offered to.
         self._drawn: Dict[int, Doctrine] = {}
         self._period = 0
+        #: Operational periods alone, kept apart from the frame counter because the leader alternation has to alternate per decision of the kind being taken and the operational decision rides one frame in ten.
+        self._operational_period = 0
         #: When each of this side's squads was last handed a contract, so that a fresh one can be told from the same one standing. A contract carries the moment it was issued and the operational layer only writes a new one when something about it changed, so a change in this figure is exactly one errand ending and another beginning.
         self._issued: Dict[int, int] = {}
         #: For every squad on the board, both sides', the contract it is under and what it was worth when that contract was issued. That worth is the baseline its losses are measured from, which is the quantity its allowance is spent against and the one its LOSING status is read from.
         self._at_issue: Dict[int, Tuple[int, float]] = {}
         #: For every squad, this side's share of its contracted region when that share last moved, and when it last moved. The stall clock, kept per squad exactly as the game side keeps it.
         self._balance: Dict[int, Tuple[float, int]] = {}
+        #: Where the reflection of the opening board was ordered, and for which side, so that the arrival of each mirrored piece can be waited for and a board whose reflection could not be placed is refused rather than run one base short. A point is kept rather than a unit id because the order is placed before anything exists to have an id.
+        self._mirrored: List[Tuple[float, float, bool]] = []
         self._sandbox_sent = False
         # The draw's settings are written into the statistics at construction rather than at scoring, so that an episode which never reaches its horizon still says under what instrument it was run. The name of the tactical layer beneath both sides is one of them: whoever builds the arena is the only one who knows which parameters the factory closes over, and the arena cannot read it back off a layer afterwards.
         self.statistics = OpsStatistics(board=seed, horizon_ms=horizon_ms, radius=catchment_radius,
                                         squads=our_squads, pairs=contest_pairs, garrison=garrison_scale,
-                                        tactics=tactics_name, operations=operations_name)
+                                        tactics=tactics_name, operations=operations_name,
+                                        standing=standing)
 
     # ---- the one entry point (mirrors Arena.decide) ------------------------------------
 
@@ -469,6 +508,21 @@ class OpsArena(Arena):
             self.garrison_share[pair.defend_region] = 1.0
             self.garrison_share[pair.attack_region] = 0.0
 
+        self._mirrored = []
+        if self.standing == STANDING_MIRROR:
+            # The reflection of the opening board, which is the free base a starting position is given and which the sparring side has no counterpart for. Placed by the same reflection the squads and the garrisons are placed by, so what the two sides read is congruent and not merely what the arena spawned. A unit standing on the other side already — which a baseless sparring slot has none of — is reflected the other way, so the rule is the board's reflection rather than a rule about this side's base.
+            #
+            # The reflection changes nothing about the draw. `_draw_pairs` rejects a pair when EITHER member reaches something standing, and a pair's two members are each other's reflection, so a pair already clear of this side's base is clear of the reflected one by the same test read backwards. The discs the episode is scored on are therefore the same discs on the same boards.
+            for unit in observation.unit_states:
+                point = self._mirror((unit.x, unit.y), centre)
+                slot = our_slot if unit.hostile else their_slot
+                row = [float(unit.type_index), float(slot), point[0], point[1], 1.0]
+                if unit.hostile:
+                    our_rows.append(row)
+                else:
+                    their_rows.append(row)
+                self._mirrored.append((point[0], point[1], not unit.hostile))
+
         return our_rows, their_rows
 
     def _commission(self, observation: Observation, action: Action, now: int) -> None:
@@ -487,7 +541,11 @@ class OpsArena(Arena):
                                                  owner=self._their_slot(observation)))
 
         # Wait for the whole of both sides unless the spawn window has run out, in which case whatever arrived is what runs.
-        whole = len(self.squads) >= self.our_n and len(self.enemy) >= self.our_n
+        #
+        # Whole means unit for unit and not squad for squad. Counting squads, a side that got three of the five machines ordered for a slot registers that slot as arrived, the wait ends, and the board runs with one side short — on a field whose entire claim is that the two sides are congruent, and with nothing in the record to say it happened. The two sides are ordered against the same tallies, so the honest test is that each staged slot commissioned as many units as its mirror did.
+        arrived = self._mirrored_arrivals(fresh)
+        whole = (len(self.squads) >= self.our_n and len(self.enemy) >= self.our_n
+                 and self._congruent() and arrived >= len(self._mirrored))
         if not whole and now < self.until_ms:
             return
         if not self.squads or not self.enemy:
@@ -496,10 +554,57 @@ class OpsArena(Arena):
             self.statistics.refused = True
             self.phase = "done"
             return
+        if not self._congruent():
+            # One side commissioned fewer machines than its mirror did. The two sides were ordered against the same tallies, so this is the spawn queue running out of window rather than a difference between the arms, and a board run this way hands one side a standing advantage that the score cannot separate from a choice.
+            log.info("board %d: the two sides did not commission congruent squads, refusing the board",
+                     self.statistics.board)
+            self.refused = True
+            self.statistics.refused = True
+            self.phase = "done"
+            return
+        if arrived < len(self._mirrored):
+            # The reflection of the opening board could not be placed — the ground it reflects onto takes nothing, which is a fact about the map and not about either policy. Running anyway would put a free base on one side and none on the other, which is the asymmetry the reflection exists to remove, and it would do it silently. Refused whole, exactly as a board that cannot carry its contest pairs is.
+            log.info("board %d: %d of %d mirrored opening unit(s) never appeared, refusing the board",
+                     self.statistics.board, arrived, len(self._mirrored))
+            self.refused = True
+            self.statistics.refused = True
+            self.phase = "done"
+            return
         self.phase = "running"
         self.until_ms = now + self.horizon_ms
         # The scored window opens here, so the tenure reading is a mean over exactly the horizon and not over whatever stretch of it the region block happened to ride a frame in.
         self._marked_ms = now
+
+    def _congruent(self) -> bool:
+        """Whether each staged slot commissioned as many units as its mirror slot did.
+
+        The two sides are ordered against one tally per slot, so this is the board's own congruence read off what actually stands. It is checked rather than assumed because the spawn goes through the engine's command queue: the order is interleaved a unit at a time so that a window running out cuts both sides alike, and this is what says whether it did.
+        """
+        for slot in range(self.our_n):
+            ours = self.squads.get(slot)
+            theirs = self.enemy.get(self.our_n + slot)
+            if (len(ours.members) if ours is not None else 0) != (len(theirs.members) if theirs is not None else 0):
+                return False
+        return True
+
+    def _mirrored_arrivals(self, fresh) -> int:
+        """How many of the ordered reflections of the opening board are standing, matched point by point so that one arrival cannot answer for two.
+
+        Matched on position and side rather than on type, because a building the engine nudges onto its grid does not land on the point it was asked for. The tolerance is a few tiles: wide enough for that nudge, and far inside the clearance every contest disc and both staging points are drawn at, so nothing else can be counted as an arrival.
+        """
+        if not self._mirrored:
+            return 0
+        left = list(self._mirrored)
+        arrived = 0
+        for unit in fresh:
+            for index, (x, y, hostile) in enumerate(left):
+                if bool(unit.hostile) != hostile:
+                    continue
+                if math.hypot(unit.x - x, unit.y - y) <= MIRROR_ARRIVAL:
+                    left.pop(index)
+                    arrived += 1
+                    break
+        return arrived
 
     def _staged(self, slot: int, units, observation: Observation) -> SquadRecord:
         """One staged squad, carrying the doctrine its force was drawn for rather than the one its first unit would be offered to.
@@ -515,9 +620,13 @@ class OpsArena(Arena):
         if point is None:
             return {}
         reach2 = STAGING_REACH * STAGING_REACH
+        # A garrison is never a staged squad, and being far from the staging point is not enough to say so: a contest may be drawn near one, and a garrison of a type the slot's order asks for would then be taken into a taskable squad — on one side only, since the two contests of a pair are not both near the same staging point. The board knows where it put its garrisons, so the exclusion is by position against those points rather than by hoping the geometry keeps them apart. Rejecting such a draw instead would work and costs boards: on Hills it refused two in five, because a contest has to clear both staging points, both bases, every earlier pair and its own mirror.
+        garrisons = [garrison.point for garrison in self.garrisons]
         pool = [unit for unit in fresh
                 if bool(unit.hostile) == hostile
-                and (unit.x - point[0]) ** 2 + (unit.y - point[1]) ** 2 <= reach2]
+                and (unit.x - point[0]) ** 2 + (unit.y - point[1]) ** 2 <= reach2
+                and not any((unit.x - gx) ** 2 + (unit.y - gy) ** 2 <= GARRISON_REACH * GARRISON_REACH
+                            for gx, gy in garrisons)]
         assigned: Dict[int, List[int]] = {}
         for slot in slots:
             wanted = self._wanted.get(slot)
@@ -566,6 +675,30 @@ class OpsArena(Arena):
             wanted[first] = weight
             wanted[second] = weight
         self.wanted = wanted
+        # Who holds the ground, which this board had nobody at all holding. The wire's region row counts the resource points a side holds in a region, and a field built with the economy taken out has no extractor anywhere, so `held_by_us` and `held_by_enemy` were nought on every row of every board while both move all match.
+        #
+        # Two of the layers' own filters read exactly those fields, so the constant was not one dead input among many: the handwritten ladder gives a garrison the ground this side holds that pays, and a raider the ground it does not hold that pays. With nothing held anywhere, every garrison-doctrine squad fell through to its last resort — the home region — and every raider to any region at all. A third of the staged squads were therefore answering a different question here from the one they answer in a match, and the learnt layer was measured against a ladder crippled in that way.
+        #
+        # Written from the board's own construction rather than drawn free: a side holds the contest its own garrison opens on, which is the same statement the garrison shares make and the one the score is about. The pairs the reflection makes but no contest was drawn on are dealt out a side each, so that ground the layers can see is owned rather than empty, and a region that reflects onto itself is held by neither — anything else would be a prize one seat has and the other cannot answer. Antisymmetric under the mirror map by construction, which the assertion below fixes.
+        ownership: Dict[int, float] = {}
+        partner: Dict[int, int] = {}
+        for pair in self.pairs:
+            ownership[pair.defend_region] = 1.0
+            ownership[pair.attack_region] = -1.0
+            partner[pair.defend_region] = pair.attack_region
+            partner[pair.attack_region] = pair.defend_region
+        for first, second in self._quiet_pairs():
+            if first == second:
+                continue
+            ours_first = self.random.random() < 0.5
+            ownership[first] = 1.0 if ours_first else -1.0
+            ownership[second] = -1.0 if ours_first else 1.0
+            partner[first] = second
+            partner[second] = first
+        for region, held in ownership.items():
+            assert ownership.get(partner.get(region, -1)) == -held, (
+                "the synthesised ownership is not antisymmetric under the mirror map")
+        self.ownership = ownership
         # A posture drawn per board, with the two orders it decides read off the same tables a match reads them off.
         #
         # Pinned to ARM before, with the other two drawn independently of it and of each other. Both halves of that were wrong in the same way. The posture is five of the operational cut's global features, so four of them were nought and one was one on every board this arena has ever drawn, while in a match all five move; and `offensive` and the loss allowance are not free quantities in a match at all — they are a table lookup on the posture, so drawing them apart from it produced combinations a match cannot emit, and the layer was shown a board saying "hold the front, and press" that no strategic layer will ever say. The posture is one statement about the board and identical to both sides, so drawing it changes nothing about the mirror.
@@ -621,10 +754,10 @@ class OpsArena(Arena):
 
         operational = bool(observation.blocks & BLOCK_REGIONS)  # region force totals ride these frames
         # Each side reads the board from where it stages out of: its regions measured again from its own staging region, since the wire measures every distance from this process's base and the inverted view would otherwise read our marches as its own, and its bearing anchored at the staging POINT rather than at that region's centre. The two staging points are drawn as exact reflections while the region nearest each of them is whatever the map put there, so the regions need not be a pair at all — and on any board whose region table is not itself symmetric, which is every real map, anchoring the layer beneath at a region's centre would make a squad and its mirror read as two different fights. What this cannot repair is physical march distance or region-geometry congruence; that residual is what the self-play mean is watched for.
-        our_view = self._contacts(rehome(view, self.our_home_id, self._our_pt), observation)
+        our_view = self._contacts(rehome(view, self.our_home_id, self._our_pt), observation, ours=True)
         their_view = self._contacts(rehome(
             build_view(observation, self.catalogue, None, self.last_regions, invert=True),
-            self.their_home_id, self._their_pt), observation)
+            self.their_home_id, self._their_pt), observation, ours=False)
 
         # Where each squad's errand stands on the board that has just arrived, written before either side decides so that both sides' layers read the same board's verdict. It needs the two views and so cannot ride with the rest of the fold, which runs before there are any.
         self._fold_status(our_view, their_view, now)
@@ -634,8 +767,10 @@ class OpsArena(Arena):
 
         sides = [(self.our_ops, self.our_tac, self.squads, our_view, OURS),
                  (self.their_ops, self.their_tac, self.enemy, their_view, THEIRS)]
-        # Alternate the leader on a period-count parity, so whatever a period's leader gains falls on both sides equally over the horizon. Keyed on a monotone period counter like the engagement arena's, not on game time, which would not alternate evenly across irregular operational frames.
-        if self._period % 2 == 1:
+        # Alternate the leader, so whatever a period's leader gains falls on both sides equally over the horizon.
+        #
+        # Counted per decision of the KIND being taken, which is the correction that made it alternate at all. The frame counter advances every tactical frame and the operational decision rides one frame in ten, so keyed on that counter alone the operational leader was whatever the parity of ten happened to be — the same seat, every operational period, for the whole horizon and for every board. That is the one asymmetry an alternation exists to remove, and it was removing it from the fighting alone.
+        if (self._operational_period if operational else self._period) % 2 == 1:
             sides.reverse()
 
         for ops, tac, squads, board, side in sides:
@@ -670,28 +805,45 @@ class OpsArena(Arena):
         # Likewise after both sides have decided: a contract issued this period sets the worth its losses will be measured from, and that worth is the one the squad carries as it takes the errand on.
         self._rebaseline()
         self._period += 1
+        if operational:
+            self._operational_period += 1
 
     def _survey(self) -> None:
         """Counts one operational period for each of this side's squads that holds a contract, and one errand each time a squad is handed a fresh one.
 
         This is how decisive an arm is: an episode in which four contracts stood from the staging point to the horizon and one in which they were re-drawn every period score alike, report the same shares and the same terminals, and are told apart by nothing else in the record. It is no longer a statement about how far the arena's payment reaches — every period is now paid the movement of the squad's own scored figure, so the payments reach every decision whatever the errands come to — but it remains the one figure that says whether an arm settled on an errand or kept changing its mind, which is a real difference between arms and a real thing to read a run by.
 
-        Read off the contracts the layers wrote onto the squad records rather than off any layer's own bookkeeping, so that it costs the same and means the same for every arm — the handwritten ladder, the pinned deployment, the concentrating arm and a learnt network alike — and so that an arm which keeps no trajectories is still measured. This side only: the statistics belong to the process's own side and the enemy's periods are the mirror's business.
+        Read off the contracts the layers wrote onto the squad records rather than off any layer's own bookkeeping, so that it costs the same and means the same for every arm — the handwritten ladder, the pinned deployment, the concentrating arm and a learnt network alike — and so that an arm which keeps no trajectories is still measured.
+
+        Counted for BOTH sides, and that is not bookkeeping for its own sake. Under the script arm the two sides run one ladder on boards that are one reflection of each other, so the two counts have to agree up to the draw; where they do not, the board is handing the two seats different decisions, and the pooled self-play score — which is what says whether the arena leans — cannot tell that from a fair board played unevenly. The first thing the two counts caught was the free base: with the reflection of the opening board left out, the seat that could see an enemy force standing at the other's base named scored ground far less often than the seat that could not.
         """
-        held = [squad.contract.target_region for squad in self.squads.values() if squad.contract is not None]
-        for squad in self.squads.values():
-            contract = squad.contract
-            if contract is None:
-                continue
-            self.statistics.periods += 1
-            if self.priorities.get(contract.target_region, 0.0) > 0.0:
-                self.statistics.on_priority += 1
-            # Counted against the contracts standing this period, so it says what the allocation was rather than what any one layer meant by it, and it is the same count for every arm.
-            if held.count(contract.target_region) > 1:
-                self.statistics.massed += 1
-            if self._issued.get(squad.id) != contract.issued_at_ms:
-                self._issued[squad.id] = contract.issued_at_ms
-                self.statistics.errands += 1
+        for squads, mine in ((self.squads, True), (self.enemy, False)):
+            held = [squad.contract.target_region for squad in squads.values() if squad.contract is not None]
+            for squad in squads.values():
+                contract = squad.contract
+                if contract is None:
+                    continue
+                if mine:
+                    self.statistics.periods += 1
+                else:
+                    self.statistics.their_periods += 1
+                if self.priorities.get(contract.target_region, 0.0) > 0.0:
+                    if mine:
+                        self.statistics.on_priority += 1
+                    else:
+                        self.statistics.their_on_priority += 1
+                # Counted against the contracts standing this period, so it says what the allocation was rather than what any one layer meant by it, and it is the same count for every arm.
+                if held.count(contract.target_region) > 1:
+                    if mine:
+                        self.statistics.massed += 1
+                    else:
+                        self.statistics.their_massed += 1
+                if self._issued.get(squad.id) != contract.issued_at_ms:
+                    self._issued[squad.id] = contract.issued_at_ms
+                    if mine:
+                        self.statistics.errands += 1
+                    else:
+                        self.statistics.their_errands += 1
 
     # ---- scoring and per-decision terminal ---------------------------------------------
 
@@ -1041,55 +1193,30 @@ class OpsArena(Arena):
         Each side is read off its own board, since a status is about the region the contract named as that side sees it.
         """
         for squads, board in ((self.squads, our_view), (self.enemy, their_view)):
-            regions = {region.id: region for region in board.regions}
             for squad in squads.values():
-                contract = squad.contract
-                if contract is None:
-                    squad.status = Status.ACTIVE
-                    continue
-                target = regions.get(contract.target_region)
-                stalled = target is not None and self._stalled(squad, target, now)
-                if not squad.members:
-                    squad.status = Status.ACTIVE
-                elif target is not None and target.enemy_value <= 0.0 and self._standing_on(squad, board, target):
-                    squad.status = Status.COMPLETE
-                elif contract.deadline_ms > 0 and now > contract.deadline_ms:
-                    squad.status = Status.EXPIRED
-                elif contract.cost_budget > 0 and squad.losses > contract.cost_budget * LOSING_SHARE:
-                    squad.status = Status.LOSING
-                elif stalled:
-                    squad.status = Status.STALLED
-                else:
-                    squad.status = Status.ACTIVE
+                squad.status = self._mission_status(squad, board, now)
 
-    @staticmethod
-    def _standing_on(squad: SquadRecord, board: WorldView, target) -> bool:
-        """Whether the squad itself is on the region its contract named, rather than whether anything of this side's happens to be there. Nearest by centre, which is how the game side answers the same question."""
-        if not squad.members or not board.regions:
-            return False
-        nearest = min(board.regions, key=lambda region: math.hypot(region.x - squad.x, region.y - squad.y))
-        return nearest.id == target.id
+    def _contacts(self, view: WorldView, observation: Observation, ours: bool = True) -> WorldView:
+        """Writes each region's contact record and its ownership from the board's own construction, for the side reading it.
 
-    def _stalled(self, squad: SquadRecord, target, now: int) -> bool:
-        """Whether neither side has shifted the balance of the contracted region for long enough that going on is unlikely to shift it either. The clock is kept per squad and run every period whatever else is true, for the reason the game side gives: a clock only updated on the periods no other status won would sit still through a spell of losing and then report a stall the instant the squad recovered."""
-        total = target.our_value + target.enemy_value
-        balance = 0.0 if total <= 0 else (target.our_value - target.enemy_value) / total
-        last, moved_at = self._balance.get(squad.id, (None, 0))
-        if last is None or abs(balance - last) >= STALL_MOVEMENT:
-            self._balance[squad.id] = (balance, now)
-            return False
-        return now - moved_at >= STALL_WINDOW_MS
-
-    def _contacts(self, view: WorldView, observation: Observation) -> WorldView:
-        """Writes each region's contact record from what is standing there for the side reading it, because the wire's record cannot be turned over and the inverted side would otherwise read this process's own fog as its own contacts.
+        Two fields, one rewrite, because both are wire fields this constructed board cannot leave as they arrive. The contact record cannot be turned over by the inverting view builder, and the ownership is nought everywhere because the field has no economy for anybody to hold a resource point with — while the ladder's own doctrine filters read exactly that field, so a garrison here was offered nothing it holds and fell through to the home region on every board.
 
         The record on the wire is the moment an enemy was last run into in a region, and it is kept for the seat this process occupies. `build(invert=True)` turns the ownership and the force totals over and leaves that field pointing the way it pointed, so the mirror side is told the enemy is standing on the ground it holds and nowhere near the ground it is attacking — and in a constructed arena that leans the same way every period rather than averaging out. The row carries no counterpart field to swap it with, so the choice is between adding one to the protocol and rebuilding the record here; this is the second, and it is confined to this arena because a match has only one seat and its record is right.
 
         Both sides are rewritten and not only the mirror, since a rule applied to one side and not the other is the same defect in a different place. The rule is the one the agent itself applies with the fog off: an enemy is in contact where an enemy is standing, which the already-inverted force totals say exactly. What it gives up is the memory in the wire's timestamp — a region an enemy left a moment ago reads as clear rather than as recently seen — and that memory is a fog quantity this arena does not run with.
+
+        The ownership is read out of the board's own construction and turned over for the seat opposite, so the two sides are handed the same statement about the same ground from their own side of it. A region holds all of its resource points for whoever owns it and none for the other, which is the strongest form the wire's count can take and the one that makes a region either worth defending or worth raiding rather than neither.
         """
-        view.regions = [replace(region,
-                                enemy_seen_at_ms=observation.game_time_ms if region.enemy_value > 0 else 0)
-                        for region in view.regions]
+        held = self.ownership
+        sign = 1.0 if ours else -1.0
+        rows = []
+        for region in view.regions:
+            owner = sign * held.get(region.id, 0.0)
+            rows.append(replace(region,
+                                enemy_seen_at_ms=observation.game_time_ms if region.enemy_value > 0 else 0,
+                                held_by_us=region.resources if owner > 0 else 0,
+                                held_by_enemy=region.resources if owner < 0 else 0))
+        view.regions = rows
         return view
 
     # ---- geometry ----------------------------------------------------------------------

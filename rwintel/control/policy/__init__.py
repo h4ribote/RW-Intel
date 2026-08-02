@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from ...wire import Action, BLOCK_REGIONS, Contract, Observation, encode_action
+from ...wire import Action, BLOCK_REGIONS, BUILT, Contract, Observation, encode_action
 from ...wire.action import Status
 from .catalogue import Catalogue
 from .contracts import (
@@ -214,8 +214,10 @@ class ScriptPolicy:
             credits=observation.credits,
             military_value=sum(s.value for s in view.fighters),
             # Two pairs, each comparing like with like: the mobile armed force on both sides, and everything standing on both sides. The enemy's roles come off the same catalogue ours do, so what is left out of their fighting strength is what is left out of ours.
-            our_value=sum(s.value for s in view.ours),
-            enemy_value=sum(s.value for s in view.enemies),
+            #
+            # The total pair counts FINISHED units only, which is what the match's own scoring counts: the game side sums a unit's price only once it is built. Counting a half-raised factory at its full price here would make the strategic layer's potential — which is the running form of that very score — read a board the terminal will not agree with, and the disagreement would be largest exactly where the layer is deciding whether to build one.
+            our_value=sum(s.value for s in view.ours if s.unit.built >= BUILT),
+            enemy_value=sum(s.value for s in view.enemies if s.unit.built >= BUILT),
             enemy_military_value=sum(s.value for s in view.enemies
                                      if s.role not in (Role.STRUCTURE, Role.BUILDER)),
             held=sum(r.held_by_us for r in view.regions),

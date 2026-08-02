@@ -237,6 +237,8 @@ public final class RwAgent {
         byte[] action = link.takeAction();
         if (action != null) commander.apply(game, action);
 
+        sampleStanding(game, now);
+
         int blocks = Wire.BLOCK_SQUADS | Wire.BLOCK_UNITS;
         if (lastOperationalMs == Integer.MIN_VALUE || now - lastOperationalMs >= operationalMs) {
             // Events ride the operational frame because the layer that consumes them, the one that forms and retires squads, runs there. They are accumulated meanwhile rather than dropped.
@@ -250,6 +252,44 @@ public final class RwAgent {
             // Cleared only once the frame carrying them has actually gone. An event describes a change, so reporting one twice is reporting a change that did not happen, but dropping one is worse: the layer that forms and retires squads has no other way to learn of it.
             world.events.clear();
         }
+    }
+
+    /**
+     * How far before the end the board the scoring weights are fitted on is taken from, in game milliseconds.
+     *
+     * The design fits the weights on the condition that the score just BEFORE a decision agrees with who won it, and what the finished event carries is the board the episode ended ON. For a decided match that board is taken after the loser has been destroyed, so a fit made on it is a fit on a question nobody has to ask: every weighting calls a board with one side left correctly. The board the score is actually used on is one where both sides are still standing, which is what this is.
+     *
+     * Half a game minute, because that is comfortably longer than the last exchange of a match and comfortably shorter than the stretch over which a match is decided. It is reported beside the sample rather than assumed, since an episode shorter than this has no such board and says so.
+     */
+    private static final int BEFORE_MS = 30000;
+
+    /** How often the rolling board is taken. Fine enough that the sample handed over is within this of the moment asked for, coarse enough that walking every unit for it costs nothing against a tactical period. */
+    private static final int STANDING_SAMPLE_MS = 5000;
+
+    private static int lastStandingMs = Integer.MIN_VALUE;
+    private static final java.util.ArrayDeque<int[]> standingWhen = new java.util.ArrayDeque<int[]>();
+    private static final java.util.ArrayDeque<String> standingWhat = new java.util.ArrayDeque<String>();
+
+    /**
+     * Keeps a short history of where the sides stood, so that the end of the episode can be described by a board taken before it.
+     *
+     * Only as much of it as {@link #BEFORE_MS} asks for is kept: everything older than that is already past the moment that will be wanted, so holding it would be holding a match's worth of boards to hand over one of them.
+     */
+    private static void sampleStanding(Object game, int now) throws Exception {
+        if (lastStandingMs != Integer.MIN_VALUE && now - lastStandingMs < STANDING_SAMPLE_MS) return;
+        lastStandingMs = now;
+        standingWhen.addLast(new int[]{now});
+        standingWhat.addLast(driver.standing(game));
+        while (standingWhen.size() > 1 && now - standingWhen.getFirst()[0] > BEFORE_MS + STANDING_SAMPLE_MS) {
+            standingWhen.removeFirst();
+            standingWhat.removeFirst();
+        }
+    }
+
+    private static void clearStanding() {
+        lastStandingMs = Integer.MIN_VALUE;
+        standingWhen.clear();
+        standingWhat.clear();
     }
 
     private static void sendHello(Object game) throws Exception {
@@ -386,6 +426,8 @@ public final class RwAgent {
         episodeRunning = true;
         lastTacticalMs = Integer.MIN_VALUE;
         lastOperationalMs = Integer.MIN_VALUE;
+        // The rolling board belongs to the episode that has just ended; carried over, the first sample of this one would be a board from the last one.
+        clearStanding();
 
         // Any decision left over from the episode that just ended names units that no longer exist.
         link.takeAction();
@@ -467,6 +509,14 @@ public final class RwAgent {
         event.put("team", self == null ? -1 : engine.team(self));
         event.put("timeout", driver.settings().maxSeconds > 0 && seconds >= driver.settings().maxSeconds);
         event.raw("standing", driver.standing(game));
+        // And the board as it stood half a minute earlier, which is the one the scoring weights have to be fitted on: the board an episode ENDS on has the loser already destroyed, and every weighting calls that one correctly. The oldest sample still held is the one nearest the moment asked for, since anything older than that is dropped as it is taken.
+        if (!standingWhat.isEmpty()) {
+            int at = standingWhen.getFirst()[0];
+            if (seconds * 1000 - at >= BEFORE_MS - STANDING_SAMPLE_MS) {
+                event.raw("before", standingWhat.getFirst());
+                event.put("beforeSeconds", at / 1000);
+            }
+        }
         // An episode that fell out of step half way through is not one whose result may be used, so the verdict travels with the result rather than having to be asked for afterwards, by which time the next episode has already reset it.
         event.raw("sync", driver.synchronisation(game));
         sendEpisodeEvent(event.toString());

@@ -51,7 +51,8 @@ from .net import (
     load_encoded,
     reads,
 )
-from .ops_arena import CATCHMENT_RADIUS, GARRISON_SCALE, HORIZON_MS, SCRIPT_TACTICS, OpsArena
+from .ops_arena import (CATCHMENT_RADIUS, GARRISON_SCALE, HORIZON_MS, SCRIPT_TACTICS,
+                        STANDING_MIRROR, STANDINGS, OpsArena)
 
 log = logging.getLogger(__name__)
 
@@ -201,7 +202,7 @@ def _arm(arguments, arm: "Arm", arms: int = 1, frozen: FrozenTactics = FrozenTac
                         seed=_arena_seed(arguments.seed, session, arms),
                         horizon_ms=arguments.horizon * 1000, our_squads=arguments.squads,
                         catchment_radius=arguments.radius, contest_pairs=arguments.pairs,
-                        garrison_scale=arguments.garrison)
+                        garrison_scale=arguments.garrison, standing=arguments.standing)
     return build
 
 
@@ -317,6 +318,11 @@ def report(summary: Summary, arm: str = "script", reading: str = "side_score") -
             log.info("the interval holds nought, so this arm is not told apart from the script by these episodes")
     elif outside:
         log.warning("the pooled side score is outside two standard errors of nought, so the board leans under this draw and a policy measured on it would be reading the lean: find and remove it before trusting the arena")
+    elif summary.sd <= 0.0:
+        # A gate that cannot fail is not a gate. With no spread at all the interval is nought wide, the mean sits inside it whatever it is, and the run reports a pass — while a board on which every episode scores identically has resolved nothing, which is the one condition under which the self-play zero is met trivially and means nothing. It has been reached before: at a horizon too short for the staged squads to reach their contests, the mirror garrisons cancel and every board comes back at exactly nought.
+        log.warning("every scored episode came back at the same figure, so this board resolved nothing and its "
+                    "self-play zero is the mirror garrisons cancelling rather than a board with no lean: check the "
+                    "horizon, the catchment and whether the squads reached their contests at all")
     else:
         log.info("the pooled side score holds nought within two standard errors, which is the self-play zero the arena has to pass before it is trusted")
 
@@ -405,9 +411,11 @@ def signal(sessions, arm: Optional[str] = None) -> None:
     The three figures are the decisions the squads were given, the errands those decisions were divided into, and how many horizon payments actually landed on a decision. The last is nought for every arm of this runner and that is not a fault: no arm here is handed a rollout, so no decision is recorded and there is nothing for a payment to land on. It is reported all the same, because it is the figure a training run has to be read by and a measuring run is where the errand lengths it is compared against are taken.
     """
     periods = errands = terminals = staged = on_priority = massed = 0
+    their_periods = their_errands = their_on_priority = 0
     # Whether the fields are there at all, kept apart from their values: an episode written before one existed carries no count, and a missing count read as nought would report an arm as having named no scored ground, or never massed, when nothing had asked.
     counted = False
     counted_massing = False
+    counted_theirs = False
     for session in sessions:
         for record in session.records:
             if (arm is not None and record.arm != arm) or not record.statistics.get("scored"):
@@ -422,6 +430,11 @@ def signal(sessions, arm: Optional[str] = None) -> None:
             if "massed" in record.statistics:
                 counted_massing = True
                 massed += int(record.statistics["massed"])
+            if "their_periods" in record.statistics:
+                counted_theirs = True
+                their_periods += int(record.statistics["their_periods"])
+                their_errands += int(record.statistics.get("their_errands", 0))
+                their_on_priority += int(record.statistics.get("their_on_priority", 0))
     if not periods or not errands:
         return
     # No share of the decisions is quoted any more. It used to be `min(staged, errands) / errands`, on the ground that the horizon paid each squad's last errand and no other, and that ground is gone: every period is paid its own movement now, so a payment reaches every decision whatever the errands come to, and the old figure would assert the opposite of the truth on every run.
@@ -436,10 +449,17 @@ def signal(sessions, arm: Optional[str] = None) -> None:
     if counted_massing:
         log.info("%d of them were about a squad sharing its region with another of this side, which is %.0f per cent",
                  massed, 100.0 * massed / periods)
+    # And the same two figures for the seat opposite. Under the script arm the two seats are one ladder on two reflections of one board, so the columns have to agree up to the draw; a gap between them is the board handing the two seats different decisions, which is exactly what a leaning self-play mean is made of and what the score alone cannot separate from a fair board played unevenly.
+    if counted_theirs and their_periods and their_errands:
+        log.info("the seat opposite took %d decision(s) over %d errand(s) (%.1f per errand) and named priority ground "
+                 "in %.0f per cent of them, against this arm's %.1f and %.0f per cent",
+                 their_periods, their_errands, their_periods / their_errands,
+                 100.0 * their_on_priority / their_periods, periods / errands,
+                 100.0 * on_priority / periods if counted else float("nan"))
     _report_departures(sessions, arm)
 
 
-def _report_departures(sessions: Sequence, arm: str) -> None:
+def _report_departures(sessions: Sequence, arm: Optional[str] = None) -> None:
     """What the frozen tactical layer chose beneath each of the two sides, side by side.
 
     The two sides run one policy on boards that are one reflection of each other, so a fighter that reads only distances and strengths gives two counts that differ by the draw. A trained one need not: the reflection is congruent in what the layer is handed and not in the ground it is handed it about, so a decision boundary can fall between the two seats and make them play differently on every board of a run. Measured, the self-play mean leans by up to about two hundredths under some sets of trained parameters and by nothing under others and under the handwritten ladder, which is exactly what that would look like from above. This is what it looks like from underneath, and nothing else recorded here can separate it from an even board fought unevenly by chance.
@@ -450,7 +470,11 @@ def _report_departures(sessions: Sequence, arm: str) -> None:
     theirs: Dict[int, int] = {}
     for session in sessions:
         for record in session.records:
-            if record.arm != arm:
+            # No arm named is every arm, which is the training runner's case: it has one arm and calls its signal line
+            # without naming it. Compared against None instead, the filter matched nothing and this diagnostic — the
+            # one that says whether the frozen fighter plays the two seats alike — was silently empty in every
+            # training run, which is exactly the run whose fighter nobody has looked at yet.
+            if arm is not None and record.arm != arm:
                 continue
             for kind, count in (record.statistics.get("our_departures") or {}).items():
                 ours[int(kind)] = ours.get(int(kind), 0) + int(count)
@@ -501,8 +525,11 @@ def measure(arguments) -> Dict[str, Summary]:
         journal=Journal(path),
     )
     server = Server(settings)
-    log.info("measuring the operations arena %s arm(s) over %d board(s) each on %d instance(s), horizon %ds",
-             ", ".join(arm.label for arm in arms), arguments.episodes, arguments.instances, arguments.horizon)
+    # The seed is in the opening line because the boards are the seed: a measuring run made at the seed a policy was
+    # trained on is a run replaying the boards it was fitted to, and the two runners' defaults are the same number.
+    log.info("measuring the operations arena %s arm(s) over %d board(s) each on %d instance(s), horizon %ds, seed %d",
+             ", ".join(arm.label for arm in arms), arguments.episodes, arguments.instances, arguments.horizon,
+             arguments.seed)
     try:
         sessions = server.serve()
     except KeyboardInterrupt:
@@ -573,6 +600,8 @@ def main(argv=None) -> int:
     parser.add_argument("--radius", type=float, default=CATCHMENT_RADIUS, help="world units a contest's catchment disc reaches; sized to the engagement standoff so an assaulting squad registers")
     parser.add_argument("--garrison", type=float, default=GARRISON_SCALE,
                         help="credits a contested region's defender is drawn out of, which is what decides whether taking ground pays at all; a defender too strong for the squads a side can bring makes holding what one already owns the best play")
+    parser.add_argument("--standing", choices=STANDINGS, default=STANDING_MIRROR,
+                        help="what is done about the free base a starting position is given, which stands on this side alone: mirror places its reflection for the other side so the opening board is congruent, leave runs the board one base short as this arena did before the reflection was placed")
     parser.add_argument("--max-seconds", type=int, default=0,
                         help="game time an episode is cut off at, defaulting to the horizon plus the settle and spawn waits and a margin")
     parser.add_argument("--assets", default=None)

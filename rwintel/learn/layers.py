@@ -22,6 +22,7 @@ from ..control.policy.view import WorldView
 from .deciders import Choice
 from .encoding import (POSTURES, operational_slots, operational_state, region_mask, strategic_state,
                        tactical_state, task_mask)
+from ..eval.scoring import OPENING_WEIGHTS
 from .reward import (DISCOUNT as REWARD_DISCOUNT, WIPED_REWARD, OperationalReward, StrategicReward,
                      TacticalReward)
 from .rollout import Rollout, Step
@@ -235,7 +236,8 @@ class LearntStrategy(Strategy):
         self.decider = decider
         self.rollout = rollout
         self.instance = instance
-        self.reward = StrategicReward(discount=discount)
+        # The potential is the running form of the very quantity the match is scored on, so the weight it is taken at is the score's own rather than a one written here. Handed in from the scoring module so that the two cannot silently disagree: the moment the weights are fitted away from military-only, this reads the same figure the score does, and where the score has weight this layer cannot observe in flight — the enemy's income is not visible from inside a match — the disagreement is the stated limit rather than a hidden one.
+        self.reward = StrategicReward(discount=discount, military_weight=OPENING_WEIGHTS.military)
         #: The one decision awaiting payment, held until the next period says what the board did under it.
         self.pending: Optional[Step] = None
         #: Shaping earned in a period where no decision was waiting to be paid, carried to the next one that has, for the reason the other two layers' ledgers of the same name give. It fires here whenever a human has the posture pinned: the board goes on moving and this layer is not the one moving it, so the term is carried rather than dropped and the sum still telescopes.

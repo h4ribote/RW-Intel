@@ -719,6 +719,13 @@ def _report_training(sessions, opponent: str) -> None:
 def train_operations(arguments) -> int:
     from .net import OperationalNet
 
+    if arguments.discount is not None or arguments.trace is not None:
+        # Refused rather than ignored. The operational reward in a match builds its own returns and reads neither of these, so a run given them would be told nothing and would produce a policy fitted under the defaults while its command line said otherwise — and the command line is what a later reader has to go on.
+        log.error("the operational run in a match does not read --discount or --trace: its returns are built by the "
+                  "operational reward itself. Ask for them on the constructed arena's runner (ops_train), or leave "
+                  "them off")
+        return 2
+
     device = _device(arguments.device)
     net = OperationalNet().to(device)
     _load(net, arguments.load, device)

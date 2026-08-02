@@ -43,7 +43,10 @@ from rwintel.learn.ops_arena import (
     OPENING_BASELINE,
     OUR_SQUADS,
     OURS,
+    MIRROR_ARRIVAL,
     SCRIPT_TACTICS,
+    STANDING_LEAVE,
+    STANDING_MIRROR,
     TENURE,
     THEIRS,
     OpsArena,
@@ -142,7 +145,7 @@ _CORNERS = [(4000.0, 4000.0), (4000.0, -4000.0), (-4000.0, 4000.0), (-4000.0, -4
 
 
 def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pairs=CONTEST_PAIRS,
-           sites=None, credit=CREDIT, tenure=TENURE):
+           sites=None, credit=CREDIT, tenure=TENURE, standing=STANDING_MIRROR):
     """An arena assembled field by field, as everywhere the arena is exercised without a game. The heavy constructor builds command layers from the type catalogue the game sent at HELLO, which is not what the geometry and the scoring need."""
     arena = OpsArena.__new__(OpsArena)
     arena.session = session
@@ -157,6 +160,8 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena.credit = credit
     arena.tenure = tenure
     arena.garrison_scale = GARRISON_SCALE
+    arena.standing = standing
+    arena._mirrored = []
     arena.enemy_slot = None
     arena.phase = "opening"
     arena.squads = {}
@@ -167,6 +172,7 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena.mirror_of = {}
     arena.orders = None
     arena.priorities = {}
+    arena.ownership = {}
     arena.garrison_share = {}
     arena._frozen = {}
     arena.our_home_id = None
@@ -183,6 +189,7 @@ def _arena(session=None, seed=0, our_n=OUR_SQUADS, radius=CATCHMENT_RADIUS, pair
     arena._wanted = {}
     arena._drawn = {}
     arena._period = 0
+    arena._operational_period = 0
     arena._issued = {}
     arena._at_issue = {}
     arena._balance = {}
@@ -352,6 +359,132 @@ def test_the_synthesized_priorities_are_invariant_under_the_mirror_map():
                      + (by_position[other][1] - point[1]) ** 2)
         assert abs(wanted.get(mirror, 0.0) - weight) < 1e-12, (
             "region %d carries a weight its reflection does not" % region)
+
+
+def test_the_opening_board_is_reflected_for_the_side_that_has_no_starting_position():
+    """The free base a starting position is given stands on this side alone, so its reflection is placed for the other side and the opening board is congruent unit for unit like everything else on it.
+
+    It is not a nicety about totals. A vanguard's candidate regions are the ones carrying enemy strength, so an unreflected base is a candidate for the seat opposite and for no one else, and every re-task the ladder makes reads that asymmetric candidate set. `leave` is kept as the arm that measures what it was worth, and under it no reflection is placed at all.
+    """
+    session = _Session(_grid())
+    arena = _arena(session=session, seed=13, sites=_CORNERS)
+    # The free base: a headquarters and a builder standing where the map put them, before anything is deployed.
+    base = [_unit(1, 3600.0, 3600.0, type_index=0), _unit(2, 3660.0, 3540.0, type_index=1)]
+    arena._deploy(_observation(units=base, slot=0), Action(), 0)
+    assert not arena.refused
+
+    flat, _ = session.calls[0]
+    rows = _rows(flat)
+    their_slot = arena._their_slot(_observation(slot=0))
+    centre = arena.centre
+    for unit in base:
+        target = (2 * centre[0] - unit.x, 2 * centre[1] - unit.y)
+        assert any(int(row[1]) == their_slot and int(row[0]) == unit.type_index
+                   and math.hypot(row[2] - target[0], row[3] - target[1]) < 1e-6 for row in rows), \
+            "a standing unit of this side has no reflection ordered for the other"
+    assert len(arena._mirrored) == len(base)
+
+    # And the BOARD is congruent, which is not the same as the order being congruent: this side's base is already
+    # standing and is not ordered, so the other side's order carries exactly those extra rows.
+    ours = [row for row in rows if int(row[1]) == 0]
+    theirs = [row for row in rows if int(row[1]) == their_slot]
+    assert len(theirs) == len(ours) + len(base)
+    standing = [(unit.type_index, unit.x, unit.y) for unit in base]
+    board = [(int(row[0]), row[2], row[3]) for row in ours] + standing
+    remaining = [(int(row[0]), row[2], row[3]) for row in theirs]
+    for kind, x, y in board:
+        target = (2 * centre[0] - x, 2 * centre[1] - y)
+        match = next((other for other in remaining
+                      if other[0] == kind and math.hypot(other[1] - target[0], other[2] - target[1]) < 1e-6), None)
+        assert match is not None, "a piece of this side's board has no congruent partner on the other"
+        remaining.remove(match)
+    assert not remaining
+
+    left = _Session(_grid())
+    leaving = _arena(session=left, seed=13, sites=_CORNERS, standing=STANDING_LEAVE)
+    leaving._deploy(_observation(units=base, slot=0), Action(), 0)
+    assert not leaving._mirrored
+    kept = _rows(left.calls[0][0])
+    assert not any(math.hypot(row[2] - (2 * leaving.centre[0] - base[0].x),
+                              row[3] - (2 * leaving.centre[1] - base[0].y)) < 1e-6 for row in kept)
+
+
+def test_the_board_says_who_holds_each_region_and_says_it_antisymmetrically():
+    """A field with the economy taken out has nobody holding a resource point anywhere, so the wire's ownership count was nought on every row while it moves all match — and two of the handwritten ladder's doctrine filters read nothing else, which left every garrison-doctrine squad falling through to the home region.
+
+    The board states the ownership from its own construction instead: a side holds the contest its own garrison opens on, the pairs the reflection makes but no contest was drawn on are dealt out a side each, and the statement is turned over for the seat opposite so the two sides read the same ground from their own side of it.
+    """
+    session = _Session(_grid())
+    arena = _arena(session=session, seed=23, sites=_CORNERS)
+    arena._deploy(_observation(slot=0), Action(), 0)
+    assert not arena.refused
+    assert arena.ownership, "no region was given an owner"
+
+    # A side holds the contest its own garrison opens on, and the mirror member is the other side's.
+    for pair in arena.pairs:
+        assert arena.ownership[pair.defend_region] == 1.0
+        assert arena.ownership[pair.attack_region] == -1.0
+
+    # Every owned region's partner is owned by the other side: the statement is antisymmetric under the mirror map.
+    ours = sum(1 for held in arena.ownership.values() if held > 0)
+    theirs = sum(1 for held in arena.ownership.values() if held < 0)
+    assert ours == theirs and ours > 0
+
+    # And what the two seats read of one region is the exact reverse of each other.
+    regions = [RegionState(id=region_id, resources=2, held_by_us=0, held_by_enemy=0,
+                           x=0.0, y=0.0, our_value=0.0, enemy_value=0.0, enemy_seen_at_ms=0,
+                           distance_from_home=0.0)
+               for region_id in sorted(arena.ownership)]
+    observation = _observation(slot=0)
+    ours_view = arena._contacts(WorldView(observation=observation, catalogue=_CATALOGUE, regions=list(regions)),
+                                observation, ours=True)
+    theirs_view = arena._contacts(WorldView(observation=observation, catalogue=_CATALOGUE, regions=list(regions)),
+                                  observation, ours=False)
+    for mine, yours in zip(ours_view.regions, theirs_view.regions):
+        assert mine.id == yours.id
+        assert mine.held_by_us == yours.held_by_enemy and mine.held_by_enemy == yours.held_by_us
+        assert (mine.held_by_us > 0) != (mine.held_by_enemy > 0), "a region is held by exactly one of the two"
+
+
+def test_a_board_whose_reflection_could_not_be_placed_is_refused():
+    """Ground that takes no building is a fact about the map, and a board where the reflection of the opening base never appears is one base short on one side. Refused whole rather than run and scored, exactly as a board that cannot carry its contest pairs is.
+
+    The arrival is matched by position and side rather than by type, because the engine settles a building onto its own grid instead of onto the point it was asked for, and one arrival cannot answer for two points.
+    """
+    session = _Session(_grid())
+    arena = _arena(session=session, seed=17, sites=_CORNERS)
+    base = [_unit(1, 3600.0, 3600.0, type_index=0)]
+    arena._deploy(_observation(units=base, slot=0), Action(), 0)
+    assert len(arena._mirrored) == 1
+    point = arena._mirrored[0]
+
+    flat, _ = session.calls[0]
+    their_slot = arena._their_slot(_observation(slot=0))
+    spawned = []
+    for index, row in enumerate(_rows(flat)):
+        hostile = 1 if int(row[1]) == their_slot else 0
+        if hostile and math.hypot(row[2] - point[0], row[3] - point[1]) < 1e-6:
+            continue  # the ground the reflection landed on took nothing
+        spawned.append(_unit(1000 + index, x=row[2], y=row[3], type_index=int(row[0]), hostile=hostile))
+
+    observation = _observation(units=base + spawned, slot=0)
+    arena.known = {unit.id for unit in base}
+    arena._commission(observation, Action(), arena.until_ms)
+    assert arena.refused and arena.statistics.refused
+
+    # And with the reflection standing — inside the tolerance the engine's own nudge needs — the same board runs.
+    session2 = _Session(_grid())
+    again = _arena(session=session2, seed=17, sites=_CORNERS)
+    again._deploy(_observation(units=base, slot=0), Action(), 0)
+    flat2, _ = session2.calls[0]
+    arrived = []
+    for index, row in enumerate(_rows(flat2)):
+        hostile = 1 if int(row[1]) == again._their_slot(_observation(slot=0)) else 0
+        nudge = MIRROR_ARRIVAL / 2 if hostile and math.hypot(row[2] - point[0], row[3] - point[1]) < 1e-6 else 0.0
+        arrived.append(_unit(1000 + index, x=row[2] + nudge, y=row[3], type_index=int(row[0]), hostile=hostile))
+    again.known = {unit.id for unit in base}
+    again._commission(_observation(units=base + arrived, slot=0), Action(), again.until_ms)
+    assert not again.refused and again.phase == "running"
 
 
 # ---- garrisons never reach the command loop -------------------------------------------------

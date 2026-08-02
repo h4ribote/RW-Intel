@@ -990,20 +990,26 @@ def test_the_region_block_says_how_many_squads_are_committed_to_each_region():
     mine = operational_state(ours, None, [our_squad], 30000, base=0)
     yours = operational_state(theirs, None, [their_squad], 30000, base=1)
     assert mine == yours, "the count is not congruent between the two sides"
-    committed = [rows(mine, slot)["committed"] for slot in (0, 1)]
+    # Which row the contracted region lands in is the ordering's business — the rows run outward from where the side
+    # staged, so it is the row that says it is contracted, not a fixed slot number.
+    order = sorted(ours.regions, key=lambda region: region.distance_from_home)
+    sent = next(slot for slot, region in enumerate(order)
+                if region.id == our_squad.contract.target_region)
+    other = 1 - sent
+    committed = [rows(mine, sent)["committed"], rows(mine, other)["committed"]]
     assert committed[0] > 0.0, "the region a squad is contracted to is not counted"
     assert committed[1] == 0.0, "a region nobody is contracted to is counted"
 
     # A second squad onto the same ground moves the number, which is the whole point: two squads on one contest read differently from one.
     second = _squad(id=4)
     both = operational_state(ours, None, [our_squad, second], 30000, base=0)
-    assert rows(both, 0)["committed"] > committed[0], (
+    assert rows(both, sent)["committed"] > committed[0], (
         "a second squad contracted to the same region did not raise the count")
 
     # A squad under no contract has not been sent anywhere and counts nowhere, which is a different statement from having been sent home.
     idle = _squad(id=5, contract=False)
     with_idle = operational_state(ours, None, [our_squad, idle], 30000, base=0)
-    assert rows(with_idle, 0)["committed"] == committed[0], "an uncontracted squad was counted somewhere"
+    assert rows(with_idle, sent)["committed"] == committed[0], "an uncontracted squad was counted somewhere"
 
 
 def test_the_operational_squad_rows_are_offset_by_the_sides_own_first_squad():
@@ -2128,6 +2134,7 @@ def _arena_at(order: str, calls: list):
     arena.squads[THEIRS].id = THEIRS
     arena.engagement, arena.last_regions = None, []
     arena.until_ms, arena._alive, arena._changed_ms = 10 ** 9, 4, 0
+    arena._balance = {}
     return arena
 
 
@@ -2352,6 +2359,75 @@ def test_the_separation_a_fight_is_put_down_at_runs_as_arms_like_the_other_two_d
         drawn.append((arena.random.uniform(0.0, 1.0), arena.separation))
     assert drawn[0][0] == drawn[1][0], "the separation must not move the stream the forces are drawn from"
     assert drawn[0][1] == 250.0 and drawn[1][1] == 700.0
+
+
+def test_both_seats_of_a_fight_read_their_own_mission_status():
+    """The game side writes a squad's status out of the region force totals as THIS process sees them, so a region's enemy worth is whatever is hostile to us. Read off that block for both seats, completion could fire for our squad on the winning period of a fight and could never fire for the mirror squad at all — the only way for the ground it stands on to hold nothing hostile to us is for that squad itself to be dead, and a squad with nothing left reads ACTIVE.
+
+    Status is five of the fifty-eight tactical features. Two seats that cannot read the same statuses are two seats that are not exchangeable, which is the property the self-play zero and every paired comparison rest on. So it is written here, off each side's own view, by one ladder.
+    """
+    from rwintel.learn.arena import OURS, OURS_FIRST, THEIRS
+    from rwintel.wire import Status
+
+    calls: list = []
+    arena = _arena_at(OURS_FIRST, calls)
+    for squad_id, squad in arena.squads.items():
+        squad.contract = TaskContract(squad=squad_id, task=Task.ATTACK, target_region=1,
+                                      stance=Stance.AGGRESSIVE, cost_budget=1000.0,
+                                      deadline_ms=90000, issued_at_ms=0)
+        squad.losses = 0.0
+
+    # One board seen from the two seats: on ours the contested region holds no enemy worth and our squad stands on it;
+    # the inverted view says exactly the same thing to the other seat about its own squad.
+    ours = build_view(_observation(units=[_unit(1, 400.0, 100.0), _unit(2, 410.0, 100.0), _unit(3, 420.0, 100.0)],
+                                   regions=[_region(1, 400.0, 100.0, ours=900.0, theirs=0.0)]), _CATALOGUE, None)
+    theirs = build_view(_observation(units=[_unit(9, 400.0, 100.0, hostile=1)],
+                                     regions=[_region(1, 400.0, 100.0, ours=0.0, theirs=900.0)]),
+                        _CATALOGUE, None, invert=True)
+    for squad in arena.squads.values():
+        squad.x, squad.y = 400.0, 100.0
+
+    arena._fold_status(ours, theirs, 1000)
+    assert arena.squads[OURS].status == Status.COMPLETE
+    assert arena.squads[THEIRS].status == Status.COMPLETE, (
+        "the mirror seat cannot reach the status its own board says it is in")
+
+    # And the ladder is the game's own: with the ground still contested, an allowance spent past its share reads LOSING.
+    contested = build_view(_observation(units=[_unit(1, 400.0, 100.0), _unit(9, 405.0, 100.0, hostile=1)],
+                                        regions=[_region(1, 400.0, 100.0, ours=900.0, theirs=900.0)]),
+                           _CATALOGUE, None)
+    arena.squads[OURS].contract = TaskContract(squad=OURS, task=Task.ATTACK, target_region=1,
+                                               stance=Stance.AGGRESSIVE, cost_budget=100.0,
+                                               deadline_ms=90000, issued_at_ms=0)
+    arena.squads[OURS].losses = 100.0
+    arena._fold_status(contested, theirs, 1000)
+    assert arena.squads[OURS].status == Status.LOSING
+
+
+def test_a_fight_is_drawn_under_a_contract_a_match_could_emit():
+    """Every fight used to be ATTACK with AGGRESSIVE, which left thirteen of the tactical cut's fifty-eight features constant for the whole of training and moving in every match decision. The fight is drawn under a contract now, and the contracts it may be drawn under are the operational layer's own table read straight off: no pair can be drawn that the chain cannot issue.
+
+    The draw comes out of the fight's own stream, which is what makes two arms of a paired run answer the same contracts on the same fights. The geometry is untouched — the target is the other side's ground whatever the task — because the engine's default under any contract is to advance on the target with the contract's stance, so a fight drawn under a guarding or a withholding contract is still a fight.
+    """
+    import random as _random
+
+    from rwintel.control.policy.operations import STANCE_FOR
+    from rwintel.learn.arena import CONTRACTS
+
+    # The table itself, not a copy of it: a pair the arena can draw is a pair the chain can issue.
+    assert dict(CONTRACTS) == STANCE_FOR and len(CONTRACTS) == len(STANCE_FOR)
+    assert (Task.ATTACK, Stance.AGGRESSIVE) in CONTRACTS
+    assert (Task.WITHDRAW, Stance.HOLD_FIRE) in CONTRACTS
+
+    # Drawn out of the paired stream, so two arms at the same seed draw the same sequence of contracts.
+    first = [_random.Random(4242).choice(CONTRACTS) for _ in range(1)]
+    second = [_random.Random(4242).choice(CONTRACTS) for _ in range(1)]
+    assert first == second
+
+    # And over many draws every one of them turns up, which is the whole point: the layer has to have seen all of them.
+    stream = _random.Random(7)
+    seen = {stream.choice(CONTRACTS) for _ in range(400)}
+    assert seen == set(CONTRACTS)
 
 
 def test_an_engagement_episode_says_how_its_fights_were_drawn():

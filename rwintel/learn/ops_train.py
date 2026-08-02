@@ -28,7 +28,7 @@ from .deciders import NetworkOperations, operational_batcher
 from .layers import LearntOperations
 from .net import OperationalNet
 from .ops_arena import (CATCHMENT_RADIUS, CREDIT, CREDITS, GARRISON_SCALE, HORIZON_MS,
-                        OPENING_BASELINE, TENURE, TENURES, OpsArena)
+                        OPENING_BASELINE, STANDING_MIRROR, STANDINGS, TENURE, TENURES, OpsArena)
 from .ops_run import _arena_seed, frozen_tactics, pool, report, signal
 from .rollout import FIGHT_DISCOUNT, FIGHT_TRACE, Rollout
 from .train import Trainer
@@ -80,7 +80,8 @@ def train(arguments) -> int:
                         horizon_ms=arguments.horizon * 1000, our_squads=arguments.squads,
                         catchment_radius=arguments.radius, contest_pairs=arguments.pairs,
                         credit=arguments.credit, opening_baseline=arguments.opening,
-                        tenure=arguments.tenure, garrison_scale=arguments.garrison)
+                        tenure=arguments.tenure, garrison_scale=arguments.garrison,
+                        standing=arguments.standing)
 
     episode = EpisodeSettings(
         map=arguments.map, opponents=arguments.opponents, difficulty=arguments.difficulty,
@@ -90,9 +91,12 @@ def train(arguments) -> int:
     # A run made under trained tactical parameters writes to a journal of its own, because it is not the same instrument as a run made under the handwritten layer: a journal is opened for appending, and two runs in one file put two episodes on one board, which a later comparison can only drop.
     under = "-under-" + os.path.splitext(os.path.basename(arguments.tactics))[0] if arguments.tactics else ""
     journal = Journal(arguments.record or default_path("ops-train" + under))
+    # The seed is here for the reason it is in the measuring runner's opening line: the boards are the seed, and a
+    # later measurement taken at this one is a measurement on the boards this run was fitted to.
     log.info("training the operational layer on the arena over %d episode(s) each on %d instance(s), horizon %ds, "
-             "against the %s chain, both sides fighting under the %s tactical layer",
-             arguments.episodes, arguments.instances, arguments.horizon, arguments.opponent, frozen.name)
+             "against the %s chain, both sides fighting under the %s tactical layer, seed %d",
+             arguments.episodes, arguments.instances, arguments.horizon, arguments.opponent, frozen.name,
+             arguments.seed)
     try:
         sessions = _serve(arguments, [("ops-learn", arm)], episode, journal)
     finally:
@@ -154,6 +158,8 @@ def main(argv=None) -> int:
                              "what a match pays for -- ground held is upstream of income, so taking a disc early "
                              "is worth more than taking it late and changing one's mind costs the march. Both "
                              "readings are journalled by every episode whichever one is paid")
+    parser.add_argument("--standing", choices=STANDINGS, default=STANDING_MIRROR,
+                        help="what is done about the free base a starting position is given: mirror places its reflection for the other side so the opening board is congruent, leave runs the board one base short")
     parser.add_argument("--max-seconds", type=int, default=0)
     parser.add_argument("--device", default=None)
     parser.add_argument("--load", default=None, help="parameters to start from, an imitation of the script or an earlier run")

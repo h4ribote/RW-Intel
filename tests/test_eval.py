@@ -29,6 +29,7 @@ from rwintel.eval.scoring import (
     components,
     decided,
     fit_weights,
+    fitted_on_the_end,
     score,
     viewpoint,
 )
@@ -49,6 +50,8 @@ class FakeEpisode:
     team: int = 0
     timeout: bool = True
     standing: List[Dict[str, Any]] = field(default_factory=list)
+    #: Where the sides stood before the end, which is the board the weights are fitted on wherever there is one.
+    before: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ---- components ----------------------------------------------------------------------
@@ -139,6 +142,30 @@ def test_fit_weights_is_none_without_a_decided_episode():
     timeouts = [FakeEpisode(standing=[_team(0, value=v), _team(1, value=10000)]) for v in (8000, 9000, 12000)]
     assert fit_weights(timeouts) is None
     assert fit_weights([]) is None
+
+
+def test_the_weights_are_fitted_on_the_board_before_the_end():
+    """A decided match ends with the loser destroyed, so the board it ends ON is one every weighting calls correctly — fitting there is fitting on a question nobody has to ask. The board taken half a minute earlier is the one the score is actually used on, and it is the one the fit reads wherever an episode carries it.
+
+    Written as the case that separates them: at the end the military edge points at the winner in every episode, while on the earlier board only the economy does. A fit that read the final board would answer military.
+    """
+    episodes = []
+    for _ in range(6):
+        episodes.append(FakeEpisode(
+            winner=0, timeout=False, team=0,
+            # At the end: our side is all that is left, so military points at us whatever else is true.
+            standing=[_team(0, value=9000, income=10), _team(1, value=0, income=90)],
+            # Before the end: we were behind on the army and ahead on the economy, and the economy is what came true.
+            before=[_team(0, value=4000, income=90), _team(1, value=9000, income=10)]))
+    fitted = fit_weights(episodes)
+    assert fitted is not None
+    assert fitted.economy > fitted.military, "the fit read the board the episode ended on, where the answer is already visible"
+
+    # And the report can say which board it read, because the two are not the same evidence.
+    with_before, at_the_end = fitted_on_the_end(episodes)
+    assert (with_before, at_the_end) == (6, 0)
+    assert fitted_on_the_end([FakeEpisode(winner=0, timeout=False, team=0,
+                                          standing=[_team(0, value=9000), _team(1, value=0)])]) == (0, 1)
 
 
 def test_fit_weights_prefers_the_component_that_agrees_with_the_winner():

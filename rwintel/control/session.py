@@ -76,6 +76,9 @@ class EpisodeRecord:
     #: The team the observations were taken from, or -3 when it only watched.
     team: int = -1
     standing: List[dict] = field(default_factory=list)
+    #: Where the sides stood some time BEFORE the episode ended, and how far into the match that was. The board an episode ends on has, for a decided match, the loser already destroyed, and the scoring weights are asked to predict a winner from a board where both sides are still standing — so a fit made on the final board is a fit on an easier question than the one the score is used on. Empty for an episode too short to have one.
+    before: List[dict] = field(default_factory=list)
+    before_seconds: int = 0
     #: Which arm of a comparison this episode belongs to. One name for a plain run.
     arm: str = ""
     instance: int = -1
@@ -95,6 +98,7 @@ class EpisodeRecord:
             "arm": self.arm, "instance": self.instance, "episode": self.episode,
             "seconds": self.seconds, "winner": self.winner, "alive_teams": self.alive_teams,
             "timeout": self.timeout, "team": self.team, "standing": self.standing,
+            "before": self.before, "before_seconds": self.before_seconds,
             "settings": self.settings, "statistics": self.statistics,
             "interference": self.interference, "synchronisation": self.synchronisation,
             "wall_seconds": round(self.wall_seconds, 1),
@@ -298,6 +302,8 @@ class Session:
             timeout=bool(payload.get("timeout", False)),
             team=int(payload.get("team", -1)),
             standing=list(payload.get("standing", [])),
+            before=list(payload.get("before", [])),
+            before_seconds=int(payload.get("beforeSeconds", 0)),
             arm=self.arm,
             instance=self.instance,
             settings=vars(self.settings).copy(),

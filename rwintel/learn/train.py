@@ -114,7 +114,6 @@ class Optimiser:
                                     device=self.device))
 
         count = len(steps)
-        order = torch.randperm(count, device=self.device)
         totals = [0.0, 0.0, 0.0, 0.0]
         batches = 0
         warming = self.report.updates < self.warmup
@@ -122,6 +121,8 @@ class Optimiser:
             self._hold_policy(True)
         try:
             for _ in range(EPOCHS):
+                # A fresh partition per epoch. Drawn once outside the loop, the four epochs are four passes over the same four minibatches in the same order, which is a smaller thing than it looks: what several epochs buy over one is that a step is seen beside different steps each time, and a fixed partition buys none of it while costing the same.
+                order = torch.randperm(count, device=self.device)
                 for start in range(0, count, MINIBATCH):
                     index = order[start:start + MINIBATCH]
                     with self.lock:
