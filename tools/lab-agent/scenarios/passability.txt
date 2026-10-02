@@ -1,0 +1,3 @@
+# Any map. The path finder's passability grid for each movement type, written beside the run's logs as pass-<MOVEMENT>.txt, for checking rwintel/data/terrain.py against the engine.
+@0 passmap {out}/pass
+@1 end

@@ -1,183 +1,162 @@
 # RW-Intel
 
-Rusted Warfare を機械学習でプレイするシステム。生産、アップグレード、攻撃目標の選定といった大局的な判断を担うモデルと、個々のユニットの戦闘機動を担うモデルを分け、両者を実時間で協調させることを目指す。
+RW-Intel は、RTS ゲーム Rusted Warfare を機械学習でプレイするためのシステムである。ゲームのプロセスに javaagent として入り込んでエンジンの状態を直接読み、正規のコマンド経路で命令を出す。その外側の Python の制御プロセスが、層に分けた指揮系統で判断を下す。
 
-## 現状
+## 何をするものか
 
-ゲームへの接続方式を決定し、ゲーム内部の解析と性能実測を終え、モデルの設計を決め、**観測と行動の経路、五層のスクリプト方策、指揮系統の外から命令する介入の経路とスクリプト乱入者、方策どうしを比べる評価の仕組み、そして学習環境までを実装した段階**である。制御プロセスからゲームを動かして試合を回し、二つの方策を同一条件で交互に走らせ、その差を主張するのに何エピソード要るかまで報告する。二つのゲームプロセスを一つのロックステップ試合に入れることもでき、その試合の中でユニットを生成しても同期が壊れないことを確認した。戦術層を鍛える交戦アリーナは、交戦を組んでは戦わせ、掃討してまた組む形で実際に走っている。**方策を学習させた実行はいくつもあるが、手書きの層を上回ったと示された方策はまだ無い。** 手書き層の決定を教師として写した方策と、そこから強化学習を進めた三つの設定と、その一つを二度延長したものと、行動空間を 7 逸脱に広げて学習したものと、歩幅を上げて三本続けた鎖と、乱数から始めたものを、いずれも手書き戦術層と交戦させて採点した。**上回って見えたものが二つあり、どちらも選択に使っていない乱数種で測り直すと消えた。** **変わったのは位置である。** 7 逸脱の方策は交戦 1700 件規模で同じ交戦ごとに対にすると**手書き層より下にあった**(種 31337、-0.0313、2 標準誤差 0.0229)が、**いまの候補は下にない。** 候補を選ぶのに一度も使っていない**三つの種**で対にすると、残り体力で採る読みで種 20260723 が交戦 1550 件の **+0.0105 ± 0.0187**、種 20260724 が 1007 件の **+0.0078 ± 0.0245**、種 20260725 が 1059 件の **-0.0040 ± 0.0224** であり、三つを合わせて **+0.0054 ± 0.0124** である。**いずれも区間が 0 を含み、三つ目は符号が逆である。すなわち互角で、上回ったとは言えない。** この効果量で改善を主張するにはおよそ 4 倍の交戦が要り、**候補を選んだ種を確かめの種と合わせて読むことはしない。** 同時に分かったのは、**それまでのアリーナが方策とは別のものを測っていた**ことである。相手側が内蔵 AI として自分の試合をしていたこと、両軍が射程の外で向かい合って止まっていたこと、一つの用務に終端が繰り返し発火していたこと、組んだ交戦の 3 割が現れないまま捨てられていたこと、エピソード最初の交戦に自陣の司令部が紛れ込んでいたこと、その直しの残りかすとして自陣の建設機が同じ場所に紛れ込み続けていたこと、部隊の健全度がその部隊番号のエピソード中の最大戦力で割られていたこと、そして**エピソードごとに同じ交戦を引き直していて標本の数が 30 倍から 50 倍水増しされていたこと**の八つで、八つとも直して測り直してある。**いま試合を打つ方策はすべて手書きである。**
+- **ゲームに寄生して観測と行動を取り出す。** ロックステップのゲームでは状態がネットワーク上に流れないので、プロセスの内側から読むしかない([docs/project/01-approach.md](docs/project/01-approach.md))。javaagent `agent/` がゲームスレッド上で観測を組み立て、TCP で制御プロセスへ送り、返ってきた決定をコマンドとして発行する。
+- **指揮を層に分け、層の間を意味の固定された契約で結ぶ。** 戦略・作戦・戦術の指揮の階梯と、内政・編成・移送の戦力供給の六層である。全層をスクリプト方策として先に書いてあり、それが常に動くシステムであると同時に、学習の教師と評価の基準を兼ねる([docs/project/04-model-design.md](docs/project/04-model-design.md))。
+- **学習させるのは内政・作戦・戦術の 3 層だけである。** 戦術層は試合を回さずに、交戦を組んでは戦わせる交戦アリーナで学習する。内政層と作戦層は試合を回して学習する。学習環境、評価の手順、スクリプトの模倣からの初期化まで実装してある([docs/project/08-learning.md](docs/project/08-learning.md))。
+- **人間が層と部隊の単位で指揮を引き取れる。** 介入は指揮系統と同じ契約の形で行い、そのときの盤面と対にして記録できる。
 
-**そして、測定そのものの床を測った。これがこれまでの読み方をまとめて書き換える。** 同じ重みとそのバイト単位の複製を二つのアームとして同じ実行に入れ、どちらも確率最大で打たせると、**対にした差が +0.0079 ± 0.0200 出る**。同じ実行の中で、その二つが同じ基準線に対して **+0.0180 と +0.0066** を出す。差が 0 でなければならない比較で 0.011 開くということであり、**交戦 1300 件の決闘 1 本が分解できるのは ±0.02 ほどだということである**。出所はエンジンの非再現性で、対にした「同じ交戦」は同じ抽選から始まる交戦であって同じ経過をたどる交戦ではない。**この床は、この計画がこれまでに出したどの候補よりも大きい。** 候補を選んだ +0.0237 ± 0.0264 も、同じ重み・同じ種で後から出た -0.0140・-0.0035・+0.0180・+0.0066 も、すべてその内側にある。**単一の実行の数字で 0.02 未満の改善を主張してはならない。**
+**現状**: 観測と行動の経路、六層のスクリプト方策、介入の経路、評価、学習環境は実装済みである。学習した戦術層で、手書きの戦術層を上回ったと示されたものはまだ無い。作戦層は、スクリプトと規則のアブレーションと学習した網を同じ試合の条件で比べられ、スクリプトや規則からの模倣と、試合を回す強化学習が動く。スクリプト作戦層を写して試合の採点に揃えた報酬で学習を進めた作戦層は、手段を選ぶ前の頭でスクリプト作戦層を小さく上回った。歩くか運ばれるかも選ぶ今の頭の網は、まだスクリプト作戦層と区別が付かない。内政層は、スクリプトの判断器を写した網と、試合を回す強化学習が動く。学習した内政層がスクリプト内政層を上回るかどうかは、まだ測っていない。
 
-**その床の上で、定数を動かす二本を測って外した。** h3 から一つだけ変えて 60 エピソードずつ回し、同じ実行の中で h3 と基準線に並べた。**エントロピーの重みを 0.002 から 0.0002 へ下げた方は、確率最大の側が h3 から動かず(+0.0031 ± 0.0241)、抽選の側が基準線より 0.0407 ± 0.0208 下がり、最終エントロピーはむしろ 0.443 から 0.578 へ広がった。**「重みを下げて分布を締める」という税を減らす道は、締まらないことが測れたので閉じた。**GAE の trace を 1.0 から 0.95 へ落とした方は、予告した機構が働いたのに成績が動かなかった。** 批評家の誤差は 0.06 から 0.012 へ落ち勝敗は 707 対 711 まで揃ったが、確率最大の側は h3 と区別が付かない(-0.0015 ± 0.0218)。**二本とも徴候が同じで、学習は分布の質量を動かし、採点される argmax を動かしていない。**
+```mermaid
+flowchart LR
+    subgraph game["ゲームプロセス x N(Xvfb 上、描画を止めた固定ステップ)"]
+        engine["Rusted Warfare のエンジン"]
+        agent["agent/<br/>javaagent: 観測と命令の発行"]
+        frame["frame/<br/>描画の停止と時計"]
+        agent <--> engine
+        frame <--> engine
+    end
+    subgraph control["制御プロセス(Python)"]
+        policy["rwintel.control<br/>六層の指揮系統"]
+        learn["rwintel.learn<br/>学習した層と推論の集約"]
+        evaluation["rwintel.eval<br/>方策の比較"]
+    end
+    agent <-->|"TCP ループバック"| control
+```
 
-**環境ではなく学習信号の側にも、黙って信号を失っていた点が三つと、採点そのものの穴が一つ見つかり、四つとも直した。** アリーナの用務は交戦 1 件ぶん・平均 113 決定なのに割引 0.99 と GAE の trace 0.95 で刈られており、終端が届いていたのは交戦の最後の 3 秒半だけだったこと。一つのインスタンスがエピソードを終えるたびに、他の 11 インスタンスが戦っている最中の交戦の軌跡までまとめて切られていたこと。交戦の開始ポテンシャルが前の交戦の撃破を数えたまま取られていたこと。そして、交戦のおよそ 4 分の 3 はどちらも全滅しないまま終わるのに、生き残りを値段まるごとで数える採点ではその全部が両側ちょうど 0 点だったことである。**アリーナの用務は割り引かなくなり、採点は「撃破で採る」と「残り体力で割り引いて採る」の二通りになって、どちらの読みでも必ず両方を報告する。****ただし、四つのどれかが成績を動かしたという測定はまだ無い。** 直した根拠は、コードが文書の書いていることと違うことをしていたという一点である。
+## リポジトリの構成
 
-決定した方式は、ゲーム本体のプロセスに `-javaagent` で入り込み、エンジンの内部状態を直接読んでコマンドを直接発行するというものである。ネットワークプロトコルを解析して独自クライアントを作る案は、マルチプレイが決定論的ロックステップであり状態が一切通信されないため、シミュレーションの完全な再実装を伴うことになり退けた。判断の詳細は [docs/project/01-approach.md](docs/project/01-approach.md) にある。
+```mermaid
+flowchart LR
+    root["rw-intel/"]
+    root --> agent["agent/<br/>制御エージェント(Java、ゲームプロセス内)"]
+    root --> frameDir["frame/<br/>全エージェントが含むフレーム層(Java)"]
+    root --> tools["tools/probe-agent/<br/>計測エージェント(Java)"]
+    root --> lab["tools/lab-agent/<br/>実験用エージェントと台本(Java)"]
+    root --> rwintel["rwintel/"]
+    root --> tests["tests/<br/>ゲームを起動しない性質の試験"]
+    root --> docs["docs/<br/>ゲームの解析とプロジェクトの設計"]
+    root --> local["local/<br/>ゲーム本体と実行の記録(バージョン管理外)"]
+    rwintel --> wire["wire<br/>フレーム形式"]
+    rwintel --> data["data<br/>マップとユニット定義の読み取り"]
+    rwintel --> ctl["control<br/>制御プロセス、スクリプト方策、介入、乱入者"]
+    rwintel --> ev["eval<br/>採点と比較"]
+    rwintel --> lr["learn<br/>符号化、報酬、アリーナ、最適化、模倣"]
+    rwintel --> rt["runtime<br/>ビルド、インスタンス、起動と計測"]
+```
 
-プロセス内から次を行えることを実行時に確認済みである。
+## 必要なもの
 
-- ユニットの識別子、座標、体力、所属、種別、およびプレイヤーの資金と戦績の読み取り
-- 登録済みの全ユニット種別の一覧と、その価格・技術レベル・移動タイプの読み取り
-- ユニットへの命令の発行。移動を命じて実際に移動することを確認した
-- システム命令によるユニットの生成。戦術層の学習環境がこれに依存する
-- スキルミッシュの自動開始、勝敗の検出、次のエピソードへのリセット
-- 内蔵 AI 同士を戦わせ、多数のエピソードの結果を集めること
-- 実時間の 10 倍速での進行。8 並列で合計 80 倍。アリーナの学習実行では 12 並列で 1 インスタンス 9.3 倍、合計 112 倍、毎実時間秒 309 決定まで測ってある
-- 五層(戦略・作戦・戦術・内政・編成)を契約で結んだスクリプト方策の実行
-- 方策を交互に走らせた比較と、必要エピソード数の算出
-- 指揮系統の外から部隊を取り上げ、契約を書き換え、編成を組み替えること。人間の行入力とスクリプト乱入者が同じ経路を通り、記録先を指定すれば介入はそのとき見ていた盤面と対にして残る
-- 二つのゲームプロセスを一つのロックステップ試合に入れること。その中でシステム命令により 18 体を生成しても、両者のチェックサムは一致し desync も出なかった
-- 交戦アリーナ。こちらが生成した以外に動くもののない盤面に両軍を生成し、戦わせ、掃討して次の交戦を組む
-- アリーナのエピソードで部屋の内蔵 AI を停止し、相手側のユニットを制御プロセスだけが動かす状態にすること。停止する前は、相手側が自分の経済と自分の攻撃隊を持ってこちらの 2 倍勝っていた
-- アリーナが左右どちらにも有利でないことを測ること。エピソードごとに交戦を引き直すようにしたアリーナで、両側を手書き層にした交戦 1380 件の平均は +0.0194、2 標準誤差 0.031 で 0 を含む。**引き直す前の測定は独立に引かれた交戦を 40 倍ほど多く数えており、そのころ「アリーナが傾いている」と読んでいた数字は一つも成立していなかった**
-- 方策のアームと基準線のアームを同じ実行の中で交互に回し、**同じ交戦ごとに対にして差を取ること**。抽選の散らばりが丸ごと消えるので区間は半分になる。別々の実行で取った生値を引き算する読み方は、実際に三度誤った読みを生んだ
-- 行動空間が動かせる幅をアブレーションで測ること。引き直すアリーナで対にすると、逸脱を一つも使わない方策(常に hold、エンジンの `attackMove` だけで戦う)は二つの乱数種で -0.0555 と -0.0423(区間 ±0.03)であり、**手書き層(定義により 0)より下にある**。何も学習していない乱数のままの網は -0.125 である。**すなわち逸脱の選び方が取り合っている幅は下へ 0.05 ほどである**
-- 接敵したら必ず離れるだけの方策(常に withdraw)がどこにいるかは、**種によって答えが違う**。種 4242 で -0.0043 ± 0.029(手書き層と区別が付かない)、種 31337 で -0.0349 ± 0.0263(手書き層より下)である。**同じ種 31337 で、7 逸脱で学習した方策は -0.0313 ± 0.0229 であり、この一行の規則と区別が付かない**
-- 成績から戦力の抽選ぶんを引く補正を入れ、自己検査で否決して外すこと。両側手書き層が 0 でなければならないところで交戦 901 件の -0.070 を出し、組まれる部隊のシェアが 53.1 対 50.0 に偏っていたことが原因だった。補正なしの同じ 901 件は -0.003 である
-- 交戦を最後まで戦わせる設定と、もっと偏った戦力比を引く設定を、引き直すアリーナで測り直すこと。**どちらも基準線を動かさない**(対にした差は最大でも -0.022 ± 0.031)。決着する交戦は増えるが、同じ実時間で得られる交戦が 3 分の 2 に落ち、散らばりが広がる。**以前「打ち切りを外すと公平にできない」と読んでいた測定は、区間が支えていなかった**
-- 手書き戦術層の決定を教師として集めること。12 並列でゲーム内 1200 秒、実時間 124 秒で 41,194 決定。選ばれた行動は hold 62.7 パーセント、withdraw 33.4 パーセントで、この層が実際に答えている問いは引くかどうかである
-- その教師に 8,326 パラメータの網を当てはめること。検証に取り分けた 1 割で 99.9 パーセント再現し、行動分布は教師と 0.1 パーセント以内で一致する。**この 8,326 は逸脱が 5 つだったころの網の大きさである。逸脱が 7 つになったいまの戦術網は 8,456 パラメータ、幅 128 なら 25,096 である**
-- 学習した方策と手書き層を交戦させ、交戦ごとの成績と、その平均を主張するのに何交戦要るかを報告すること
-- 交戦を二通りに採点し、**どちらの読みでも全アームと全対差を報告すること**。生き残りを値段まるごとで数える読みと、残り体力の割合で割り引いて数える読みである。片方全滅で終わった交戦では二つは一致する。同じ交戦 2992 件で散らばりは体力の読みが 0.4839、値段まるごとの読みが 0.5501 であり、**同じ主張に要る交戦は 4 分の 1 ほど少ない**。二つのアームを比べるときに実際に効く「対にした差の散らばり」も測ってあり、**体力の読みで 0.34 から 0.41、値段まるごとの読みで 0.43 から 0.51、要る交戦は 5 分の 1 から 4 分の 1 少ない**。**体力の読みで幅そのものを測り直してはいない**
-- アリーナの用務を割り引かずに学習させること。交戦 1 件は平均 113 決定の有限な用務なので、割引と GAE の trace をともに 1 に置く。**そうすると決定の優位は「この交戦は、ここから見込まれていたよりどれだけ良く転んだか」ちょうどになる**。**ただし、この算術で回した実行が前の算術より良い成績を出したという測定はまだ無い**
-- 部隊を「新しく現れたもの」ではなく**実際に出した注文に照らして組むこと**。以前は、出撃地点を持つプレイヤーが最初から持つ建設機がエピソード最初の交戦の自軍部隊に紛れ込んでいた。学習実行のエピソード 1140 本のうち **793 本(70 パーセント)**が、自軍側だけ発注額のちょうど 500 クレジット上で組まれ、その交戦の成績は残りより **+0.1124(2 標準誤差 0.0379)高く、自軍は 176 勝 0 敗**だった。基地に停めた建設機は死なないので**構造上負けようがなかった**のである。種別ごとに発注数を超えた分を取らないようにして直した
-- 部隊の健全度を**その交戦で組んだ価値で割ること**。ゲーム側はこの分母を下げない最大値として持っており、アリーナは部隊番号を二つしか持たないので、エピソードが進むほど分母が育っていた。**交戦のおよそ 63 パーセントが、部隊が満員のまま健全度を満たない値で始まっていた。足りない量の平均は 0.415 で、この特徴の値域は 0 から 1 である**
-- 歩幅を上げた三本の学習実行を継いで、方策を実際に動かすこと。学習率 3e-4 では手書き層との一致が 100 から 97.7 パーセントへしか動かなかったが、1e-3 と 5e-4 で継ぐと **88.0 パーセント**まで、エントロピーは 0.252 から 0.507 まで動いた。**出てきた候補は、候補選びに使っていない三つの種で手書き層と互角である**(体力の読みで +0.0105・+0.0078・-0.0040、合わせて +0.0054 ± 0.0124)。**上回ったとは言えない**
-- 方策を**確率最大の行動で打つか、自分の分布から抽選するか**の差を測ること。同じ基準線に対して同じ交戦の上で引くと、体力の読みで **+0.0208 / +0.0065 / +0.0196 / +0.0369 / +0.0119 / +0.0231** の六つが同じ符号に並ぶ。**逸脱の選び方が取り合っている帯が 0.05 ほどしかないところに対して、1 点の 40 分の 1 から 25 分の 1 である。運用時に方策がするのは抽選の側であり、これを払わずに済ませる道はまだ何も測っていない**
+- x86_64 の Linux。表示装置は要らない(仮想ディスプレイ Xvfb を使う)
+- Rusted Warfare 1.15(build #28)の Linux 版。ゲーム本体はこのリポジトリに含まれない
+- エージェントのビルド用の JDK 9 以降。ゲームが同梱するのは `javac` の無い Java 8 の JRE である
+- Python 3.10 以降。`torch` を使うのは `rwintel.learn` だけである
+- 記録から学習する機材(`python -m rwintel.learn offline`、学習器と行動器を同じ機材で回す `online`)では、CUDA 版の `torch` を入れるとグラフィックスカードで学習する(`pip install --force-reinstall --index-url https://download.pytorch.org/whl/cu130 torch`)。ゲームを動かすだけの機材は CPU 版でよい([docs/project/02-runtime.md](docs/project/02-runtime.md))
+
+Ubuntu では次で揃う。
+
+```bash
+sudo apt-get install -y openjdk-17-jdk-headless xvfb x11-xserver-utils libgl1-mesa-dri libglx-mesa0 libxrandr2 libxcursor1 libxxf86vm1 libxi6 libxtst6 python3-venv
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+ゲームの配布物を `local/` に展開する。別の場所に置く場合は環境変数 `RWINTEL_GAME` でそのディレクトリを指す。
+
+```bash
+unzip local/RustedWarfare_Linux.zip -d local/
+```
+
+詳細は [docs/project/02-runtime.md](docs/project/02-runtime.md) にある。
+
+## 使い方
+
+以下は venv を有効にした状態で書く。
+
+性質の試験はゲームを起動せずに走る。
+
+```bash
+python -m pytest tests
+```
+
+ゲームが動くことと、その速度を確かめる。エージェントのビルド、インスタンスディレクトリの作成、仮想ディスプレイの起動は、ゲームを起動する道具が必要に応じて自動で行う。ゲームは既定で描画を止め、1 フレーム 25 ミリ秒の固定ステップで CPU の許す限り速く回る(`--clock wall` でゲーム自身の時計、`--draw` で描画、`--speed` で速さの上限)。
+
+```bash
+python -m rwintel.runtime probe --count 4 --seconds 90
+```
+
+スクリプト方策で試合を回す。`run` は `--` の後ろに書いた制御プロセスを起動し、そこへ `--count` 個のゲームを接続させ、制御プロセスが終わるとゲームを止める。
+
+```bash
+python -m rwintel.runtime run --count 2 -- control --episodes 2 --map Lake --max-seconds 300 --record
+```
+
+評価と学習も同じ形で回す。制御プロセスを別の端末で動かす形(`python -m rwintel.runtime agents`)もある([docs/project/02-runtime.md](docs/project/02-runtime.md))。
+
+```bash
+python -m rwintel.runtime run --count 4 -- eval --episodes 3 --arm script --arm arm
+python -m rwintel.runtime run --count 4 -- learn tactics --save local/models/tactics.pt
+python -m rwintel.runtime run --count 13 -- learn operations --load local/models/ops-bc.pt --save local/models/ops-rl.pt --warmup 3 --batch 1024 --learning-rate 1e-4 --anchor 0.5 --checkpoint-every 3 --difficulty -1 --intruder
+python -m rwintel.runtime run --count 13 -- eval --episodes 4 --arm script --arm ops-random --arm operations:local/models/ops-rl.pt --intrude --difficulty -1 --max-seconds 900
+python -m rwintel.runtime run --count 12 -- learn collect --layer economy --episodes 2 --difficulty 0
+python -m rwintel.learn clone --layer economy --dataset local/datasets/economy/collect-<日時> --save local/models/eco-bc.pt
+python -m rwintel.runtime run --count 12 -- learn collect --layer economy --student local/models/eco-bc.pt --explore 0.1 --episodes 2 --difficulty 0
+python -m rwintel.learn clone --layer economy --dataset local/datasets/economy/collect-<日時> --dataset local/datasets/economy/collect-<日時> --save local/models/eco-bc2.pt
+python -m rwintel.runtime run --count 12 -- learn economy --load local/models/eco-bc2.pt --save local/models/eco-rl.pt --warmup 2 --anchor 0.5 --checkpoint-every 2 --difficulty 0
+python -m rwintel.runtime run --count 12 -- eval --episodes 4 --arm script --arm economy:local/models/eco-rl.pt --difficulty 0 --max-seconds 900
+```
+
+人間が自分のゲームクライアントから参加して、AI と対戦することもできる。`run` が試合をホストし、参加先のアドレスを表示する。クライアントは同じ版(1.15 build #28)を mod 無しで動かしている必要がある([docs/project/02-runtime.md](docs/project/02-runtime.md) の人間と対戦する)。
+
+```bash
+python -m rwintel.runtime run --count 1 -- control --versus
+python -m rwintel.runtime run --count 1 -- control --versus --policy operations:local/models/ops-rl.pt --record
+```
+
+試合はリプレイに記録され、`--versus` の実行は終わりにそれを `local/replays/` に残す。リプレイはゲームを起動せずに読め、再生すれば記録した試合がそのまま再現されるので、盤面を取り直しながら解析し、人間の命令から作戦層の決定を推定して教師にできる([docs/project/09-replays.md](docs/project/09-replays.md))。
+
+```bash
+python -m rwintel.replay inspect "local/replays/<名前>.replay"
+python -m rwintel.runtime run --count 2 -- replay play local/replays/*.replay --journal local/episodes/control-<日時>.jsonl --imitate
+python -m rwintel.learn clone --layer operations --dataset local/datasets/operations/collect-<日時> --dataset local/datasets/operations/replay-<日時>:0.2 --save local/models/ops-bc.pt
+```
+
+層の決定を打つ実行は、その決定を `local/datasets/<層>/<実行>/` に記録する。記録は符号化の版を持ち、状態を作った材料から今の符号化で作り直せる([docs/project/08-learning.md](docs/project/08-learning.md) の記録)。
+
+```bash
+python -m rwintel.learn dataset inspect local/datasets/tactics/collect-<日時> --verify
+```
+
+記録だけを読む学習(`offline`)と、学習器と行動器のゲームを一つのコマンドで回すループ(`online`)は、グラフィックスカードで回す。CUDA 版の `torch` を入れ、スクリプトの決定を記録し、それを集合の網に写し、その網から始めてループを回し、出来た網を決闘でスクリプト戦術層と比べる。各段の意味は [docs/project/08-learning.md](docs/project/08-learning.md) のグラフィックスカードで強化学習を回す にある。
+
+```bash
+pip install --force-reinstall --index-url https://download.pytorch.org/whl/cu130 torch
+python -m rwintel.runtime run --count 8 -- learn collect --layer tactics --both-sides --explore 0.1 --episodes 10
+python -m rwintel.learn offline --layer tactics --dataset local/datasets/tactics/collect-<日時> --method bc --net set --save local/models/tactics-set.pt
+python -m rwintel.learn online --layer tactics --dataset local/datasets/tactics/collect-<日時> --load local/models/tactics-set.pt --save local/models/tactics-actor.pt --count 8 --episodes 20 --shard-decisions 2000
+python -m rwintel.runtime run --count 8 -- learn duel --load local/models/tactics-actor.pt --episodes 30
+```
+
+主な入口は次のとおりである。`--help` でそれぞれの引数が出る。
+
+| コマンド | 用途 |
+| --- | --- |
+| `python -m rwintel.control` | 方策で試合を回す(`--policy` で選び、既定はスクリプト方策)。`--versus` で人間の相手をホストし、`--console` で人間が介入し、`--intrude` でスクリプト乱入者を入れる |
+| `python -m rwintel.eval` | 方策を比較し、差とそれを主張するのに要るエピソード数を報告する。作戦層を学習した網や規則に差し替えたアーム、内政層を学習した網に差し替えたアームも取れる。`--map` を繰り返すと地図を順に回す |
+| `python -m rwintel.eval.search` | スクリプトの規則の初期値を successive halving で探し、選んだ設定を別の乱数種で測り直す |
+| `python -m rwintel.learn` | 決定の収集(`collect`、`--student` / `--rule` / `--pin` で打つものを替え、`--explore` で探索を混ぜ、判断器がラベルを付ける)、模倣(`clone`)、学習(`tactics` / `operations` / `economy`)、戦術層の評価(`duel`、`--from` で終わった決闘を読み直す)、種別どうしの相性の測定(`matchups`)、記録の点検と符号化し直し(`dataset`)、記録からの学習(`offline`、`--follow` で行動器の記録を追い続ける)、学習器と行動器のゲームを一つのコマンドで回すループ(`online`)、推論の費用の測定(`bench`) |
+| `python -m rwintel.runtime` | 制御プロセスとゲームの一括起動(`run`)、エージェントのビルド、インスタンスの作成、ゲームの起動と計測 |
+| `python -m rwintel.data` | マップの領域の切り出し(`regions`)、ユニット一覧(`units`)、地形と陸塊の報告と描画(`terrain`)。ゲームを起動しない |
+| `python -m rwintel.replay` | リプレイの読み取り(`inspect`)、解読の照合(`verify`)、観測しながらの再生と人間のプレイからの決定の推定(`play`) |
+
+実行が書き出すものはすべて `local/` の下に入る。ゲームプロセスの出力は `local/logs/<道具>/<日時>/`、制御プロセスのログは `local/logs/control/` などに、エピソード記録は `local/episodes/` に、学習したパラメータは `local/models/` に、残したリプレイと再生の書き出しは `local/replays/` に残る。
 
 ## 文書
 
-内容は二つに分かれている。詳細な目次は [docs/README.md](docs/README.md) にある。
+文書の目次は [docs/README.md](docs/README.md) にある。`docs/game/` がゲームそのものの解析結果(内部構造、観測と命令の対応、試合の制御、マルチプレイ、内蔵 AI)、`docs/project/` がこのプロジェクトの設計(方式、実行基盤、速度、モデルの骨格、インタフェース、スクリプト方策、評価、学習)である。
 
-| 区分 | 内容 |
-| --- | --- |
-| [docs/game/](docs/game/) | Rusted Warfare の仕様と内部構造。逆アセンブルと実測の結果であり、このプロジェクトの都合とは無関係に成り立つ |
-| [docs/project/](docs/project/) | RW-Intel の方針、実行基盤、モデル設計 |
-
-はじめに読むなら [docs/project/01-approach.md](docs/project/01-approach.md)、モデルの設計に関わるなら [docs/project/04-model-design.md](docs/project/04-model-design.md)、実装に手を付けるなら [docs/project/05-interface.md](docs/project/05-interface.md) から入る。
-
-## 構成
-
-```mermaid
-flowchart TD
-    root["RW-Intel"]
-    root --> docs["docs/<br/>解析結果と設計"]
-    root --> agent["agent/<br/>ゲームプロセスに入る javaagent。観測と行動と進行制御を運ぶ"]
-    root --> rwintel["rwintel/<br/>制御プロセス。方策、介入、通信形式、マップとユニット定義の読み取り、評価、学習"]
-    root --> tools["tools/<br/>計測と実行のための道具"]
-    root --> tests["tests/<br/>性質の試験。通信形式、評価の採点と必要数、介入の所有権、学習の符号化と報酬と軌跡"]
-    root --> local["local/<br/>ゲームの複製と実行時の作業領域(バージョン管理対象外)"]
-```
-
-`local/` はバージョン管理から除外している。ゲーム本体の複製を含むためである。
-
-## 準備
-
-Rusted Warfare 1.15 build #28 が必要である。ゲームには OpenJDK 13 の完全な JDK が同梱されているため、JDK を別途導入する必要はない。
-
-インストール先を `local/rw` に複製する。32bit 版 JVM とログ類は不要である。
-
-```powershell
-robocopy "<ゲームのインストール先>" local\rw /E /XD jvm cache /XF "hs_err_pid*.log" lastrun.log crashes.txt preferences.ini
-```
-
-計測エージェントをビルドし、実行用のディレクトリを作り、動作を確認する。
-
-```powershell
-.\tools\probe-agent\build.ps1
-.\tools\New-RwInstance.ps1 -Count 8
-.\tools\Start-RwProbe.ps1 -Count 1 -Speed 10 -Seconds 60
-```
-
-速度が 10 倍前後で報告されれば、ゲームをプロセス内から制御できている。実際のスキルミッシュを自動で回すには `-Map Lake` を加える。
-
-マップとユニット定義を読むだけの道具はゲームを起動せずに動く。Python 3 以外の依存はない。
-
-```powershell
-python .\tools\Show-MapRegions.py
-python .\tools\Show-UnitCatalog.py
-```
-
-## 動かす
-
-制御プロセスを先に起動し、そこへゲームを接続する。エージェントは接続できるまで待つ。
-
-```powershell
-.\agent\build.ps1
-python -m rwintel.control --instances 2 --episodes 2 --map Lake --max-seconds 300
-.\tools\Start-RwAgents.ps1 -Count 2 -Speed 10
-```
-
-エピソードごとに勝敗と、決着しなかった場合の軍事価値差が報告される。詳細は [docs/project/05-interface.md](docs/project/05-interface.md) と [docs/project/02-runtime.md](docs/project/02-runtime.md) にある。
-
-二つの方策を比べるときは評価の側を使う。方策はインスタンスの中で交互に走り、差とそれを主張するのに必要なエピソード数が出る。
-
-```powershell
-python -m rwintel.eval --instances 4 --episodes 3 --arm script --arm arm --map Lake --max-seconds 300
-.\tools\Start-RwAgents.ps1 -Count 4 -Speed 10
-```
-
-手順の根拠は [docs/project/07-evaluation.md](docs/project/07-evaluation.md) にある。
-
-試合の最中に人間が指揮を引き取るには、介入コンソールを開く。打った操作は指揮系統が出すのと同一形式の契約になり、`--interventions` を付けるとそのときの盤面と対にして書き出される。`--intrude` はスクリプト乱入者を入れる指定で、設計の頻度で干渉する相手を入れたまま計測するためのものである。
-
-```powershell
-python -m rwintel.control --instances 1 --map Lake --max-seconds 900 --console --interventions local\interventions.jsonl
-python -m rwintel.control --instances 4 --episodes 4 --map Lake --max-seconds 300 --intrude
-```
-
-二つのゲームプロセスを一つのロックステップ試合に入れるには `--paired` を使う。どちらがホストでどちらが参加するかは制御プロセスが決める。`--spawn-probe` は試合中に生成を投入する回数で、エピソードの終わりにチェックサムの照合回数と一致の有無が報告される。
-
-```powershell
-python -m rwintel.control --instances 2 --paired --opponents 0 --map Lake --max-seconds 180 --spawn-probe 6
-.\tools\Start-RwPairedMatch.ps1 -Speed 10
-```
-
-学習の実行である。`python -m rwintel.learn` は最初の語で実行の種類を選び、`tactics` `operations` `collect` `clone` `duel` の五つがある。戦術層は試合を回さず交戦アリーナの中で学習させ、作戦層は通常のスキルミッシュで乱入者を入れて回す。`collect` は決定器を渡さずに走らせて、スクリプトの決定を教師データとして書き出す。
-
-```powershell
-python -m rwintel.learn tactics --instances 4 --save local\tactics.pt
-python -m rwintel.learn operations --instances 4 --episodes 6 --map Lake --max-seconds 300 --intruder --save local\operations.pt
-python -m rwintel.learn collect --layer tactics --instances 4 --record local\teacher.jsonl
-.\tools\Start-RwAgents.ps1 -Count 4 -Speed 10
-```
-
-**アリーナの実行に `--max-seconds` を渡す必要はない。** 省略時の既定はアリーナの 240 秒(`operations` だけ 300 秒)であり、**これを伸ばすのは throughput のつまみではなく測定を壊す操作である**。交戦は片付けられないので、1 本のエピソードの中の交戦は生き残りが溜まっていく同じ盤面を共有し、**件数のわりに標本が痩せる**。交戦を増やしたいなら `--episodes` を増やす。
-
-`clone` は書き出した教師データに網を当てはめて、乱数ではなくスクリプトの真似から強化学習を始められるようにする。**これだけはゲームに触れない**ので、制御プロセスもゲームも起動しない。写した重みから学習を始めるときは `--warmup` を付けて、乱数のままの価値ヘッドを先に合わせ、模倣の狭さを溶かさないよう `--entropy` を小さいまま使う(既定がその値である)。
-
-```powershell
-python -m rwintel.learn clone --layer tactics --teacher local\teacher.jsonl --save local\tactics-bc.pt
-python -m rwintel.learn tactics --instances 8 --load local\tactics-bc.pt --warmup 5 --save local\tactics.pt
-```
-
-`duel` は学習せずに測る実行で、こちら側に読み込んだ網、相手側にスクリプト戦術層を置いて交戦の成績を取る。**`--load` を渡した決闘は、両側スクリプトの基準線アームを既定で同時に取る。** 二つのアームは同じ交戦を戦うので、報告は交戦ごとに対にした差も出す。**成績は反対称なので基準線の平均は 0 でなければならず、0 から離れていればアリーナがその乱数種で盤面の片側に有利ということになる。** アリーナがどちらへ傾くかは種の性質なので、**同じ種の基準線を引かずに方策の生値を読んではならない。**
-
-```powershell
-python -m rwintel.learn duel --load local\tactics.pt --instances 8 --episodes 4
-python -m rwintel.learn duel --instances 8 --episodes 4
-.\tools\Start-RwAgents.ps1 -Count 8 -Speed 10
-```
-
-主な引数である。数値を省略した場合は [docs/project/08-learning.md](docs/project/08-learning.md) の定数表の値がそのまま使われ、模倣の実行についてはそれが最初の行に出る。
-
-| 引数 | 実行 | 意味 |
-| --- | --- | --- |
-| `--instances` / `--episodes` | `clone` 以外 | 接続するゲームの数と、1 インスタンスあたりのエピソード数 |
-| `--load` | `tactics` `operations` `clone` `duel` | 開始時に読むパラメータ。**`duel` だけは読み先が無ければ異常終了する**。学習の実行は新しい方策から始める |
-| `--save` | `tactics` `operations` `clone` | 終了時に書くパラメータ |
-| `--layer` | `collect` `clone` | どちらの層を記録するか、写すか |
-| `--teacher` / `--smoothing` / `--epochs` / `--patience` / `--keep-tainted` | `clone` | 教師データと、その当てはめ方 |
-| `--script` / `--script-opponent` | `tactics` | アリーナの両側をスクリプトにする / 相手だけをスクリプトに固定する |
-| `--greedy` | `duel` | 方策 1 本につき「確率最大の行動で打つアーム」を**足す**。抽選のアームは運用時と同じものなので消えない。二つは同じ交戦を戦うので、抽選が課している税だけを切り出せる |
-| `--intruder` | `operations` | スクリプト乱入者を注入する。設計が学習と評価の両方で要求している |
-| `--record` / `--record-episodes` | `clone` 以外 | エピソード記録の書き出し先。`collect` だけは `--record` が決定列を指し、エピソード記録は `--record-episodes` に出る |
-| `--device` | `collect` 以外 | torch のデバイス。既定は CPU で、この大きさの網ではカードより 3 倍から 7 倍速い |
-| `--width` | `tactics` `clone` `duel` | 戦術網の 1 層あたりの隠れユニット数 |
-| `--entropy` / `--learning-rate` | `tactics` `operations` | 方策をどれだけ一様さへ押すか、と最適化器の学習率 |
-| `--outcome-weight` | `tactics` | アリーナで交戦の成績を終端としてどれだけの重みで払うか |
-| `--score` | アリーナを使う実行 | 交戦の成績のどちらの読みを終端として払うか(`health` / `kills`)。既定は `health`。**決めるのは払う側だけで、報告はどちらの設定でも両方の読みで出る** |
-| `--discount` / `--trace` | `tactics` | 1 決定あたりどれだけ先を割り引くか、と GAE がどれだけバイアスと分散を交換するか。既定はどちらも 1.0、すなわち交戦 1 件を割り引かない。`operations` は 0.99 と 0.95 に固定である |
-| `--batch` | `tactics` `operations` `clone` | 1 回の勾配の一歩に載せる行数 |
-
-torch を要求するのは学習側だけであり、スクリプト方策だけを走らせる実行はその費用を払わない。環境の設計と定数、そしてこれまでに取った測定は [docs/project/08-learning.md](docs/project/08-learning.md) にある。**手書きの戦術層を上回ったと示された方策はまだ無い。** 引き直すアリーナで対にして測ると、逸脱を一つも使わない方策が -0.0555 と -0.0423、乱数のままの網が -0.125 なので、**逸脱の選び方が取り合っている幅は下へ 0.05 ほどである。** 主張する価値のある改善は数百分の数であり、それを見るには片側で数千交戦が要る。**歩幅を上げて三本続けると方策は動き、出てきた候補は手書き層と互角になった。互角までである**([docs/project/08-learning.md](docs/project/08-learning.md) の「次に試すこと」)。
+初めて読む場合は [docs/project/01-approach.md](docs/project/01-approach.md) から、動かす場合は [docs/project/02-runtime.md](docs/project/02-runtime.md) から読むとよい。

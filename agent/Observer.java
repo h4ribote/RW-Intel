@@ -18,19 +18,35 @@ final class Observer {
     private final Engine engine;
     private final World world;
 
+    /** The slot of the player the observation is taken for, or -1 for the player this process is. A replay played back is watched rather than played, and it is observed from the side of whichever player is being studied. */
+    int viewpoint = -1;
+
+    /** The number of the observation whose answer was applied at the head of the current step, -1 when none was; written in the timing block. */
+    int answered = Link.NONE;
+
+    /** The built-in AI players' orders, written in the AI orders block. */
+    final AiOrders aiOrders;
+
     Observer(Engine engine, World world) {
         this.engine = engine;
         this.world = world;
+        this.aiOrders = new AiOrders(engine);
+    }
+
+    /** The player whose side the observation is taken from. */
+    Object self(Object game) throws Exception {
+        return viewpoint >= 0 ? engine.playerAt(viewpoint) : engine.local(game);
     }
 
     byte[] build(Object game, int episode, int blocks) throws Exception {
-        Object self = engine.local(game);
+        Object self = self(game);
         if (self == null) return null;
 
         world.refresh(game, self);
 
-        int size = 64 + World.REGION_SLOTS * 32 + World.SQUAD_SLOTS * 56
-                + world.visible.size() * 48 + world.events.size() * 20;
+        int size = 64 + World.REGION_SLOTS * 32 + World.SQUAD_SLOTS * 60
+                + world.visible.size() * 44 + world.events.size() * 20
+                + (world.lifts.size() + world.endedLifts.size()) * 20 + 8;
         if (scratch.capacity() < size) scratch = Wire.buffer(Integer.highestOneBit(size) * 2);
         ByteBuffer out = scratch;
         out.clear();
@@ -56,7 +72,39 @@ final class Observer {
         if ((blocks & Wire.BLOCK_REGIONS) != 0) writeRegions(out);
         if ((blocks & Wire.BLOCK_SQUADS) != 0) writeSquads(out);
         if ((blocks & Wire.BLOCK_UNITS) != 0) writeUnits(out);
+        if ((blocks & Wire.BLOCK_LIFTS) != 0) writeLifts(out);
         if ((blocks & Wire.BLOCK_EVENTS) != 0) writeEvents(out);
+        if ((blocks & Wire.BLOCK_MENUS) != 0) {
+            List<int[]> menus = menus();
+            int needed = out.position() + 2;
+            for (int[] menu : menus) needed += 5 + 2 * (menu.length - 1);
+            if (out.capacity() < needed) {
+                ByteBuffer larger = Wire.buffer(Integer.highestOneBit(needed) * 2);
+                out.flip();
+                larger.put(out);
+                scratch = out = larger;
+            }
+            writeMenus(out, menus);
+        }
+        if ((blocks & Wire.BLOCK_TIMING) != 0) {
+            if (out.remaining() < 4) {
+                ByteBuffer larger = Wire.buffer(out.capacity() * 2);
+                out.flip();
+                larger.put(out);
+                scratch = out = larger;
+            }
+            out.putInt(answered);
+        }
+        if ((blocks & Wire.BLOCK_AI_ORDERS) != 0) {
+            int needed = out.position() + aiOrders.size();
+            if (out.capacity() < needed) {
+                ByteBuffer larger = Wire.buffer(Integer.highestOneBit(needed) * 2);
+                out.flip();
+                larger.put(out);
+                scratch = out = larger;
+            }
+            aiOrders.write(out);
+        }
 
         byte[] body = new byte[out.position()];
         out.flip();
@@ -94,14 +142,16 @@ final class Observer {
             World.Squad squad = world.squads.get(Integer.valueOf(slot));
             if (squad == null) {
                 out.put((byte) 0);
-                skip(out, 51);
+                skip(out, 59);
                 continue;
             }
             out.put((byte) 1);
             out.putShort((short) squad.id);
             out.put((byte) squad.commander);
             out.put((byte) Math.min(255, squad.units.size()));
-            skip(out, 3);
+            out.put((byte) Math.min(255, squad.aboard));
+            out.put((byte) squad.passage);
+            out.put((byte) squad.targetRegion);
             out.putFloat(squad.value);
             out.putFloat(squad.formedValue);
             out.putFloat(squad.x);
@@ -109,7 +159,7 @@ final class Observer {
             out.putFloat(squad.spread);
             out.put((byte) squad.task);
             out.put((byte) squad.stance);
-            out.put((byte) squad.targetRegion);
+            out.put((byte) squad.targetKind);
             out.put((byte) squad.status);
             out.putFloat(squad.costBudget);
             // The budget is a contract in credits, but what a policy has to reason with is what it is worth against everything still under command, so both go over.
@@ -117,7 +167,33 @@ final class Observer {
             out.putInt(squad.deadlineMs);
             out.putInt(squad.issuedAtMs);
             out.putFloat(squad.losses);
+            out.putInt((int) squad.target);
+            out.putShort((short) (squad.lift == null ? World.NO_SQUAD : squad.lift.id));
+            skip(out, 2);
         }
+    }
+
+    /** Every lift under way, and every lift that ended since the last frame, which is reported once with how it ended. */
+    private void writeLifts(ByteBuffer out) {
+        int count = world.lifts.size() + world.endedLifts.size();
+        out.putShort((short) Math.min(65535, count));
+        for (Lift lift : world.lifts.values()) writeLift(out, lift);
+        for (Lift lift : world.endedLifts) writeLift(out, lift);
+    }
+
+    private void writeLift(ByteBuffer out, Lift lift) {
+        out.putShort((short) lift.id);
+        out.put((byte) lift.phase);
+        out.put((byte) lift.reason);
+        out.put((byte) Math.min(255, lift.loaded));
+        out.put((byte) Math.min(255, lift.expected));
+        out.put((byte) Math.min(255, lift.load.size()));
+        skip(out, 1);
+        out.putFloat(lift.health);
+        out.putInt(lift.etaMs);
+        out.putShort((short) lift.cargoSquad);
+        out.put((byte) lift.dropRegion);
+        skip(out, 1);
     }
 
     private void writeUnits(ByteBuffer out) {
@@ -138,7 +214,11 @@ final class Observer {
             out.put((byte) unit.stance);
             out.put((byte) (unit.hostile ? 1 : 0));
             out.put((byte) Math.min(255, unit.queued));
-            skip(out, 5);
+            out.put((byte) Math.min(255, Math.max(0, unit.level)));
+            out.putShort((short) Math.min(65535, Math.max(0, unit.upgradePrice)));
+            out.put((byte) Math.min(255, unit.aboard));
+            skip(out, 1);
+            out.putInt((int) unit.carrier);
         }
     }
 
@@ -153,6 +233,35 @@ final class Observer {
             out.putShort((short) event.typeIndex);
             out.putShort((short) 0);
             out.putFloat(event.value);
+        }
+    }
+
+    /**
+     * What each of our finished buildings and builders offers to produce or place right now, as the unit id followed by type indices.
+     * Only units that offer something are listed. The list changes with a building's tier, which is why it is read live rather than sent once with the catalogue.
+     */
+    private List<int[]> menus() throws Exception {
+        List<int[]> menus = new java.util.ArrayList<int[]>();
+        for (World.Seen unit : world.visible) {
+            if (unit.hostile || unit.built < 255) continue;
+            Object type = engine.type(unit.handle);
+            if (type == null || !(unit.building || engine.typeIsBuilder(type))) continue;
+            List<Object> offered = engine.producible(unit.handle);
+            if (offered.isEmpty()) continue;
+            int[] menu = new int[1 + Math.min(255, offered.size())];
+            menu[0] = (int) unit.id;
+            for (int i = 1; i < menu.length; i++) menu[i] = world.indexOf(engine.typeName(offered.get(i - 1)));
+            menus.add(menu);
+        }
+        return menus;
+    }
+
+    private static void writeMenus(ByteBuffer out, List<int[]> menus) {
+        out.putShort((short) Math.min(65535, menus.size()));
+        for (int[] menu : menus) {
+            out.putInt(menu[0]);
+            out.put((byte) (menu.length - 1));
+            for (int i = 1; i < menu.length; i++) out.putShort((short) menu[i]);
         }
     }
 

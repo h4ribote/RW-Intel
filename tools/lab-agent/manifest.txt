@@ -1,0 +1,3 @@
+Premain-Class: RwLab
+Can-Redefine-Classes: false
+Can-Retransform-Classes: false

@@ -17,7 +17,18 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence
 
-from ..wire import Action, Commander, Contract, Deviation, Observation, SquadAssignment, SquadDeviation, Stance, Task
+from ..wire import (
+    Action,
+    CargoKind,
+    Commander,
+    Contract,
+    Deviation,
+    Observation,
+    SquadAssignment,
+    SquadDeviation,
+    Stance,
+    Task,
+)
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +46,8 @@ class Kind(enum.IntEnum):
     REASSIGN = 3
     #: Direct tactical command: choose the departure for a squad whose tactical command this commander holds.
     DEPART = 4
+    #: Contract editing: have the transport in a slot of the lift layer carry a squad to a region.
+    LIFT = 5
 
 
 @dataclass
@@ -55,6 +68,8 @@ class Intervention:
     #: Where reassigned units go: a squad id, or -1 to leave them loose for the organisation layer to place.
     into: int = -1
     deviation: int = int(Deviation.HOLD)
+    #: The transport slot a lift is to go by.
+    slot: int = -1
     #: What raised this. "human" for the interface, or the intruder's own name, so a record can be read back knowing who wrote it.
     by: str = "human"
 
@@ -70,13 +85,15 @@ class Intervention:
             row.update(units=list(self.units), into=int(self.into))
         elif self.kind is Kind.DEPART:
             row["deviation"] = int(self.deviation)
+        elif self.kind is Kind.LIFT:
+            row.update(slot=int(self.slot), target_region=int(self.target_region))
         return row
 
 
 class Recorder:
     """Writes each intervention beside the board it was decided from, one JSON object per line.
 
-    This is the imitation data the design says is otherwise unobtainable. A replay carries commands and no state, and the same settings do not reproduce the same match, so the state a recorded command was conditioned on cannot be recovered by replaying it; here the state is in hand at the moment of the decision and is simply written down with it. The quantity is small — a human playing one match at ordinary speed produces tens to a couple of hundred of these — so what it is for is initialisation, regularisation and preference, mixed with the far larger volume of the same shape that the script chain emits.
+    This is human play in the form the chain itself decides in. A replay can be played back to recover the state behind a human's command, but the command is a unit order and the contract it served has to be inferred; here the decision is a contract and the state is in hand at the moment it is taken, so both are simply written down together. The quantity is small -a human playing one match at ordinary speed produces tens to a couple of hundred of these -so what it is for is initialisation, regularisation and preference, mixed with the far larger volume of the same shape that the script chain emits.
 
     The encoder is supplied rather than imported so that the recording path does not oblige a control process to carry the learning package. Without one the board is kept as the few figures that summarise it, which is enough to read the log by eye and not enough to learn from.
     """
@@ -124,7 +141,7 @@ def _summary(observation: Observation) -> dict:
 class Interface:
     """The intervention interface: a queue of requests, drained onto the action once a period.
 
-    Requests are queued rather than applied where they are made because they are made from another thread — a console, a user interface, a rule — while the action they amend is built on the session's own thread when an observation arrives. Draining them at one point keeps the ordering of an action's sections meaningful and means an outside commander never has to know what a period is.
+    Requests are queued rather than applied where they are made because they are made from another thread -a console, a user interface, a rule -while the action they amend is built on the session's own thread when an observation arrives. Draining them at one point keeps the ordering of an action's sections meaningful and means an outside commander never has to know what a period is.
     """
 
     def __init__(self, organisation=None, recorder: Optional[Recorder] = None,
@@ -169,6 +186,11 @@ class Interface:
 
     def depart(self, squad: int, deviation: Deviation) -> None:
         self.request(Intervention(kind=Kind.DEPART, squad=squad, deviation=int(deviation), by=self.name))
+
+    def lift(self, squad: int, slot: int, target_region: int) -> None:
+        """Has the transport in the slot carry the squad to the region."""
+        self.request(Intervention(kind=Kind.LIFT, squad=squad, slot=int(slot), target_region=int(target_region),
+                                  by=self.name))
 
     # ---- what happens to it -----------------------------------------------------------
 
@@ -218,7 +240,35 @@ class Interface:
             return self._reassign(intervention, action, by_id, observation)
         if intervention.kind is Kind.DEPART:
             return self._depart(intervention, action)
+        if intervention.kind is Kind.LIFT:
+            return self._lift(intervention, action, by_id, observation)
         return False
+
+    def _lift(self, intervention: Intervention, action: Action,
+              by_id: Dict[int, object], observation: Observation) -> bool:
+        """Has the lift layer plan the lift and sends it as this commander's, which the game side accepts for a squad this commander holds. The lift layer is the chain's, so that the transport is then busy for the chain too."""
+        logistics = getattr(self.organisation, "logistics", None)
+        if logistics is None or not 0 <= intervention.slot < len(logistics.slots):
+            log.info("no transport slot %d to lift with", intervention.slot)
+            return False
+        if self._taken_by_another(intervention.squad, by_id):
+            log.info("squad %d is held by someone else", intervention.squad)
+            return False
+        kinds = {unit.id: unit for unit in observation.unit_states}
+        members = []
+        for unit_id in self._roster(intervention.squad, by_id, observation):
+            unit = kinds.get(unit_id)
+            kind = logistics.catalogue.kind(unit.type_index) if unit is not None else None
+            if kind is not None and not unit.carrier:
+                members.append((unit.type_index, kind.movement, unit.x, unit.y))
+        before = len(logistics.rows())
+        if not logistics.lift_squad(intervention.squad, members, intervention.slot, intervention.target_region, intervention.at_ms):
+            log.info("the transport in slot %d cannot carry squad %d there", intervention.slot, intervention.squad)
+            return False
+        for row in logistics.rows()[before:]:
+            row.override = True
+            action.lifts.append(row)
+        return True
 
     def _take(self, intervention: Intervention, action: Action,
               by_id: Dict[int, object], observation: Observation) -> bool:
@@ -265,7 +315,7 @@ class Interface:
         _strip(action, intervention.squad, deviations=False, rosters=False)
         action.contracts.append(Contract(
             squad=intervention.squad, task=Task(intervention.task), stance=Stance(intervention.stance),
-            target_region=intervention.target_region, cost_budget=intervention.cost_budget,
+            target=intervention.target_region, cost_budget=intervention.cost_budget,
             deadline_ms=intervention.deadline_ms, issued_at_ms=intervention.at_ms, override=True,
         ))
         self._written[intervention.squad] = (intervention.task, intervention.target_region,
@@ -370,6 +420,9 @@ def _strip(action: Action, squad: int, contracts: bool = True, deviations: bool 
     """
     if contracts:
         action.contracts = [row for row in action.contracts if row.squad != squad or row.override]
+        # A lift of the squad is part of its errand, so it goes with the contract; the game side would refuse it anyway, and the lift layer frees the slot once the lift goes unreported.
+        action.lifts = [row for row in action.lifts
+                        if row.override or row.cargo_kind != CargoKind.SQUAD or squad not in row.cargo[:1]]
     if deviations:
         action.deviations = [row for row in action.deviations if row.squad != squad or row.override]
     if rosters:

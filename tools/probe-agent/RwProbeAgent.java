@@ -7,13 +7,11 @@ import java.lang.reflect.Modifier;
 /**
  * Measures how fast the Rusted Warfare simulation can be driven, applies the levers that control it, and can dump the live field values of game objects so the obfuscated data model can be confirmed against the disassembly.
  *
- * The engine advances game time by deltaSpeed * 16.667 ms per frame, where deltaSpeed is derived from real elapsed time and then multiplied by the field H.
- * So H is the wall-clock speed multiple, while the frame rate decides how coarse each simulation step is.
+ * How the clock advances and whether frames are drawn is the frame layer's (see {@link Frame}), whose options this agent takes too.
+ * The rates it reports are measured against the wall clock: game time per real time, frames per real second, and game time per frame.
  *
- * Agent options, comma separated:
- *   speed=<float>     value to force into the engine speed multiplier, omit to leave it alone
- *   uncap=<bool>      ask the Slick container to drop its frame rate cap
- *   interval=<millis> reporting period
+ * Agent options, comma separated, besides the frame layer's:
+ *   interval=<millis> reporting period, default 5000
  *   dump=<count>      once the world is populated, dump this many game objects and all players
  *   act=move          order one unit to move, then report whether it obeyed
  *   catalog=<bool>    dump every registered unit type with the numbers a commander needs, then carry on
@@ -23,16 +21,13 @@ import java.lang.reflect.Modifier;
  *                     A substring is used rather than a path because map names contain spaces, which would split the agent argument.
  *   ai=<count>        opponents to add, default 1
  *   difficulty=<int>  AI difficulty from -2 (very easy) to 3 (impossible), default 1
- *   contestants=<n>   leave exactly this many AI players in the match and move everyone else, the local
- *                     player included, to the spectators
+ *   contestants=<n>   leave exactly this many AI players in the match and move everyone else, the local player included, to the spectators
  *                     This is what makes an episode's outcome informative: with the local player sitting in the match and doing nothing, every episode ends the same way and the spread of results cannot be seen at all.
  *                     The local player cannot simply be flagged as an AI, because the built-in AI is a separate player class that only the host's add-AI path creates.
  *                     The room fills every slot regardless of how many opponents were asked for, so the contestants have to be chosen by taking the rest out rather than by adding the right number.
  *                     The map needs a starting position for each contestant's slot, so two contestants need a map for four.
- *   levels=<a,b,...>  difficulty for each contestant in turn, overriding the room's single setting
- *                     The room applies one difficulty to every AI it adds, so an uneven matchup can only be had by
- *                     setting each contestant afterwards. An uneven matchup is what gives a known effect size to
- *                     size a comparison against.
+ *   levels=<a;b;...>  difficulty for each contestant in turn, overriding the room's single setting, separated by semicolons because commas separate the options
+ *                     The room applies one difficulty to every AI it adds, so an uneven matchup can only be had by setting each contestant afterwards.
  *   seed=<int>        random seed for every episode, default 12345
  *   episodes=<count>  how many episodes to run, default 2
  *   maxSeconds=<int>  end an episode after this much game time even if undecided, 0 to disable
@@ -42,8 +37,6 @@ public class RwProbeAgent {
     /** A dump is only useful once the world has been populated. */
     private static final int DUMP_OBJECT_THRESHOLD = 50;
 
-    private static volatile float targetSpeed = -1f;
-    private static volatile boolean uncap = false;
     private static volatile long intervalMs = 5000L;
     private static volatile int dumpCount = 0;
     private static volatile String action = "";
@@ -68,8 +61,8 @@ public class RwProbeAgent {
 
     public static void premain(String args, Instrumentation inst) {
         parseOptions(args);
-        log("started: speed=" + targetSpeed + " uncap=" + uncap + " interval=" + intervalMs
-                + "ms dump=" + dumpCount);
+        log("started: interval=" + intervalMs + "ms dump=" + dumpCount);
+        Frame.install();
         Thread thread = new Thread(new Runnable() {
             public void run() {
                 try {
@@ -91,9 +84,8 @@ public class RwProbeAgent {
             if (eq < 0) continue;
             String key = pair.substring(0, eq).trim();
             String value = pair.substring(eq + 1).trim();
-            if (key.equals("speed")) targetSpeed = Float.parseFloat(value);
-            else if (key.equals("uncap")) uncap = Boolean.parseBoolean(value);
-            else if (key.equals("interval")) intervalMs = Long.parseLong(value);
+            if (Frame.option(key, value)) continue;
+            if (key.equals("interval")) intervalMs = Long.parseLong(value);
             else if (key.equals("dump")) dumpCount = Integer.parseInt(value);
             else if (key.equals("act")) action = value;
             else if (key.equals("catalog")) dumpCatalog = Boolean.parseBoolean(value);
@@ -129,12 +121,17 @@ public class RwProbeAgent {
 
         Field frameCounter = field(engineClass, "bx");
         Field gameTimeMs = field(engineClass, "by");
-        Field speedMultiplier = field(engine.getClass(), "H");
-        log("H initial value = " + speedMultiplier.getFloat(engine));
 
-        Method allObjects = allObjectsMethod();
-        Method setTargetFrameRate = null;
-        Object container = null;
+        matchEngine = engine;
+        if (!matchMap.isEmpty()) {
+            Frame.addListener(new Frame.Listener() {
+                public void onFrame(int gameTime) {
+                    scheduleMatch(gameTime);
+                }
+            });
+        }
+
+        Object allObjects = objectCollection();
         boolean dumped = false;
         boolean acted = false;
 
@@ -150,27 +147,12 @@ public class RwProbeAgent {
             if (current == null) continue;
             if (current != engine) {
                 engine = current;
-                speedMultiplier = field(engine.getClass(), "H");
+                matchEngine = current;
                 lastFrame = frameCounter.getInt(engine);
                 lastGameMs = gameTimeMs.getInt(engine);
                 lastNanos = System.nanoTime();
                 log("engine replaced, counters reset");
                 continue;
-            }
-
-            if (targetSpeed > 0f && speedMultiplier.getFloat(engine) != targetSpeed) {
-                speedMultiplier.setFloat(engine, targetSpeed);
-            }
-
-            if (uncap) {
-                if (container == null) {
-                    container = findContainer();
-                    if (container != null) {
-                        setTargetFrameRate = container.getClass().getMethod("setTargetFrameRate", int.class);
-                        log("container found: " + container.getClass().getName());
-                    }
-                }
-                if (setTargetFrameRate != null) setTargetFrameRate.invoke(container, -1);
             }
 
             long nanos = System.nanoTime();
@@ -241,7 +223,6 @@ public class RwProbeAgent {
 
             reportWatchedUnit();
             reportSpawnTest();
-            if (!matchMap.isEmpty()) driveMatch(engine);
 
             lastNanos = nanos;
             lastFrame = frame;
@@ -261,22 +242,31 @@ public class RwProbeAgent {
     private static int matchState = NEED_SERVER;
     private static int episode = 0;
     private static volatile boolean matchBusy = false;
+    private static volatile Object matchEngine;
+
+    /** Game time between two looks at a running match, which is how finely the end of an episode and its time limit are caught. */
+    private static final int MATCH_CHECK_MS = 1000;
+    /** Game time of the last look. Touched only on the game thread. */
+    private static int lastMatchCheckMs = Integer.MIN_VALUE;
 
     /**
      * Runs skirmish episodes: brings up a single player server once, then starts, watches and resets matches.
      * The battleroom route is used rather than the quick start, because beginning a match with no network session makes the engine redraw the random seed and flatten the income multiplier, which would make runs unreproducible.
-     * Everything that changes engine state runs on the game thread, because loading a map builds textures and so needs the OpenGL context that only that thread holds.
+     * It is decided on the game thread every frame against game time, so an episode is watched as closely at any speed; what changes engine state is queued to the engine's task queue, because loading a map builds textures and so needs the OpenGL context, and that queue is where the engine takes outside changes.
      */
-    private static void driveMatch(Object engine) {
-        if (matchBusy) return;
+    private static void scheduleMatch(int now) {
+        Object engine = matchEngine;
+        if (matchBusy || engine == null || matchMap.isEmpty()) return;
         try {
             if (matchState == NEED_SERVER) {
+                Frame.setIdle(false);
                 runMatchStep(engine, "startServer");
             } else if (matchState == NEED_EPISODE) {
                 if (episode < episodeLimit) runMatchStep(engine, "startEpisode");
-            } else {
-                logCheckpoint(engine);
-                reportMatch(engine);
+                else Frame.setIdle(true);
+            } else if (lastMatchCheckMs == Integer.MIN_VALUE || now < lastMatchCheckMs || now - lastMatchCheckMs >= MATCH_CHECK_MS) {
+                lastMatchCheckMs = now;
+                if (logCheckpoint(engine)) reportMatch(engine);
                 if (matchFinished(engine)) runMatchStep(engine, "endEpisode");
             }
         } catch (Throwable e) {
@@ -397,6 +387,7 @@ public class RwProbeAgent {
         episode++;
         matchState = RUNNING;
         lastCheckpointMinute = -1;
+        lastMatchCheckMs = Integer.MIN_VALUE;
         log("match: episode " + episode + " start accepted=" + accepted + " seed=" + seed
                 + " opponents=" + opponents + " difficulty=" + difficulty + " " + netFlags(net));
     }
@@ -446,12 +437,12 @@ public class RwProbeAgent {
     }
 
     /**
-     * Logs a comparable snapshot every minute of game time.
-     * Two runs of the same seed can be lined up on these to see whether the simulation actually reproduces, which matters because the frame delta comes from real elapsed time rather than a fixed step.
+     * Logs a comparable snapshot every minute of game time, and says whether it did.
+     * Two runs of the same seed can be lined up on these to see whether the simulation reproduces.
      */
-    private static void logCheckpoint(Object engine) throws Exception {
+    private static boolean logCheckpoint(Object engine) throws Exception {
         int minute = gameSeconds(engine) / 60;
-        if (minute <= lastCheckpointMinute) return;
+        if (minute <= lastCheckpointMinute) return false;
         lastCheckpointMinute = minute;
 
         Class<?> playerClass = Class.forName("com.corrodinggames.rts.game.n");
@@ -465,7 +456,8 @@ public class RwProbeAgent {
             credits.append((long) playerClass.getField("o").getDouble(player));
         }
         log("checkpoint: episode=" + episode + " minute=" + minute + " frame=" + getField(engine, "bx")
-                + " objects=" + countObjects(allObjectsMethod()) + " credits=" + credits);
+                + " objects=" + countObjects(objectCollection()) + " credits=" + credits);
+        return true;
     }
 
     private static int lastCheckpointMinute = -1;
@@ -1055,7 +1047,7 @@ public class RwProbeAgent {
      * Prints the live field values of a sample of game objects and of every player.
      * This is ground truth for the obfuscated data model: it shows which field actually holds health, position and owner, which the disassembly alone can only suggest.
      */
-    private static void dumpWorld(Method allObjects, Object engine) {
+    private static void dumpWorld(Object allObjects, Object engine) {
         try {
             log("---- dump begin ----");
             Object[] objects = objectArray(allObjects);
@@ -1152,39 +1144,25 @@ public class RwProbeAgent {
 
     // ---- engine access -------------------------------------------------------------------
 
-    private static Object findContainer() {
-        try {
-            Class<?> mainClass = Class.forName("com.corrodinggames.rts.java.Main");
-            Field self = mainClass.getDeclaredField("m");
-            self.setAccessible(true);
-            Object main = self.get(null);
-            if (main == null) return null;
-            Field containerField = mainClass.getDeclaredField("k");
-            containerField.setAccessible(true);
-            return containerField.get(main);
-        } catch (Throwable e) {
-            log("container lookup failed: " + e);
-            return null;
-        }
-    }
-
-    private static Method allObjectsMethod() {
+    /**
+     * The engine's collection of all game objects, read from its field rather than through `w.dK()`, because `dK()` applies the pending additions and removals and so writes to the collection, which only the game thread may do.
+     * The size and backing array read from it therefore leave out what was added or removed since the game thread last applied the pending changes.
+     */
+    private static Object objectCollection() {
         try {
             Class<?> objectClass = Class.forName("com.corrodinggames.rts.gameFramework.w");
-            Method all = objectClass.getMethod("dK");
+            Field all = objectClass.getDeclaredField("a");
             all.setAccessible(true);
-            return all;
+            return all.get(null);
         } catch (Throwable e) {
             log("object list lookup failed: " + e);
             return null;
         }
     }
 
-    private static int countObjects(Method allObjects) {
-        if (allObjects == null) return -1;
+    private static int countObjects(Object list) {
+        if (list == null) return -1;
         try {
-            Object list = allObjects.invoke(null);
-            if (list == null) return -1;
             Method size = list.getClass().getMethod("size");
             size.setAccessible(true);
             return ((Integer) size.invoke(list)).intValue();
@@ -1194,11 +1172,9 @@ public class RwProbeAgent {
     }
 
     /** The engine's object collection exposes its backing array; entries may be null. */
-    private static Object[] objectArray(Method allObjects) {
-        if (allObjects == null) return null;
+    private static Object[] objectArray(Object list) {
+        if (list == null) return null;
         try {
-            Object list = allObjects.invoke(null);
-            if (list == null) return null;
             Method backing = list.getClass().getMethod("b");
             backing.setAccessible(true);
             return (Object[]) backing.invoke(list);

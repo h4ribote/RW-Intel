@@ -1,0 +1,9 @@
+# Any map. Every type's capabilities read off its sample unit, which transports would load which types, and the menus of the producers a match starts with.
+# Expect: hovercraft and dropship cannot attack and have capacity 4; experimentalTank takes 5 slots; hovercraft refuses helicopter, gunBoat and experimentalTank; seaFactory offers hovercraft.
+@0 catalog
+@0 compat
+@1 bind hq commandCenter
+@1 bind b1 builder
+@2 menu hq
+@2 menu b1
+@3 end

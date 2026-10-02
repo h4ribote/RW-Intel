@@ -1,0 +1,24 @@
+# Beach landing, our side the east island. Orders to ground a unit cannot reach, and units that change form.
+# Expect: lt (move) and b3 (build) stop at the shore with no order left; la (attack move) stops at the shore still holding its order; ht crosses the water; bt stops in the water short of the shore; ma stops at the shore; aj and cj keep their types while moving.
+@0 spawn lt tank 3300 1700
+@0 spawn la tank 3460 1660
+@0 spawn ht hoverTank 3280 1650
+@0 spawn bt gunBoat 3150 1800
+@0 bind b3 builder 3510 1630
+@0 spawn ma mechArtillery 3320 1600
+@0 spawn aj amphibiousJet 3350 1500
+@0 spawn cj c_amphibiousJet 3300 1550
+@1 track lt la ht bt b3 ma aj cj
+@2 move lt 2800 1500
+@2 amove la 2800 1500
+@2 move ht 2800 1500
+@2 move bt 2800 1500
+@2 build b3 extractorT1 2370 1830
+@2 move ma 2800 1500
+@2 move aj 3100 1750
+@2 move cj 2700 1550
+@30 move aj 2700 1550
+@30 move cj 3100 1750
+@50 actions aj
+@50 actions cj
+@60 end

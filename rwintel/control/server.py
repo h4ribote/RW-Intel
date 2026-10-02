@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import socket
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
@@ -39,6 +40,23 @@ class ServerSettings:
     pairing: Optional[object] = None
 
 
+def open_listener(host: str, port: int, backlog: int = 1) -> socket.socket:
+    """The control process's listening socket, polled once a second so that a stop request is noticed.
+
+    On Linux SO_REUSEADDR lets a restarted control process bind while the previous one's connections sit in TIME_WAIT, and still refuses a port another process is listening on, so a stale control process makes this one fail to start rather than share the agents with it.
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, port))
+        listener.listen(max(1, backlog))
+    except OSError:
+        listener.close()
+        raise
+    listener.settimeout(1.0)
+    return listener
+
+
 class Server:
     def __init__(self, settings: ServerSettings, policy_factory: Optional[Callable[[Session], object]] = None):
         self.settings = settings
@@ -48,6 +66,7 @@ class Server:
         self.sessions: List[Session] = []
         self._lock = threading.Lock()
         self._done = threading.Event()
+        self._threads: List[threading.Thread] = []
 
     def _finished(self) -> bool:
         """True once every instance that was asked for has been seen and has run all its episodes."""
@@ -58,17 +77,11 @@ class Server:
             return all(len(session.records) >= wanted for session in self.sessions)
 
     def serve(self) -> List[Session]:
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Not SO_REUSEADDR: on Windows it lets a second process bind a port that is already listening, and which of the two then receives a connection is undefined. A stale control process would silently keep serving the agents while the new one looked healthy. Failing to bind is the behaviour that is wanted here.
-        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        listener.bind((self.settings.host, self.settings.port))
-        listener.listen(max(1, self.settings.instances))
-        listener.settimeout(1.0)
+        listener = open_listener(self.settings.host, self.settings.port, self.settings.instances)
         log.info("listening on %s:%d for %d instance(s)",
                  self.settings.host, self.settings.port, self.settings.instances)
 
-        threads: List[threading.Thread] = []
+        threads = self._threads
         try:
             while not self._done.is_set() and not self._finished():
                 try:
@@ -90,8 +103,43 @@ class Server:
     def stop(self) -> None:
         self._done.set()
 
+    def wait(self, timeout: float) -> bool:
+        """Waits up to `timeout` seconds in all for the link threads to end after a stop, and says whether they all did. A link thread notices the stop at its next frame."""
+        deadline = time.monotonic() + timeout
+        for thread in list(self._threads):
+            thread.join(max(0.0, deadline - time.monotonic()))
+        return not any(thread.is_alive() for thread in self._threads)
+
+    def close_unfinished(self, timeout: float = 10.0) -> None:
+        """After a stop, closes the policy of every episode still under way as `stopped`, once the link threads that drive them have ended. A session whose thread has not ended is left alone, since its policy may still be deciding."""
+        if not self.wait(timeout):
+            log.warning("a link thread did not end within %.0fs of the stop; its episode is left unclosed", timeout)
+        alive = {thread.name for thread in self._threads if thread.is_alive()}
+        with self._lock:
+            sessions = list(self.sessions)
+        for session in sessions:
+            if getattr(session, "thread_name", None) not in alive:
+                session.close_episode("stopped")
+
+    def abandon(self) -> None:
+        """Stops the run because an instance cannot play, and releases every link thread, since one may be blocked reading from an agent that has nothing more to send."""
+        self._done.set()
+        with self._lock:
+            connections = [session.connection for session in self.sessions]
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    @property
+    def failures(self) -> List[Tuple[int, str]]:
+        """The instances that reported they could not play, with the reason each gave."""
+        with self._lock:
+            return [(session.instance, session.failure) for session in self.sessions if session.failure is not None]
+
     def session(self, instance: int) -> Optional[Session]:
-        """The session of one instance, which is how anything outside the link threads — the intervention console above all — reaches the policy that is currently deciding for it."""
+        """The session of one instance, which is how anything outside the link threads -the intervention console above all -reaches the policy that is currently deciding for it."""
         with self._lock:
             return next((s for s in self.sessions if s.instance == instance), None)
 
@@ -120,13 +168,19 @@ class Server:
                     # Which session this is cannot be known before the HELLO, because the instance number is in it.
                     instance = Session.instance_in(frame.body)
                     session = self._session_for(instance, connection, address)
+                    session.thread_name = threading.current_thread().name
                     session.on_hello(frame.body)
                 elif session is None:
                     log.warning("frame of kind %s from %s before its hello, ignored", frame.kind, address)
                 elif frame.kind == Kind.EPISODE:
                     session.on_episode(frame.body)
+                elif frame.kind == Kind.TERRAIN:
+                    session.on_terrain(frame.body)
                 elif frame.kind == Kind.OBSERVATION:
-                    session.on_observation(frame.body)
+                    session.on_observation(frame.body, frame.flags)
+                if session is not None and session.failure is not None:
+                    self.abandon()
+                    break
                 if session is not None and len(session.records) >= session.episodes_wanted:
                     break
         except (ConnectionError, OSError) as error:

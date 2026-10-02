@@ -14,10 +14,13 @@ from typing import Optional
 #: ASCII "RWIN". Present so a stream that has lost sync fails loudly at the next header.
 MAGIC = 0x4E495752
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 10
 
 _HEADER = struct.Struct("<IHHHHI")
 HEADER_SIZE = _HEADER.size
+
+#: The header's flags field is 16 bits wide. An observation carries its number there, and the action answering it carries the same number back.
+FLAGS_MASK = 0xFFFF
 
 
 class Kind(enum.IntEnum):
@@ -25,6 +28,7 @@ class Kind(enum.IntEnum):
 
     HELLO = 0x01
     EPISODE = 0x02
+    TERRAIN = 0x03
     OBSERVATION = 0x10
     ACTION = 0x20
     CONTROL = 0x30

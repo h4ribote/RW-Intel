@@ -1,10 +1,10 @@
 """A board on which fights are built one after another, so the tactical layer can be trained without playing matches.
 
-The tactical layer's sample budget is not the match budget. An errand lasts ten to sixty seconds and a match lasts fifteen minutes, so training the tactical layer inside matches would spend the overwhelming majority of the wall clock simulating economies, build orders and marches that its decision has no bearing on. Everything needed to avoid that is already there: the engine's own spawn command creates units through the ordinary command route, the room settings can start a match with nothing on the board, and the sandbox flag makes every player's units answerable to this one process. Put together, that is an arena — one long episode in which engagements are constructed, fought, swept away and constructed again.
+The tactical layer's sample budget is not the match budget. An errand lasts ten to sixty seconds and a match lasts fifteen minutes, so training the tactical layer inside matches would spend the overwhelming majority of the wall clock simulating economies, build orders and marches that its decision has no bearing on. Everything needed to avoid that is already there: the engine's own spawn command creates units through the ordinary command route, the room settings can start a match with nothing on the board, and the sandbox flag makes every player's units answerable to this one process. Put together, that is an arena -one long episode in which engagements are constructed, fought, swept away and constructed again.
 
 Both sides are driven from here, which is the point of the sandbox flag and is what makes the opponent something other than the built-in AI. The opposing side runs the same tactical layer over the same board read from the other side, so that what a learnt layer is measured against is the script layer doing exactly its job, and so that self-play needs no second process and no network.
 
-There is no instruction that removes a unit, because the game has none: the only way to unmake a unit is to kill it. So an engagement is not cleared, it is finished — the survivors of both sides are set on each other until there are none — and the next engagement is built somewhere else on the map. That is slower than deleting them would be and it is the only method that keeps every change on the command route, which is the property the whole approach depends on.
+There is no instruction that removes a unit, because the game has none: the only way to unmake a unit is to kill it. So an engagement is not cleared, it is finished -the survivors of both sides are set on each other until there are none -and the next engagement is built somewhere else on the map. That is slower than deleting them would be and it is the only method that keeps every change on the command route, which is the property the whole approach depends on.
 """
 
 from __future__ import annotations
@@ -26,9 +26,10 @@ from ..wire import (
     encode_action,
 )
 from ..control.policy.catalogue import Catalogue
-from ..control.policy.contracts import Doctrine, SquadRecord, TaskContract
+from ..control.policy.contracts import Doctrine, Function, SquadRecord, TaskContract
 from ..control.policy.tactics import Tactics
 from ..control.policy.view import build as build_view
+from .reward import BY_HEALTH
 
 log = logging.getLogger(__name__)
 
@@ -39,14 +40,14 @@ THEIRS = 1
 #: How long a fight is allowed before it is called and swept, in game milliseconds. The design's stated tactical horizon is ten to sixty seconds; this is the top of it, and most fights end well inside it.
 FIGHT_MS = 60000
 
-#: How long the survivors are given to finish each other off before the next engagement is built anyway. A remainder is tolerable — the next site is chosen away from it — but an unbounded wait is not.
+#: How long the survivors are given to finish each other off before the next engagement is built anyway. A remainder is tolerable -the next site is chosen away from it -but an unbounded wait is not.
 SWEEP_MS = 20000
 
 #: How long a fight may go without a casualty on either side before it is called.
 #:
 #: Two forces that have stopped hurting each other are not about to start. Measured: an engagement that ends with somebody destroyed takes twenty to thirty seconds, and one that ends on the clock spends its whole minute with both sides nearly intact, so waiting the full minute for those buys nothing and costs the arena a third of its time. Long enough that a squad manoeuvring for position is not mistaken for one that has given up.
 #:
-#: What removing it costs and buys has since been measured on both settings at once, as two arms of one run drawing the same fights. It buys decisiveness: fights that end with a side destroyed go from 31 per cent to 49. It costs throughput, because the fights that would have been called run their whole minute — the same wall clock produced 1380 fights against 894 — and it widens the scatter of the score from 0.569 to 0.643, which is what a sample size is paid in. It does not move the baseline: the two arms differ by -0.022 with two standard errors of 0.031, where a run of the handwritten layer against itself has to average nought. That last was once believed otherwise and was the stated reason for keeping the cut-off; the belief came from a run whose episodes all drew the same fights over again, and it did not survive drawing them afresh.
+#: What removing it costs and buys has since been measured on both settings at once, as two arms of one run drawing the same fights. It buys decisiveness: fights that end with a side destroyed go from 31 per cent to 49. It costs throughput, because the fights that would have been called run their whole minute -the same wall clock produced 1380 fights against 894 -and it widens the scatter of the score from 0.569 to 0.643, which is what a sample size is paid in. It does not move the baseline: the two arms differ by -0.022 with two standard errors of 0.031, where a run of the handwritten layer against itself has to average nought. That last was once believed otherwise and was the stated reason for keeping the cut-off; the belief came from a run whose episodes all drew the same fights over again, and it did not survive drawing them afresh.
 STALL_MS = 12000
 
 #: How long to wait for spawned units to appear before giving up on an engagement and trying again. Spawning goes through the command queue, so it takes a step or two rather than being instantaneous.
@@ -86,13 +87,8 @@ MINIMUM_FORCE = 3
 
 #: How long to let the opening board settle before the first engagement is built, in game milliseconds.
 #:
-#: A spawn-point player is given a headquarters and a builder at the start of an episode, and they are not all on the board in the first frame the arena reads: they arrive a step or two in. The snapshot of what was already standing, against which every later arrival is judged to be a freshly spawned unit of a fight, is taken before an engagement is built — so building the first one immediately takes that snapshot too early, misses the base, and then the squad former counts this side's own headquarters as a unit that has just arrived for the fight and sweeps it into the squad. The fight is then one this side scores an extra headquarters in and the baseless opposing side never can, which is a bias in the self-play baseline that has to be nought. Waiting until the set of standing units stops changing folds the base into the snapshot, after which no engagement mistakes it for part of a fight; this is the longest that wait may run before the first engagement is built regardless, for the case of a board that never settles or never fills. It is paid once an episode, because after the first engagement the base is standing and every later snapshot already holds it.
+#: A spawn-point player is given a headquarters and a builder at the start of an episode, and they are not all on the board in the first frame the arena reads: they arrive a step or two in. The snapshot of what was already standing, against which every later arrival is judged to be a freshly spawned unit of a fight, is taken before an engagement is built -so building the first one immediately takes that snapshot too early, misses the base, and then the squad former counts this side's own headquarters as a unit that has just arrived for the fight and sweeps it into the squad. The fight is then one this side scores an extra headquarters in and the baseless opposing side never can, which is a bias in the self-play baseline that has to be nought. Waiting until the set of standing units stops changing folds the base into the snapshot, after which no engagement mistakes it for part of a fight; this is the longest that wait may run before the first engagement is built regardless, for the case of a board that never settles or never fills. It is paid once an episode, because after the first engagement the base is standing and every later snapshot already holds it.
 SETTLE_MS = 5000
-
-#: How much of a terminal reward the outcome of a fight is worth, for a fight that ended without the contract itself reaching one of its own conclusions. One means that destroying the other side without a scratch is paid exactly what taking the contracted ground is paid, which is the largest this can be set to without teaching a layer to prefer a massacre to the errand it was given.
-#:
-#: Something has to be paid here, and measurement is the reason. Most fights end neither by one side being destroyed nor on the clock: they end with two forces that have stopped hurting each other, and under a scheme that paid only the discrete conclusions those fights were worth precisely nothing to either side. Nothing is the best score available in a fight that can only go badly, so a layer paid that way is being taught to stand off and wait, which is the opposite of what the arena exists to teach.
-TERMINAL_OUTCOME_WEIGHT = 1.0
 
 #: What multiple of a squad's present worth its contract will let it lose, drawn per side per engagement.
 #:
@@ -105,24 +101,10 @@ BUDGET_SHARE = (0.3, 1.2)
 #:
 #: It did not survive the self-check. The handwritten layer against itself came back at -0.070 over 901 fights where it has to be nought, and the reason was that the share was not symmetric after all: the two spawn orders were submitted one after the other with this side's first, so when an order had not finished arriving it was more often the other side's, and the squads that formed carried 53.1 per cent of the strength for this side against 50.0 per cent of what was ordered. Three points of asymmetry multiplied by 2.2 is the seven hundredths that appeared. The score without the term is unbiased on the same fights at -0.003, because writing the two sides as shares of their own worth already absorbs most of what the draw does.
 #:
-#: The structural cause is now gone, and it was not the spawn order after all. Interleaving the two orders a unit at a time (Arena._interleave) left the baseline exactly where it was; what actually put three points of strength on this side was the episode's own headquarters being swept into the first fight's squad, which is fixed by letting the opening board settle first (SETTLE_MS). With that in, the formed shares are even — the mean of share less a half is +0.004 against an ordered share of 0.504.
+#: The structural cause is now gone, and it was not the spawn order after all. Interleaving the two orders a unit at a time (Arena._interleave) left the baseline exactly where it was; what actually put three points of strength on this side was the episode's own headquarters being swept into the first fight's squad, which is fixed by letting the opening board settle first (SETTLE_MS). With that in, the formed shares are even -the mean of share less a half is +0.004 against an ordered share of 0.504.
 #:
 #: So the term could now be earned back, and the third of the variance it removed is worth having. What it takes is fitting the multiple again on a run of the arena as it now draws its fights, and then passing the self-check that a run of the handwritten layer against itself averages nought. That has not been done, so this stays at nought: a variance reduction that has not passed the check that killed the last one is not a variance reduction. Left at nought rather than deleted because the measurement that killed it is the reason anybody would try it again.
 STRENGTH_SLOPE = 0.0
-
-#: Scoring a fight on what is left standing, which is what every figure this project has quoted was taken on.
-#:
-#: A unit counts for the whole of its price until the moment it dies and for nothing after, so damage short of a kill is invisible. That is the sparse reading of a fight and it is the one the ceiling was measured against.
-BY_KILLS = "kills"
-
-#: Scoring a fight on what is left standing weighted by how much of it is left, so that a unit at a tenth of its health counts for a tenth of its price.
-#:
-#: Most fights end with neither side destroyed — three quarters of them are called because the two forces stopped killing each other — and under the sparse reading every one of those is worth precisely nothing to either side, however one-sided the damage was. That is the largest single fact about this arena's signal: the score, which is both what the layer is paid and what the run is judged on, is nought on three quarters of what it measures. Weighting by health does not change what a fight is worth when it ends in a body count, because a dead unit is worth nothing under either reading; it changes what a fight is worth when it ends with two damaged forces, which is the common case.
-#:
-#: Antisymmetry is untouched: the two sides' figures are the same subtraction with the terms exchanged, so a run of the handwritten layer against itself still has to average nought and the self-check that governs everything here still governs it.
-BY_HEALTH = "health"
-
-SCORES = (BY_KILLS, BY_HEALTH)
 
 
 def _lost(started: float, left: float) -> float:
@@ -133,6 +115,41 @@ def _lost(started: float, left: float) -> float:
     if started <= 0.0:
         return 0.0
     return min(1.0, max(0.0, (started - left) / started))
+
+
+#: In a matchup, the fewest of the dearer type a side is bought with, and the most units the cheaper type may field to match it.
+MATCHUP_MIN_FORCE = 2
+MATCHUP_MAX_UNITS = 30
+
+
+def _reaches(kind, other) -> bool:
+    """Whether a type can shoot at another at all."""
+    return kind.hits_air if other.movement == "AIR" else kind.hits_land
+
+
+def matchup_table(records: Sequence, catalogue, previous: Optional[dict] = None) -> dict:
+    """The measured matchups of a run, merged into an earlier report, as the combat table reads them.
+
+    Every fight between two single-type forces counts once for each side: the outcome for the first type against the second, and the same outcome negated for the second against the first, which is what antisymmetry makes it. Fights read on health. Pairs are named by lookup so that a report stays readable when the catalogue's numbering changes.
+    """
+    tallies: Dict[Tuple[str, str], List[float]] = {}
+    for entry in (previous or {}).get("pairs", []):
+        tallies[(entry["type"], entry["against"])] = [float(entry["mean"]) * float(entry["fights"]), float(entry["fights"])]
+    for record in records:
+        for fight in (getattr(record, "statistics", None) or {}).get("history", []):
+            ours, theirs = fight.get("our_types", {}), fight.get("their_types", {})
+            if len(ours) != 1 or len(theirs) != 1:
+                continue
+            a, b = catalogue.kind(int(next(iter(ours)))), catalogue.kind(int(next(iter(theirs))))
+            if a is None or b is None:
+                continue
+            outcome = float(fight.get("outcome_health", fight.get("outcome", 0.0)))
+            for key, value in (((a.lookup, b.lookup), outcome), ((b.lookup, a.lookup), -outcome)):
+                tally = tallies.setdefault(key, [0.0, 0.0])
+                tally[0] += value
+                tally[1] += 1.0
+    return {"pairs": [{"type": a, "against": b, "mean": round(total / count, 4), "fights": int(count)}
+                      for (a, b), (total, count) in sorted(tallies.items()) if count > 0]}
 
 
 def _tally(force: Sequence) -> Dict[int, int]:
@@ -183,6 +200,8 @@ class Engagement:
     our_left_health: float = 0.0
     their_left_health: float = 0.0
     seconds: float = 0.0
+    #: When the two squads were formed and handed their contracts, which is the issue time of both contracts and so what a recorded errand is joined to its fight by.
+    formed_at_ms: int = -1
     #: True when the fight was called because neither side had hurt the other for a while, rather than because it ended or ran out of time.
     stalled: bool = False
     #: How close the two sides ever came to each other, in world units. A fight in which this never falls below the weapons' reach was not a fight, and telling that case from a fight that was genuinely even is the difference between an arena that produces engagements and one that produces marches.
@@ -192,11 +211,11 @@ class Engagement:
     def outcome(self) -> float:
         """How the fight went for our side, from minus one to plus one: the share of the enemy's worth destroyed, less the share of ours lost, less what being dealt the stronger side is worth on its own.
 
-        Antisymmetric, which is the property the whole measurement rests on. The other side's figure is exactly this one negated — the last term included, since one side's share of the total strength is one less the other's — so a run of self-play must average to nought and any departure from nought is a left-right asymmetry in the arena rather than a policy that has learnt something, while against the handwritten layer an average above nought is the same statement as having beaten it. What is learnt from and what is reported are then one quantity.
+        Antisymmetric, which is the property the whole measurement rests on. The other side's figure is exactly this one negated -the last term included, since one side's share of the total strength is one less the other's -so a run of self-play must average to nought and any departure from nought is a left-right asymmetry in the arena rather than a policy that has learnt something, while against the handwritten layer an average above nought is the same statement as having beaten it. What is learnt from and what is reported are then one quantity.
 
         Written in shares rather than in credits because the two sides are built to a deliberately uneven draw. A difference of worth would pay for having been dealt the stronger side, and a layer can improve that score without ever fighting differently.
 
-        The last term is what a fixed multiple of the strength share would take out, and it is set to nothing. The idea was that the stronger side loses a smaller fraction of itself as well as fewer credits, so the score still rises with the draw — measured at a correlation near six tenths — and that subtracting the draw would be free variance. It was not free: the shares of the squads that actually formed were not symmetric, because one side's spawn order was submitted before the other's, and the term multiplied that asymmetry into a bias five times the size of anything it was meant to help see. The spawn orders are now interleaved so that neither leads (see STRENGTH_SLOPE), and the term stays at nought until a self-check on the interleaved arena has measured that the shares are even. The constant carries the measurement.
+        The last term is what a fixed multiple of the strength share would take out, and it is set to nothing. The idea was that the stronger side loses a smaller fraction of itself as well as fewer credits, so the score still rises with the draw -measured at a correlation near six tenths -and that subtracting the draw would be free variance. It was not free: the shares of the squads that actually formed were not symmetric, because one side's spawn order was submitted before the other's, and the term multiplied that asymmetry into a bias five times the size of anything it was meant to help see. The spawn orders are now interleaved so that neither leads (see STRENGTH_SLOPE), and the term stays at nought until a self-check on the interleaved arena has measured that the shares are even. The constant carries the measurement.
         """
         return self._scored(self.our_left_value, self.their_left_value)
 
@@ -222,11 +241,13 @@ class Engagement:
 
     def as_dict(self) -> dict:
         return {"index": self.index, "our_value": round(self.our_value), "their_value": round(self.their_value),
+                "our_types": {str(k): v for k, v in sorted(self.our_wanted.items())},
+                "their_types": {str(k): v for k, v in sorted(self.their_wanted.items())},
                 "our_ordered": round(self.our_ordered), "their_ordered": round(self.their_ordered),
                 "ours_left": self.ours_left, "theirs_left": self.theirs_left,
                 "our_left_value": round(self.our_left_value), "their_left_value": round(self.their_left_value),
                 "our_left_health": round(self.our_left_health), "their_left_health": round(self.their_left_health),
-                "seconds": round(self.seconds, 1), "closest": round(self.closest),
+                "seconds": round(self.seconds, 1), "formed_at_ms": self.formed_at_ms, "closest": round(self.closest),
                 "stalled": self.stalled, "outcome": round(self.outcome, 4),
                 "outcome_health": round(self.outcome_health, 4)}
 
@@ -256,7 +277,7 @@ class Statistics:
     terminals: Dict[str, int] = field(default_factory=dict)
     #: Every fight of the episode, one row each, and all of them.
     #:
-    #: It used to be the last thirty two, which is the number of fights a long episode has after the point where the board has stopped being even. Everything anybody wanted to ask of this list — whether a run drifts as its board fills, what the score looks like early against late — is a question about the fights that were dropped, and asking it of what was left gave an answer drawn from the wrong half. A row is about a hundred bytes and an episode is a handful of fights at the length the arena now runs at.
+    #: It used to be the last thirty two, which is the number of fights a long episode has after the point where the board has stopped being even. Everything anybody wanted to ask of this list -whether a run drifts as its board fills, what the score looks like early against late -is a question about the fights that were dropped, and asking it of what was left gave an answer drawn from the wrong half. A row is about a hundred bytes and an episode is a handful of fights at the length the arena now runs at.
     history: List[dict] = field(default_factory=list)
 
     @property
@@ -295,23 +316,19 @@ class Statistics:
 class Arena:
     """The policy an arena episode runs under. Builds engagements, fights both sides of them, and pays the layer being trained.
 
-    One of these is built per episode, and everything about the fights it builds — where, how big, how uneven, made of what — comes out of the seed it is handed. That seed therefore has to advance from episode to episode, or every episode of an instance replays the same fights and a run reports its fight count as a sample size it does not have. It did, for a while, and the arithmetic that came out of it was wrong by a factor of thirty to fifty. The caller owns the derivation, because only the caller knows which episode this is and which arm of a comparison it belongs to.
+    One of these is built per episode, and everything about the fights it builds -where, how big, how uneven, made of what -comes out of the seed it is handed. That seed therefore has to advance from episode to episode, or every episode of an instance replays the same fights and a run reports its fight count as a sample size it does not have. It did, for a while, and the arithmetic that came out of it was wrong by a factor of thirty to fifty. The caller owns the derivation, because only the caller knows which episode this is and which arm of a comparison it belongs to.
     """
 
     def __init__(self, session, tactics: Optional[Callable] = None,
                  opponent: Optional[Callable] = None, seed: int = 0,
                  enemy_slot: Optional[int] = None,
-                 outcome_weight: float = TERMINAL_OUTCOME_WEIGHT,
                  stall_ms: int = STALL_MS,
                  imbalance_floor: float = IMBALANCE[0],
                  decision_order: str = OURS_FIRST,
-                 score: str = BY_HEALTH) -> None:
+                 matchups: bool = False) -> None:
         self.session = session
-        self.outcome_weight = outcome_weight
-        if score not in SCORES:
-            raise ValueError(f"no score named {score!r}: expected one of {', '.join(SCORES)}")
-        # Which reading of a fight is handed to the layers as their terminal. Both are computed and both are journalled whatever this says; what it settles is only which one is paid, because a layer can be paid on one reading and reported on the other but it cannot be paid on two. Health by default, and stated in one place only: a second default sitting here would be a figure a run could be paid on without anything having asked for it.
-        self.score = score
+        # Whether fights are built to measure one type against another rather than to train a layer: each side is one type, bought with the same credits, and the pair is drawn afresh for every fight.
+        self.matchups = matchups
         # How long a fight may go without a casualty before it is called. An argument rather than the constant because how decisive the arena's fights are is one of the things a run may want to ask about: a layer's choices can only be worth as much as the fights they are made in, and a fight that is called at the first quiet spell is one where declining to fight costs nothing.
         self.stall_ms = stall_ms
         # The weaker side's smallest share of the stronger. An argument rather than the constant because how lopsided the draw is decides how many fights end with a side destroyed and how widely the score scatters, and whether that trade is worth taking is a question only a run of both settings answers.
@@ -369,7 +386,7 @@ class Arena:
         elif self.phase == "sweeping":
             self._sweep(observation, action, now)
 
-        if not (action.squads or action.contracts or action.deviations or action.production):
+        if action.empty():
             return None
         return encode_action(action)
 
@@ -401,8 +418,11 @@ class Arena:
         our_place = (site[0] - offset[0], site[1] - offset[1])
         their_place = (site[0] + offset[0], site[1] + offset[1])
 
-        our_force = self._force(our_budget)
-        their_force = self._force(their_budget)
+        if self.matchups:
+            our_force, their_force = self._pair(budget)
+        else:
+            our_force = self._force(our_budget)
+            their_force = self._force(their_budget)
         if not our_force or not their_force:
             return
 
@@ -455,6 +475,7 @@ class Arena:
             # The fight is between what is standing here, so this is where the two figures the score divides by are taken. They are on the same footing as the worth left at the end, which the game reports as the price of a squad's surviving members.
             self.engagement.our_value = self.squads[OURS].value
             self.engagement.their_value = self.squads[THEIRS].value
+            self.engagement.formed_at_ms = now
         action.squads.append(SquadAssignment(squad=OURS, units=ours))
         action.squads.append(SquadAssignment(squad=THEIRS, units=theirs,
                                              owner=self._their_slot(observation)))
@@ -471,7 +492,7 @@ class Arena:
             squad.contract = contract
             action.contracts.append(Contract(
                 squad=squad_id, task=contract.task, stance=contract.stance,
-                target_region=contract.target_region, cost_budget=contract.cost_budget,
+                target=contract.target_region, cost_budget=contract.cost_budget,
                 deadline_ms=contract.deadline_ms, issued_at_ms=contract.issued_at_ms,
                 override=True))
 
@@ -519,7 +540,7 @@ class Arena:
     def _ours_leads(self) -> bool:
         """Whether this side's departure is decided and submitted ahead of the other side's this period.
 
-        It ought not to matter. Both layers read the same frame, neither can see what the other chose, and the two sets of orders are carried on one action to one period of the simulation. But a left-right lean that the score cannot absorb has been measured in the fighting itself — buried in the noise on an even draw and out of it on a lopsided one — and the order the two sides are decided in is the only thing about a period that is not symmetric between them, so it is the first candidate and the one that can be settled by measurement rather than by reading: a lean made of the order reverses when the order does, and a lean made of anything else does not.
+        It ought not to matter. Both layers read the same frame, neither can see what the other chose, and the two sets of orders are carried on one action to one period of the simulation. But a left-right lean that the score cannot absorb has been measured in the fighting itself -buried in the noise on an even draw and out of it on a lopsided one -and the order the two sides are decided in is the only thing about a period that is not symmetric between them, so it is the first candidate and the one that can be settled by measurement rather than by reading: a lean made of the order reverses when the order does, and a lean made of anything else does not.
 
         The alternating setting is what a lean made of the order would be answered with rather than corrected for, on the same argument the two spawn orders are interleaved under: whatever a period's leader gains is then dealt to each side in half the periods of every fight instead of to one side in all of them. The parity is read off the count of periods the layers have decided in, which is already kept and is incremented once per period after the decisions are taken.
         """
@@ -532,7 +553,7 @@ class Arena:
     def _call(self, ours: SquadRecord, theirs: SquadRecord, now: int,
               observation: Observation, stalled: bool = False) -> None:
         engagement = self.engagement
-        outcome = 0.0
+        kills = health = 0.0
         if engagement is not None:
             engagement.stalled = stalled
             engagement.ours_left = len(ours.members)
@@ -543,7 +564,7 @@ class Arena:
             engagement.our_left_health = self._health_worth(ours, observation)
             engagement.their_left_health = self._health_worth(theirs, observation)
             engagement.seconds = (now - (ours.contract.issued_at_ms if ours.contract else now)) / 1000.0
-            outcome = engagement.scored(self.score)
+            kills, health = engagement.outcome, engagement.outcome_health
             self.statistics.outcomes.append(engagement.outcome)
             self.statistics.health_outcomes.append(engagement.outcome_health)
             self.statistics.history.append(engagement.as_dict())
@@ -561,22 +582,23 @@ class Arena:
             else:
                 self.statistics.expired += 1
 
-        # The fight is over for both sides at the same instant, so both layers are told before the board is swept. Each is handed its own side of the outcome, which is the same number with the sign the other way up.
-        self._end(self.tactics, ours, self.outcome_weight * outcome)
-        self._end(self.opponent, theirs, self.outcome_weight * -outcome)
+        # The fight is over for both sides at the same instant, so both layers are told before the board is swept. Each is handed its own side of both readings, which are the same numbers with the sign the other way up; which reading it is paid on, and at what weight, is the layer's own setting.
+        index = engagement.index if engagement is not None else -1
+        self._end(self.tactics, ours, kills, health, index)
+        self._end(self.opponent, theirs, -kills, -health, index)
         self._tally()
         self.phase = "sweeping"
         self.until_ms = now + SWEEP_MS
 
     @staticmethod
-    def _end(layer, squad: SquadRecord, terminal: float) -> None:
+    def _end(layer, squad: SquadRecord, kills: float, health: float, index: int) -> None:
         """Tells one side's layer that its fight has ended, so that the decision it is still owed payment for is paid now instead of being carried into the next fight built on the same squad number.
 
         A layer that keeps no trajectories has nothing to end and says so by not offering the method, which is the ordinary case for the handwritten layer on either side of an arena run.
         """
         finish = getattr(layer, "finish", None)
         if finish is not None:
-            finish(squad, terminal, "called")
+            finish(squad, kills, health, "called", index)
 
     def _tally(self) -> None:
         """Collects how the two layers have been closing their errands.
@@ -611,7 +633,7 @@ class Arena:
             squad.contract = replace(squad.contract, target_region=target, issued_at_ms=now)
             action.contracts.append(Contract(
                 squad=squad_id, task=Task.ATTACK, stance=Stance.AGGRESSIVE,
-                target_region=target, cost_budget=squad.contract.cost_budget,
+                target=target, cost_budget=squad.contract.cost_budget,
                 deadline_ms=now + SWEEP_MS, issued_at_ms=now, override=True))
 
     # ---- keeping the two squads in step with the board ---------------------------------
@@ -637,7 +659,7 @@ class Arena:
 
         Filling a squad with everything that newly appeared is what let two kinds of stranger into a fight. One is this side's own base: a spawn-point player is given a headquarters and a builder, they arrive a step apart, and the wait for the opening board to settle can pass between the two, after which the builder is a unit that has just appeared and joins the squad. The other is an engagement abandoned as stillborn, whose spawn commands stay in the queue and whose units surface later, inside the window in which the next fight is being formed. Neither was commissioned, and a fight is between what was commissioned.
 
-        With no order to take against — which is only the case if a fight is being formed without one — everything of the right side is taken, since there is nothing to say what does not belong.
+        With no order to take against -which is only the case if a fight is being formed without one -everything of the right side is taken, since there is nothing to say what does not belong.
         """
         taken: List[int] = []
         left = dict(wanted) if wanted else None
@@ -748,6 +770,32 @@ class Arena:
             spent += kind.price
         return force
 
+    def _pair(self, budget: float) -> Tuple[List, List]:
+        """Two single-type forces bought with the same credits, for measuring what one type does to another.
+
+        Aircraft are drawn as well as ground units, since whether a credit is better spent on the air is exactly what the build order asks of these measurements; a pair in which neither side can shoot at the other is drawn again. The spend is raised to at least MATCHUP_MIN_FORCE of the dearer type, so that the heavy types the build order weighs against the light ones are measured at all, and a pair the cheaper type could not match within MATCHUP_MAX_UNITS is drawn again, so that both sides are bought at the same price rather than one of them being cut off by a cap.
+        """
+        pool = [kind for kind in self.catalogue.types
+                if kind.mobile and kind.armed and kind.price > 0 and not kind.builder
+                and kind.movement in ("LAND", "HOVER", "AIR", "OVER_CLIFF") and self._fielded(kind)]
+        for _ in range(20):
+            first, second = self.random.choice(pool), self.random.choice(pool)
+            if not (_reaches(first, second) or _reaches(second, first)):
+                continue
+            spend = max(budget, MATCHUP_MIN_FORCE * max(first.price, second.price))
+            if spend > MATCHUP_MAX_UNITS * min(first.price, second.price):
+                continue
+            return ([first] * int(spend // first.price), [second] * int(spend // second.price))
+        return [], []
+
+    def _fielded(self, kind) -> bool:
+        """Whether a skirmish side fields this type: one the definitions say a producing building makes, or a core type the engine makes in code. A creature of a scenario nest never reaches a skirmish board, and measuring it spreads the fights over pairs nobody asks about. The producing buildings are those whose menu makes units, found by what they do."""
+        definition = (self.catalogue.definitions or {}).get(kind.lookup)
+        if definition is None or not definition.built_from:
+            return definition is None or not definition.built_from_declared
+        makers = {k.lookup for k in self.catalogue.types if k.building and self.catalogue.has(k.index, Function.PRODUCER)}
+        return bool(set(definition.built_from) & makers)
+
     def _rows(self, force: Sequence, slot: int, place: Tuple[float, float]) -> List[List[float]]:
         """One spawn row per unit for one side: type, player slot, position, count. Units are scattered a little so that they do not all arrive on the same point and spend the first seconds pushing each other apart. Returned a row at a time rather than run together, because the two sides' rows are interleaved before either order is sent."""
         rows: List[List[float]] = []
@@ -764,7 +812,7 @@ class Arena:
                     theirs: Sequence[Sequence[float]]) -> List[float]:
         """Merges the two sides' spawn rows into the one order that is sent, so that neither side is submitted ahead of the other.
 
-        Spawning goes through the command queue a unit at a time and the queue is drained in the order it was filled, so a side whose whole order is submitted before the other's is the more completely on the board when the spawn wait is called: its late units sit nearer the front. Running the two orders one after the other, this side first, handed this side a few points of the strength that forms into its squad for no reason to do with either policy — drawn out as a left-right lean it was three points, which is enough to bias the self-play score the arena is measured against.
+        Spawning goes through the command queue a unit at a time and the queue is drained in the order it was filled, so a side whose whole order is submitted before the other's is the more completely on the board when the spawn wait is called: its late units sit nearer the front. Running the two orders one after the other, this side first, handed this side a few points of the strength that forms into its squad for no reason to do with either policy -drawn out as a left-right lean it was three points, which is enough to bias the self-play score the arena is measured against.
 
         Taken one unit from each side in turn, the two orders stay at the same depth in the queue throughout, so a wait that runs out cuts both sides to the same degree rather than only the second. Which side leads a pair alternates, so the one unit a side is unavoidably ahead by inside a pair falls on each side equally over the force. When one order is longer its tail runs on alone, which leans on the side that was dealt the larger force rather than on a fixed side, and which side that is was already drawn even.
         """
@@ -805,7 +853,11 @@ class Arena:
         return best
 
     def close(self) -> None:
+        """Closes both sides. When both record into one rollout, the first to close seals the instance's episode for both, so each side's waiting decisions are filed first and the episode is sealed once, whole."""
         self._tally()
+        for layer in (self.tactics, self.opponent):
+            if hasattr(layer, "release"):
+                layer.release()
         for layer in (self.tactics, self.opponent):
             if hasattr(layer, "close"):
                 layer.close()

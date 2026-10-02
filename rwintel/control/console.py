@@ -1,6 +1,6 @@
 """What a person actually types at.
 
-The interface the design describes is not a second control path, and this is where that stops being a claim and becomes a program: every command here ends in one of the four operations the intervention mechanism offers, so what a person emits is a roster, a contract or a departure in exactly the fields the command chain emits them in. There is deliberately nothing here that reaches the game, and there could not be — this module holds an `Interface` and calls it, and the game side cannot tell a session a person amended from one the script intruder amended.
+The interface the design describes is not a second control path, and this is where that stops being a claim and becomes a program: every command here ends in one of the four operations the intervention mechanism offers, so what a person emits is a roster, a contract or a departure in exactly the fields the command chain emits them in. There is deliberately nothing here that reaches the game, and there could not be -this module holds an `Interface` and calls it, and the game side cannot tell a session a person amended from one the script intruder amended.
 
 It is a line reader rather than a window, which is an ordering rather than a placeholder. What has to exist before a human's play is worth anything to the learning side is the operation set and the record of it; a window is a presentation of the same four operations and can be built against this once they have been settled by use. Reading stands on its own daemon thread because the work of the process is on the session threads and a blocked reader must not delay a period, and because a daemon thread lets the run end without the person having to press anything to release it.
 
@@ -17,7 +17,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
-from ..wire import Commander, Deviation, Stance, Status, Task
+from ..wire import NO_SQUAD, Commander, Deviation, Stance, Status, Task
 from .intervention import Interface, Recorder
 from .policy.contracts import Posture
 
@@ -57,6 +57,8 @@ Commands. Squads, units and regions are numbers; every name may be shortened to 
                                     write a squad's contract; stance aggressive, budget the squad's own worth, deadline {deadline}s
   move N UNIT... [to M]             move units out of squad N into squad M, or into a squad of your own if no M is given
   depart N HOW                      hold, withdraw, focus, spread or kite, for a squad whose tactical command you hold
+  transports                        the transport slots, what stands in each and what it is carrying
+  lift N SLOT REGION                carry squad N to a region by the transport in a slot
   posture [NAME|auto]               pin the strategic layer to a posture, or hand it back its own judgement
 
   help                              this
@@ -77,7 +79,7 @@ Commands. Squads, units and regions are numbers; every name may be shortened to 
 class Shown:
     """One squad as a person reads it, from whichever side of the process knows about it.
 
-    Squads the chain formed are read from its own records, which carry the doctrine and the contract the operational layer wrote. Squads this console raised for itself exist in the interface and in the game and nowhere in the chain's records — the organisation layer deliberately does not look at a slot it has lent out — so they are read from the observation's squad block instead. Both are squads to the person holding them, so both are listed and both may be commanded, and the difference shows only as a doctrine there is nothing to report.
+    Squads the chain formed are read from its own records, which carry the doctrine and the contract the operational layer wrote. Squads this console raised for itself exist in the interface and in the game and nowhere in the chain's records -the organisation layer deliberately does not look at a slot it has lent out -so they are read from the observation's squad block instead. Both are squads to the person holding them, so both are listed and both may be commanded, and the difference shows only as a doctrine there is nothing to report.
     """
 
     id: int
@@ -185,6 +187,8 @@ class Console:
             "contract": self.contract, "order": self.contract,
             "move": self.move, "detach": self.move,
             "depart": self.depart, "deviate": self.depart,
+            "transports": self.transports,
+            "lift": self.lift, "carry": self.lift,
             "posture": self.posture,
             "stop": self.stop, "quit": self.stop, "exit": self.stop,
         }
@@ -471,6 +475,48 @@ class Console:
         interface.depart(squad, deviation)
         self.say(f"squad {squad} will {deviation.name.lower()}.")
 
+    def transports(self, words: List[str]) -> None:
+        running = self._running()
+        if running is None:
+            return
+        _, policy, _ = running
+        logistics = getattr(policy, "logistics", None)
+        if logistics is None:
+            self.say("this policy holds no transports.")
+            return
+        for slot in logistics.slots:
+            if slot.unit is None:
+                self.say(f"  slot {slot.slot}: empty")
+                continue
+            kind = policy.catalogue.kind(slot.type_index)
+            doing = (f"carrying squad {slot.squad} to region {slot.region}" if slot.lift >= 0 and slot.squad != NO_SQUAD
+                     else f"carrying units {list(slot.units)} to region {slot.region}" if slot.lift >= 0 else "free")
+            self.say(f"  slot {slot.slot}: unit {slot.unit} {kind.lookup if kind else '?'} at ({slot.x:.0f},{slot.y:.0f}), "
+                     f"{slot.aboard} aboard, {doing}")
+
+    def lift(self, words: List[str]) -> None:
+        running = self._running()
+        if running is None:
+            return
+        session, policy, interface = running
+        if len(words) < 3:
+            self.say("say which squad, which transport slot and which region, as 'lift 3 0 5'.")
+            return
+        shown = self._one(session, policy, interface, words[0])
+        if shown is None:
+            return
+        slot = _number(words[1])
+        if slot is None:
+            self.say(f"{words[1]!r} is not a transport slot; 'transports' lists them.")
+            return
+        region = self._region(session, words[2])
+        if region is None:
+            return
+        interface.lift(shown.id, slot, region)
+        self.say(f"squad {shown.id} will be carried to region {region} by the transport in slot {slot} at the next "
+                 f"period, if that transport can load all of it and reach both ends. Give it a contract there too, "
+                 f"or the operational layer will find it a new errand once it is set down.")
+
     def posture(self, words: List[str]) -> None:
         running = self._running()
         if running is None:
@@ -655,7 +701,7 @@ def _layers_name(layers: int) -> str:
 
 
 def _holder(holding: int, commander: int) -> str:
-    """Who commands a squad, in the width a table can carry. The observation says which layers are in someone else's hands but never whose, so what this console holds is what names the holder, and the bare bits are the fallback — which is how a squad the script intruder has taken shows up, and correctly so, since to a person it is simply not theirs and not the chain's."""
+    """Who commands a squad, in the width a table can carry. The observation says which layers are in someone else's hands but never whose, so what this console holds is what names the holder, and the bare bits are the fallback -which is how a squad the script intruder has taken shows up, and correctly so, since to a person it is simply not theirs and not the chain's."""
     if holding:
         return f"you: {_layers_short(holding)}"
     if commander:

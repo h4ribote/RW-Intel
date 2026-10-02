@@ -1,8 +1,8 @@
 """One evaluation for many instances at once.
 
-Eight game processes at ten times speed ask the tactical layer for a decision about fifty times a second each, and each of those asks is a handful of floats. Answered one at a time that is four hundred separate calls onto the card a second, almost all of it launch overhead for a network small enough to fit the budget in the first place. The fixed one-period decision lag the interface already has is what makes the fix free: a period is twenty milliseconds of wall clock at ten times speed, and nothing is waiting on the answer inside it, so requests arriving within a few milliseconds of each other can be held and answered together. Eight times the batch, an eighth of the calls, and no change to what any instance observes.
+Every game process asks the tactical layer for a decision about every squad every period, and each of those asks is a handful of floats. Answered one at a time that is hundreds of separate calls a second across the instances, almost all of it dispatch overhead for a network small enough to fit the budget in the first place. Requests from different instances are therefore held and answered together.
 
-The window is short on purpose. It is not a queue depth or a throughput knob: the moment it approaches a period, an instance's answer arrives after the period it was for, and the decision lag stops being one period and starts depending on how busy the machine is — which is precisely the thing the interface design refuses, because it makes the environment differ between training and operation.
+A request is held until every thread that is in the middle of a decision is waiting on a batcher (see `rwintel.control.deciding`), because from then on nothing more can arrive before an answer goes out. The window is only the bound on the wait when that cannot be known, which is when a caller is outside any marked decision. It is short on purpose: games on the wall clock take an answer that arrives after its period as no answer, and games on the fixed clock stand still while they wait for it.
 """
 
 from __future__ import annotations
@@ -10,18 +10,30 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence
 
-#: How long a request waits for company, in seconds. A few milliseconds against a twenty millisecond period leaves the lag where it was.
-WINDOW = 0.004
+from ..control import deciding
 
-#: The most that are ever answered in one call. Beyond the number of instances there is nothing to gain, and a cap keeps a stall from turning into an unboundedly large call.
-MAX_BATCH = 64
+#: Per device kind, the longest a request waits for company in seconds when it is not known whether more can come, and the most that are ever answered in one call.
+#: The processor's cap is about the number of instances, beyond which there is nothing to gain, and a cap keeps a stall from turning into an unboundedly large call.
+#: The graphics card's pair follows from `python -m rwintel.learn bench`: its cap is the largest batch whose call takes at most twice as long as a call for one decision, and its window stays at the processor's unless one decision alone takes longer than that, in which case the window is that single-decision latency.
+#: It is the pair that rule reads on an idle card for the tactical set network, the network played at scale on the card.
+LIMITS = {"cpu": (0.004, 64), "cuda": (0.004, 64)}
+
+WINDOW, MAX_BATCH = LIMITS["cpu"]
+
+
+def limits(device=None) -> tuple:
+    """`(window, max_batch)` for the device a batcher evaluates on; the processor's for anything not named in `LIMITS`."""
+    kind = getattr(device, "type", None) or (str(device).split(":")[0] if device is not None else "cpu")
+    return LIMITS.get(kind, LIMITS["cpu"])
 
 
 @dataclass
 class _Ticket:
     request: object
+    #: Whether the caller was counted as a deciding thread waiting here, which whoever answers has to undo.
+    counted: bool = False
     reply: object = None
     ready: threading.Event = field(default_factory=threading.Event)
     failed: Optional[BaseException] = None
@@ -30,7 +42,7 @@ class _Ticket:
 class Batcher:
     """Holds requests briefly, answers them in one call, and hands each caller its own answer back.
 
-    Callers block. That is correct here and nowhere else in this process: the game thread never waits for a decision, so what blocks is the control process's own per-instance thread, between the observation it has already read and the action it has not yet sent.
+    Callers block. What blocks is the control process's own per-instance thread, between the observation it has already read and the action it has not yet sent.
     """
 
     def __init__(self, evaluate: Callable[[List[object]], Sequence[object]],
@@ -38,8 +50,6 @@ class Batcher:
         self.evaluate = evaluate
         self.window = window
         self.max_batch = max_batch
-        self._lock = threading.Lock()
-        self._arrived = threading.Condition(self._lock)
         self._queue: List[_Ticket] = []
         self._stop = False
         self._thread = threading.Thread(target=self._run, name="inference", daemon=True)
@@ -53,37 +63,43 @@ class Batcher:
         return self.served / self.calls if self.calls else 0.0
 
     def submit(self, request: object) -> object:
-        ticket = _Ticket(request=request)
-        with self._arrived:
+        ticket = _Ticket(request=request, counted=deciding.inside())
+        with deciding.condition:
             if self._stop:
                 raise RuntimeError("the inference server has been stopped")
             self._queue.append(ticket)
-            self._arrived.notify()
+            if ticket.counted:
+                deciding.start_waiting()
+            deciding.condition.notify_all()
         ticket.ready.wait()
         if ticket.failed is not None:
             raise ticket.failed
         return ticket.reply
 
     def stop(self) -> None:
-        with self._arrived:
+        with deciding.condition:
             self._stop = True
-            self._arrived.notify_all()
+            deciding.condition.notify_all()
         self._thread.join(timeout=1.0)
 
     def _run(self) -> None:
         while True:
-            with self._arrived:
+            with deciding.condition:
                 while not self._queue and not self._stop:
-                    self._arrived.wait(0.05)
+                    deciding.condition.wait(0.05)
                 if self._stop and not self._queue:
                     return
-            # The window is waited outside the lock so that arrivals during it are collected rather than shut out.
-            time.sleep(self.window)
-            with self._arrived:
+                deadline = time.monotonic() + self.window
+                while (not self._stop and len(self._queue) < self.max_batch and not deciding.everyone_waiting()
+                       and time.monotonic() < deadline):
+                    deciding.condition.wait(max(0.0, deadline - time.monotonic()))
                 batch, self._queue = self._queue[:self.max_batch], self._queue[self.max_batch:]
-            if not batch:
-                continue
-            self._answer(batch)
+                # Released from the count before they are answered, so that no other batcher reads them as still waiting once they are busy again.
+                for ticket in batch:
+                    if ticket.counted:
+                        deciding.stop_waiting()
+            if batch:
+                self._answer(batch)
 
     def _answer(self, batch: List[_Ticket]) -> None:
         try:

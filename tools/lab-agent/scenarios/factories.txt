@@ -1,0 +1,16 @@
+# Lake, our side the south. What the factories make at their first tier and after a tier raise.
+# Expect: the land factory adds hovercraft at tier 2 and the air factory adds dropship.
+@0 bind bl builder
+@0 spawn lf landFactory 1250 2150
+@0 spawn af airFactory 750 2150
+@0 spawn ef experimentalLandFactory 990 2400
+@3 track lf af ef
+@4 menu lf
+@4 menu af
+@4 menu ef
+@4 menu bl
+@5 upgrade lf
+@5 upgrade af
+@70 menu lf
+@70 menu af
+@71 end

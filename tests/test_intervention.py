@@ -1,6 +1,6 @@
 """What the intervention interface promises, held to.
 
-Two things are being pinned. The ownership rule, which is the design's answer to every question about a human and a machine commanding the same units: exactly one commander per squad, transfers explicit and one-way, and the command chain silent about anything it does not hold. And the squad cap, which is not an efficiency limit but the width of the observation's squad block — a ninth squad is not surplus, it is invisible, so a commander that wants one of its own has to borrow a slot rather than pick a number.
+Two things are being pinned. The ownership rule, which is the design's answer to every question about a human and a machine commanding the same units: exactly one commander per squad, transfers explicit and one-way, and the command chain silent about anything it does not hold. And the squad cap, which is not an efficiency limit but the width of the observation's squad block -a ninth squad is not surplus, it is invisible, so a commander that wants one of its own has to borrow a slot rather than pick a number.
 
 The tests build the pieces directly rather than through a session, because what is under test is the amendment of one action and none of it needs a game.
 """
@@ -67,7 +67,7 @@ def _organisation(chain_squads=(0,)) -> Organisation:
 def _chain_action(squad_id: int = 0) -> Action:
     """An action of the sort the command chain produces on its own, so that what an intervention removes from one can be seen."""
     return Action(
-        contracts=[Contract(squad=squad_id, task=Task.ATTACK, target_region=4)],
+        contracts=[Contract(squad=squad_id, task=Task.ATTACK, target=4)],
         deviations=[SquadDeviation(squad=squad_id, deviation=Deviation.KITE)],
     )
 
@@ -105,7 +105,7 @@ def test_a_holders_contract_is_marked_so_the_game_will_accept_it():
 
     written = [row for row in action.contracts if row.override]
     assert len(written) == 1
-    assert (written[0].squad, written[0].task, written[0].target_region) == (0, Task.DEFEND, 7)
+    assert (written[0].squad, written[0].task, written[0].target) == (0, Task.DEFEND, 7)
     # The clock the losses are measured from is the moment of the decision, not whatever the chain last stamped.
     assert written[0].issued_at_ms == 10000
 
@@ -117,7 +117,7 @@ def test_an_errand_may_be_rewritten_without_taking_the_squad():
     action = _chain_action()
     interface.intervene(action, None, [_squad()], _observation())
 
-    assert [(row.target_region, row.override) for row in action.contracts] == [(2, True)]
+    assert [(row.target, row.override) for row in action.contracts] == [(2, True)]
 
 
 def test_giving_a_squad_back_hands_it_over_whole_and_to_the_machine():
@@ -210,6 +210,127 @@ def test_units_moved_into_a_squad_taint_it_as_surely_as_the_one_they_left():
 
     assert 0 in intruder.log.touched
     assert len(intruder.log.touched) == 2
+
+
+def test_the_episode_record_keeps_the_interference_of_the_policy_it_puts_down():
+    """The record is written after the policy is put down, and putting it down drops its commanders; what they did has to be read first or every interfered-with episode is recorded as undisturbed."""
+    import json
+
+    from rwintel.control.intruder import Log
+    from rwintel.control.session import EpisodeSettings, Session
+
+    class _Commander:
+        def __init__(self):
+            self.log = Log(events=[{"kind": "take", "squad": 3}], touched={3})
+
+    class _Policy:
+        def __init__(self):
+            self.outside = [_Commander()]
+
+    session = Session(None, None, EpisodeSettings(), arms=[("script", lambda s: None)], episodes=1)
+    session.policy = _Policy()
+    session.on_episode(json.dumps({"event": "ended", "episode": 1, "seconds": 60}).encode("utf-8"))
+
+    assert session.policy is None
+    assert session.records[0].interference == {"intruders": 1, "events": [{"kind": "take", "squad": 3}], "touched": [3]}
+
+
+def test_an_intruder_that_did_nothing_is_still_recorded_as_attached():
+    """An episode measured with an intruder present is a different quantity from one measured without, whether or not the intruder found anything to do."""
+    import json
+
+    from rwintel.control.intruder import Log
+    from rwintel.control.session import EpisodeSettings, Session
+
+    class _Commander:
+        def __init__(self):
+            self.log = Log()
+
+    class _Policy:
+        def __init__(self, outside):
+            self.outside = outside
+
+    session = Session(None, None, EpisodeSettings(), arms=[("script", lambda s: None)], episodes=2)
+    session.start_episode = lambda: None
+    session.policy = _Policy([_Commander()])
+    session.on_episode(json.dumps({"event": "ended", "episode": 1, "seconds": 60}).encode("utf-8"))
+    session.policy = _Policy([])
+    session.on_episode(json.dumps({"event": "ended", "episode": 2, "seconds": 60}).encode("utf-8"))
+
+    assert session.records[0].interference == {"intruders": 1, "events": [], "touched": []}
+    assert session.records[1].interference == {}
+
+
+def test_standings_sent_while_an_episode_runs_become_its_history():
+    """A progress event is kept for the record, with only the teams that took part, and is not taken for the end of the episode."""
+    import json
+
+    from rwintel.control.session import EpisodeSettings, Session
+
+    session = Session(None, None, EpisodeSettings(), arms=[("script", lambda s: None)], episodes=2)
+    session.start_episode = lambda: None
+    playing = [{"team": 0, "units": 3, "value": 4000, "income": 10, "killed": 0, "lost": 0, "credits": 900},
+               {"team": 1, "units": 2, "value": 3000, "income": 12, "killed": 0, "lost": 0, "credits": 1200}]
+    empty = {"team": 5, "units": 0, "value": 0, "income": 0, "killed": 0, "lost": 0, "credits": 4000}
+    for time_ms in (30000, 60000):
+        session.on_episode(json.dumps({"event": "progress", "timeMs": time_ms, "standing": playing + [empty]}).encode("utf-8"))
+    assert session.records == []
+
+    session.on_episode(json.dumps({"event": "finished", "episode": 1, "seconds": 75, "standing": playing}).encode("utf-8"))
+    record = session.records[0]
+    assert [entry["second"] for entry in record.history] == [30.0, 60.0]
+    assert record.history[0]["standing"] == playing
+    assert record.as_dict()["history"] == record.history
+    # The next episode starts with a history of its own.
+    session.on_episode(json.dumps({"event": "finished", "episode": 2, "seconds": 10, "standing": playing}).encode("utf-8"))
+    assert session.records[1].history == []
+
+
+def test_a_finished_match_hands_its_score_to_a_policy_that_takes_one():
+    """The score is the one an evaluation reads: the board of a match cut off by the clock, the outcome of a decided one. An arena episode and a hosted match everybody left are not scored as matches, so nothing is handed; a policy whose close takes no score is closed as before."""
+    import json
+
+    from rwintel.control.session import EpisodeSettings, Session
+    from rwintel.eval.scoring import score
+
+    handed = []
+
+    class _Taking:
+        outside = []
+
+        def close(self, score=None):
+            handed.append(score)
+
+    class _Plain:
+        outside = []
+
+        def close(self):
+            handed.append("plain")
+
+    playing = [{"team": 0, "units": 3, "value": 3000, "income": 10, "killed": 1, "lost": 0, "credits": 900},
+               {"team": 1, "units": 2, "value": 1000, "income": 12, "killed": 0, "lost": 1, "credits": 1200}]
+    cut_off = {"event": "finished", "seconds": 900, "winner": -1, "timeout": True, "team": 0, "standing": playing}
+    cases = [(False, _Taking, cut_off), (False, _Taking, dict(cut_off, winner=1, timeout=False)),
+             (False, _Taking, dict(cut_off, peerLeft=True)), (True, _Taking, cut_off), (False, _Plain, cut_off)]
+    for arena, policy, payload in cases:
+        session = Session(None, None, EpisodeSettings(arena=arena), arms=[("script", lambda s: None)], episodes=9)
+        session.start_episode = lambda: None
+        session.policy = policy()
+        session.on_episode(json.dumps(payload).encode("utf-8"))
+    board = score(session.records[0])
+    assert 0.0 < board < 1.0
+    assert handed == [board, -1.0, None, None, "plain"]
+
+
+def test_the_start_instruction_asks_for_standings_except_in_an_arena():
+    from rwintel.control.session import EpisodeSettings, Session
+
+    sent = []
+    for arena, expected in ((False, 30000), (True, 0)):
+        session = Session(None, None, EpisodeSettings(arena=arena), arms=[("script", lambda s: None)], episodes=1)
+        session.control = sent.append
+        session.start_episode()
+        assert sent[-1]["standingMs"] == expected
 
 
 if __name__ == "__main__":

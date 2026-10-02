@@ -7,15 +7,21 @@ The engine reads the same files at load time, which is what makes these numbers 
 from .assets import AssetPaths
 from .maps import MapContent, read_map, list_skirmish_maps
 from .regions import Region, decompose
+from .terrain import Component, Terrain, components, read_terrain, render_png
 from .units import UnitDefinition, read_unit_catalog
 
 __all__ = [
     "AssetPaths",
+    "Component",
     "MapContent",
     "Region",
+    "Terrain",
     "UnitDefinition",
+    "components",
     "decompose",
     "list_skirmish_maps",
     "read_map",
+    "read_terrain",
     "read_unit_catalog",
+    "render_png",
 ]

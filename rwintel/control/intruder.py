@@ -2,7 +2,7 @@
 
 The design requires robustness to interruption to be trained rather than asserted. A human at the intervention interface pulls units out of a squad half way through its mission, takes a squad away for a minute and gives it back somewhere else, or rewrites an errand for a reason the chain cannot see; a policy learnt against a world where none of that happens treats every contract as a promise and has no answer when one is broken. So the learning environment contains something that breaks them, and evaluation is run with it too, because a number measured without interruption is not the number the system will be operated at.
 
-It is not a test fixture. Everything here goes out through the same interface a human uses, in the same contract form, and the game side cannot tell the two apart — which is the point: what makes the training realistic is precisely that the intruder is indistinguishable from the person it stands in for. What it does not model is judgement. Its choices are random within the design's stated rates, which is deliberately the hardest version of the problem: a human's interventions are at least usually sensible, so a chain that copes with unmotivated ones copes with motivated ones.
+It is not a test fixture. Everything here goes out through the same interface a human uses, in the same contract form, and the game side cannot tell the two apart -which is the point: what makes the training realistic is precisely that the intruder is indistinguishable from the person it stands in for. What it does not model is judgement. Its choices are random within the design's stated rates, which is deliberately the hardest version of the problem: a human's interventions are at least usually sensible, so a chain that copes with unmotivated ones copes with motivated ones.
 
 The rates below are per operational period for the whole side, not per squad. Read per squad they would produce an intervention every few seconds on a full board, which is not interference but a second commander.
 """
@@ -140,7 +140,7 @@ class Intruder:
         self.interface.reassign(squad.id, self.random.sample(list(squad.members), count))
 
     def _seize(self, squad: SquadRecord, observation: Observation) -> None:
-        """Takes a squad whole, moves it, and hands it back later somewhere other than where it was found — which is the case the design names, because a squad returned in a place the chain did not put it is the one whose contract has silently stopped meaning anything."""
+        """Takes a squad whole, moves it, and hands it back later somewhere other than where it was found -which is the case the design names, because a squad returned in a place the chain did not put it is the one whose contract has silently stopped meaning anything."""
         self.interface.take(squad.id, int(Commander.OPERATIONS | Commander.TACTICS))
         self._order(squad, observation)
         self.holdings[squad.id] = Holding(squad=squad.id, until_ms=self._until(observation))
@@ -182,7 +182,7 @@ def interference(seed: int = 0, recorder: Optional[Recorder] = None):
 
     An intruder is per episode because what it is holding is a fact about one match, and because its log is what the episode record carries: a single intruder across a run would report the whole run's interference against every episode in it and no learning run could tell which squads to leave out of which.
 
-    The seed is derived from the run's own seed, the instance and the episode index, so the same run interferes the same way twice while two instances of it do not interfere identically — which matters because identical interference across a batch would be a systematic difference between the arms rather than the noise it is meant to be. It does not make the match reproduce: the game does not, whatever it is seeded with. What it makes reproducible is the intruder, so that an odd result can be read back against exactly the interference that produced it.
+    The seed is derived from the run's own seed, the instance and the episode index, so the same run interferes the same way twice while two instances of it do not interfere identically -which matters because identical interference across a batch would be a systematic difference between the arms rather than the noise it is meant to be. It does not make the match reproduce: the game does not, whatever it is seeded with. What it makes reproducible is the intruder, so that an odd result can be read back against exactly the interference that produced it.
     """
 
     def make(session) -> Intruder:

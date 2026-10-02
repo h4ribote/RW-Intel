@@ -1,0 +1,29 @@
+# Beach landing, our side the east island. The dropship: what an air transport takes, and where it unloads.
+# Expect: ds1 carries b2, a1, a2 and h1 and turns mm away full; hh and g1 never board; ds2 fetches art, holds its unload over the water and lets art off on the main island; b2 builds the extractor at (2230,1070).
+@0 spawn ds1 dropship 3350 1500
+@0 spawn ds2 dropship 3300 1550
+@0 bind b2 builder 3430 1630
+@0 spawn a1 tank 3330 1450
+@0 spawn a2 tank 3380 1450
+@0 spawn h1 hoverTank 3400 1500
+@0 spawn mm mammothTank 3480 1450
+@0 spawn hh helicopter 3360 1600
+@0 spawn g1 gunBoat 3150 1800
+@0 spawn art artillery 3250 1600
+@1 track ds1 ds2 b2 a1 a2 h1 mm hh g1 art
+@2 loadInto b2 ds1
+@2 loadInto a1 ds1
+@2 loadInto a2 ds1
+@2 loadInto h1 ds1
+@2 loadInto mm ds1
+@2 loadInto hh ds2
+@2 loadInto g1 ds2
+@2 loadUp ds2 art
+@20 move ds1 2500 1500
+@20 move ds2 3100 1750
+@21 action ds2 unload
+@40 action ds1 unload
+@60 move ds2 2600 1700
+@62 build b2 extractorT1 2230 1070
+@100 near 2230 1070 120
+@101 end

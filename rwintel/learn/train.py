@@ -18,7 +18,7 @@ from typing import Callable, List, Optional, Sequence
 import torch
 from torch import nn
 
-from .net import entropy, one_hot_slot
+from .net import actor_critic_parameters, entropy, one_hot_slot, value_parameters
 from .rollout import Rollout, Step, normalise
 
 log = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ VALUE_WEIGHT = 0.5
 
 #: How much an undecided policy is worth. Small, but not nought: with this sample budget a policy that collapses onto one action in the first few hundred steps never recovers, because it stops producing the evidence that would argue it out.
 #:
-#: Small because the intended way to start a run is from an imitation of the handwritten layer, and that policy is deliberately narrow: it reproduces a rule ladder, so it is about nine tenths sure of itself and its entropy is a quarter of an even policy's. At a fiftieth this term does not preserve that narrowness, it removes it. Measured, two hundred updates at a fiftieth took the entropy from four tenths to nine tenths while the return did not move at all — the policy was not being improved, it was being dissolved, and the term paying for the dissolution was the only one with a consistent gradient. What is left here is enough to keep a policy from closing an action off entirely and not enough to undo where it started.
+#: Small because the intended way to start a run is from an imitation of the handwritten layer, and that policy is deliberately narrow: it reproduces a rule ladder, so it is about nine tenths sure of itself and its entropy is a quarter of an even policy's. At a fiftieth this term does not preserve that narrowness, it removes it. Measured, two hundred updates at a fiftieth took the entropy from four tenths to nine tenths while the return did not move at all -the policy was not being improved, it was being dissolved, and the term paying for the dissolution was the only one with a consistent gradient. What is left here is enough to keep a policy from closing an action off entirely and not enough to undo where it started.
 ENTROPY_WEIGHT = 0.002
 
 #: The largest gradient norm allowed through. A single episode in which a squad was wiped can otherwise produce a step that undoes an hour.
@@ -71,20 +71,29 @@ class Report:
 class Optimiser:
     """Proximal policy optimisation over the steps a rollout has finished with.
 
-    One class serves both layers. The only difference between them is that the operational layer chooses two things at once, so its log probability is the sum of two and its entropy bonus is the sum of two; everything else — the ratio, the clip, the value target, the gradient clipping — is identical, and writing it twice would be two things to keep in step for no gain.
+    One class serves both layers. The only difference between them is that the operational layer chooses two things at once, so its log probability is the sum of two and its entropy bonus is the sum of two; everything else -the ratio, the clip, the value target, the gradient clipping -is identical, and writing it twice would be two things to keep in step for no gain.
     """
 
     def __init__(self, net: nn.Module, device=None, learning_rate: float = LEARNING_RATE,
                  two_headed: bool = False, warmup: int = 0,
-                 entropy_weight: float = ENTROPY_WEIGHT) -> None:
+                 entropy_weight: float = ENTROPY_WEIGHT, anchor_weight: float = 0.0) -> None:
         self.net = net
         self.device = device
         self.two_headed = two_headed
+        #: How hard the objective holds the policy to the one it started from, as the weight on the divergence of the current policy from a frozen copy of the starting parameters. A run started from an imitation wants this: its advantages are noisy, and a policy moved by noise drifts away from a teacher that was already good while the returns say nothing, so the anchor lets it move only where the advantages keep pointing the same way. Nought turns it off.
+        self.anchor_weight = anchor_weight
+        self.anchor: Optional[nn.Module] = None
+        if anchor_weight > 0:
+            import copy
+
+            self.anchor = copy.deepcopy(net)
+            for parameter in self.anchor.parameters():
+                parameter.requires_grad_(False)
         #: How hard the objective pushes the policy back towards choosing evenly. A run starting from noise wants this, because a policy that collapses onto one action in its first few hundred steps stops producing the evidence that would overturn it. A run starting from an imitation of the handwritten layer wants much less of it: that policy is already narrow on purpose, and the term does not preserve the narrowness it does not know the reason for.
         self.entropy_weight = entropy_weight
-        #: Updates at the start of a run that fit the value head and nothing else. Meant for a policy that arrived from somewhere — an imitation of the handwritten layer, an earlier run — because its critic did not arrive with it: the value head is still random, so every advantage the first few thousand steps produce is noise of about the size of the returns, and a policy gradient taken against that dismantles the policy before it has been paid for anything. Nought is right for a run starting from a fresh policy, where there is nothing to protect.
+        #: Updates at the start of a run that fit the value head and nothing else. Meant for a policy that arrived from somewhere -an imitation of the handwritten layer, an earlier run -because its critic did not arrive with it: the value head is still random, so every advantage the first few thousand steps produce is noise of about the size of the returns, and a policy gradient taken against that dismantles the policy before it has been paid for anything. Nought is right for a run starting from a fresh policy, where there is nothing to protect.
         self.warmup = warmup
-        self.optimiser = torch.optim.Adam(net.parameters(), lr=learning_rate)
+        self.optimiser = torch.optim.Adam(actor_critic_parameters(net), lr=learning_rate)
         #: Held by anything that reads the weights, which is every inference call on every other thread.
         self.lock = threading.Lock()
         #: Held for the whole of one update, which the lock above deliberately is not. A warm-up freezes the trunk by setting a flag on the module, and a flag on the module is not something a per-minibatch lock protects: two updates overlapping would have the one that finished first lift the other's freeze half way through and let the value loss into the shared trunk, which is the one thing a warm-up exists to prevent. The mirror image is as bad and quieter -- an ordinary update running inside somebody else's freeze drops its policy gradient and reports nothing unusual. Overlap is not hypothetical, because the run's last update is spent by whoever is shutting the run down while the trainer thread may still be inside one.
@@ -99,7 +108,11 @@ class Optimiser:
 
     def _update(self, steps: Sequence[Step]) -> Report:
         normalise(steps)
-        states = torch.tensor([step.state for step in steps], dtype=torch.float32, device=self.device)
+        # What the network read: the set row a tactical set network decided on, the recorded state otherwise.
+        rows = [step.net_state if step.net_state is not None else step.state for step in steps]
+        if len({len(row) for row in rows}) != 1:
+            raise ValueError("one update cannot mix set rows and flat states")
+        states = torch.tensor(rows, dtype=torch.float32, device=self.device)
         actions = torch.tensor([step.action for step in steps], dtype=torch.long, device=self.device)
         masks = torch.tensor([step.mask for step in steps], dtype=torch.float32, device=self.device)
         advantages = torch.tensor([step.advantage for step in steps], dtype=torch.float32, device=self.device)
@@ -108,9 +121,11 @@ class Optimiser:
         slots = seconds = None
         if self.two_headed:
             slots = torch.stack([one_hot_slot(step.squad, device=self.device) for step in steps])
+            # The second mask is written one row per region; the plan was drawn under the row of the region that was played.
+            width = len(steps[0].second_mask) // max(1, len(steps[0].mask))
             seconds = (torch.tensor([step.second for step in steps], dtype=torch.long, device=self.device),
-                       torch.tensor([list(step.second_mask) for step in steps], dtype=torch.float32,
-                                    device=self.device))
+                       torch.tensor([list(step.second_mask[step.action * width:(step.action + 1) * width])
+                                     for step in steps], dtype=torch.float32, device=self.device))
 
         count = len(steps)
         order = torch.randperm(count, device=self.device)
@@ -154,14 +169,14 @@ class Optimiser:
 
         The trunk has to be held as well as the action head, and that is the whole point rather than a precaution. It is shared, so a value loss allowed through to it moves the features the action head reads: the policy would be taken apart by the fitting of its own critic, which is precisely the thing a warm-up is being run to prevent. What is wanted at the end of one is a critic that has caught up with an actor that has not moved.
         """
-        spared = {id(parameter) for parameter in self.net.value.parameters()}
+        spared = {id(parameter) for parameter in value_parameters(self.net)}
         for parameter in self.net.parameters():
             if id(parameter) not in spared:
                 parameter.requires_grad_(not held)
 
     def _step(self, warming, states, actions, masks, advantages, returns, old, slots, second):
         if self.two_headed:
-            logits, task_logits, values = self.net(states, slots, masks, second[1])
+            logits, task_logits, values = self.net(states, slots, masks, second[1], actions)
         else:
             logits, values = self.net(states, masks)
             task_logits = None
@@ -184,16 +199,40 @@ class Optimiser:
         clipped = torch.clamp(ratio, 1.0 - CLIP, 1.0 + CLIP) * advantages
         policy_loss = -torch.min(unclipped, clipped).mean()
         bonus = spread.mean()
-        self._descend(policy_loss + VALUE_WEIGHT * value_loss - self.entropy_weight * bonus)
+        loss = policy_loss + VALUE_WEIGHT * value_loss - self.entropy_weight * bonus
+        if self.anchor is not None:
+            loss = loss + self.anchor_weight * self._divergence(states, masks, slots, second, actions,
+                                                                logits, task_logits)
+        self._descend(loss)
         with torch.no_grad():
             share = float(((ratio - 1.0).abs() > CLIP).float().mean())
             return policy_loss.item(), value_loss.item(), bonus.item(), share
+
+    def _divergence(self, states, masks, slots, second, actions, logits, task_logits) -> torch.Tensor:
+        """The mean divergence of the current policy from the anchored one over the batch's states, summed over both heads where there are two; the plan head is compared at the region that was actually chosen."""
+        with torch.no_grad():
+            if self.two_headed:
+                anchored, anchored_tasks, _ = self.anchor(states, slots, masks, second[1], actions)
+            else:
+                anchored, _ = self.anchor(states, masks)
+                anchored_tasks = None
+        divergence = _kl(logits, anchored)
+        if task_logits is not None:
+            divergence = divergence + _kl(task_logits, anchored_tasks)
+        return divergence.mean()
 
     def _descend(self, loss: torch.Tensor) -> None:
         self.optimiser.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.net.parameters(), MAX_GRADIENT)
         self.optimiser.step()
+
+
+def _kl(logits: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    """KL(current || reference) per row. Masked actions carry the same floor in both and contribute nothing."""
+    log_p = torch.log_softmax(logits, dim=-1)
+    log_q = torch.log_softmax(reference, dim=-1)
+    return (log_p.exp() * (log_p - log_q)).sum(dim=-1)
 
 
 def _log_prob(logits: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
@@ -203,7 +242,7 @@ def _log_prob(logits: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
 class Trainer(threading.Thread):
     """Watches a rollout and updates whenever there is enough in it.
 
-    Running as a thread rather than as a loop the runner drives is what lets the games keep going. The alternative — stopping the world between batches — is not available in a process that does not own the clock.
+    Running as a thread rather than as a loop the runner drives is what lets the games keep going. The alternative -stopping the world between batches -is not available in a process that does not own the clock.
     """
 
     def __init__(self, rollout: Rollout, optimiser: Optimiser, batch: int = BATCH,
@@ -214,13 +253,14 @@ class Trainer(threading.Thread):
         self.batch = batch
         self.on_update = on_update
         self.reports: List[Report] = []
-        self._stop = threading.Event()
+        # Not named _stop: threading.Thread has a method of that name which join() calls on some Python versions.
+        self._finishing = threading.Event()
 
     def run(self) -> None:
-        while not self._stop.is_set():
-            finished = sum(len(t.steps) for t in self.rollout.done)
+        while not self._finishing.is_set():
+            finished = self.rollout.finished_steps()
             if finished < self.batch:
-                self._stop.wait(0.25)
+                self._finishing.wait(0.25)
                 continue
             steps = self.rollout.drain()
             if not steps:
@@ -236,7 +276,7 @@ class Trainer(threading.Thread):
 
     def finish(self) -> Optional[Report]:
         """Stops collecting and spends whatever is left. A last partial batch is worth taking: the alternative is throwing away the most recent and most relevant experience of the run."""
-        self._stop.set()
+        self._finishing.set()
         self.join(timeout=5.0)
         self.rollout.cut_all()
         steps = self.rollout.drain()

@@ -1,10 +1,12 @@
 """Two game processes in one lockstep match, and the question that can only be asked once they are.
 
-Every episode this project has run so far has been one process playing by itself against the built-in AI. That is not a lockstep session: with nobody to keep in step with, the engine never compares its world against another and there is nothing that could be observed to disagree. So one assumption has stood unchecked under everything built on top of it — that units created through the engine's spawn command travel the ordinary command route and therefore stay in step — and it is the assumption the whole tactical training environment rests on, because that environment does nothing but create units.
+Every episode this project has run so far has been one process playing by itself against the built-in AI. That is not a lockstep session: with nobody to keep in step with, the engine never compares its world against another and there is nothing that could be observed to disagree. So one assumption has stood unchecked under everything built on top of it -that units created through the engine's spawn command travel the ordinary command route and therefore stay in step -and it is the assumption the whole tactical training environment rests on, because that environment does nothing but create units.
 
 Checking it needs two processes in one match, and the engine has everything for that: a real host that binds a port, a connector that joins one, and a checksum of the world exchanged every few hundred frames whose verdict the host keeps per client. So the check is not a piece of apparatus to be invented but a run to be made: host, join, play, spawn, and read back what the engine says about whether the two worlds still agree.
 
 Which process does which is decided here rather than at the launcher, because it depends on which instance connects and the launcher does not know. The joining process is held until the host has actually reported its match started: the engine's connector gives up after a few seconds and a join attempted against a port nobody is listening on yet fails outright, so the order matters and is worth arranging rather than retrying into.
+
+The same arrangement with a single instance is a match against a person: the one instance hosts, and whoever joins from their own game client is its opponent. The only difference is how long the room is held open, since a person may take any time to join.
 """
 
 from __future__ import annotations
@@ -19,6 +21,9 @@ log = logging.getLogger(__name__)
 #: How long a joining process waits for the host to report its match started before trying anyway. Generous, because what it is waiting through is a map load.
 HOST_WAIT_SECONDS = 120.0
 
+#: How long a host holds its room open for another process by default. Generous, because what it is waiting through is that process loading the game.
+PEER_WAIT_SECONDS = 90
+
 
 @dataclass
 class Pairing:
@@ -28,6 +33,8 @@ class Pairing:
     host_instance: int = 0
     address: str = "127.0.0.1"
     port: int = 5123
+    #: Seconds the host holds its room open for somebody to join, or 0 to hold it until somebody does. A host nobody joined in time reports the episode as failed and the run stops.
+    peer_wait: int = PEER_WAIT_SECONDS
     #: Set once the hosting instance has reported that its match has begun, which is the moment a join can succeed.
     up: threading.Event = field(default_factory=threading.Event)
 
@@ -39,7 +46,7 @@ class Pairing:
         if self.hosts(session):
             # Released as the instruction goes out rather than when the match begins. A match cannot be joined once it has started, so the other process has to be dialling while the host is still loading its map and standing in the room; the joining side retries until the port answers, and the host waits in the room until somebody is there.
             self.up.set()
-            return {"host": True, "port": self.port, "name": f"host-{session.instance}"}
+            return {"host": True, "port": self.port, "peerWait": self.peer_wait, "name": f"host-{session.instance}"}
         if not self.up.wait(HOST_WAIT_SECONDS):
             log.warning("instance %d is joining %s:%d without having heard the host open a room",
                         session.instance, self.address, self.port)
@@ -93,11 +100,13 @@ def _something_ordinary(session):
     Restricted to what a factory builds rather than to whatever the registry prices lowest, because the registry contains the creatures a nest spawns and the deployed forms of other units, and the cheapest thing in it is one of those. What is being asked is whether creating an ordinary unit disturbs a shared match, so the unit had better be an ordinary one.
     """
     from .policy.catalogue import Catalogue
+    from .policy.contracts import Domain
 
     catalogue = Catalogue(session.types, session.assets)
     candidates = [kind for kind in session.types
                   if kind.mobile and kind.armed and kind.price > 0
-                  and kind.movement in ("LAND", "HOVER") and catalogue.builds("landFactory", kind)]
+                  and catalogue.domain(kind.index) in (Domain.GROUND, Domain.AMPHIBIOUS)
+                  and any(catalogue.builds(catalogue.kind(factory), kind) for factory in catalogue.factories)]
     return min(candidates, key=lambda kind: kind.price) if candidates else None
 
 

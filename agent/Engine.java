@@ -51,6 +51,8 @@ final class Engine {
     private final Field unitHealth;      // am.cu
     private final Field unitMaxHealth;   // am.cv
     private final Field unitLastHit;     // am.bs, game time of the last hit taken
+    private final Method sampleOfType;   // static am.a(as), the engine's own sample unit of a type
+    private final Method armedRange;     // y.m(), a unit's maximum attack range
     private final Field objectId;        // w.eh
     private final Field objectX;         // w.eo
     private final Field objectY;         // w.ep
@@ -62,6 +64,8 @@ final class Engine {
     private final Method unitOrder;      // y.ar(), the order being carried out
     private final Field orderKind;       // au.a, the av constant saying which kind it is
     private final Object[] orderKinds;   // av.values(), so a kind can be reported as its ordinal
+    private final Field unitCarrier;     // am.cN, the transport a unit is aboard, null when it is aboard nothing
+    private final Method transportLoad;  // am.bY(), how many slots a transport has filled
 
     // ---- type internals ------------------------------------------------------------------
 
@@ -125,7 +129,34 @@ final class Engine {
     private final Method commandBuild;   // e.a(float, float, as, int)
     private final Method commandStance;  // e.a(a)
     private final Method commandAction;  // e.a(a.c)
+    private final Method commandGuard;   // e.c(am)
+    private final Method commandLoadInto; // e.e(am), the passenger boards the transport
+    private final Method commandLoadUp;  // e.f(am), the transport picks the passenger up
+    private final Field commandAppend;   // e.e, keep the orders already queued and add this one after them
     private final Method actionHandle;   // a.c.a(String)
+    private final Field poolQueue;       // c.b, the commands queued since the pool last carried them out
+    private final Field commandIssuer;   // e.i, the player the command is issued as
+    private final Field commandTime;     // e.d, the game time it was issued at
+    private final Field commandUndo;     // e.g, stopOrUndo
+    private final Field commandStop;     // e.o, set by e.h()
+    private final Field commandOrder;    // e.j, the order it gives, or null
+    private final Field commandSpecial;  // e.k, the special action it names
+    private final Field commandUnits;    // e.v, the units it addresses
+    private final Field orderX;          // au.e
+    private final Field orderY;          // au.f
+    private final Field orderTarget;     // au.h, the unit the order is aimed at, or null
+
+    // ---- what a unit offers ----------------------------------------------------------------
+
+    private final Method unitLevel;      // am.V(), the tier a building has been raised to
+    private final Method unitActions;    // am.N(), the actions the unit offers at its current tier
+    private final Method actionHandleOf; // a.s.N(), the handle a command names the action by
+    private final Method offeredPrice;   // a.s.c()
+    private final Method actionKind;     // a.s.f(), an a.t
+    private final Method offeredType;    // a.s.i(), the type an action produces or places
+    private final Object upgradeKind;    // a.t.c, the kind every tier raise reports
+    private final Object queueKind;      // a.t.d (queueUnit), the kind a factory's production reports
+    private final Object placeKind;      // a.t.e (building), the kind a builder's placement reports
 
     private final Object[] stances;
 
@@ -208,6 +239,8 @@ final class Engine {
         unitHealth = field(unitClass, "cu");
         unitMaxHealth = field(unitClass, "cv");
         unitLastHit = field(unitClass, "bs");
+        sampleOfType = method(unitClass, "a", typeInterface);
+        armedRange = method(armedClass, "m");
         objectId = field(objectClass, "eh");
         objectX = field(objectClass, "eo");
         objectY = field(objectClass, "ep");
@@ -219,6 +252,8 @@ final class Engine {
         unitOrder = method(armedClass, "ar");
         orderKind = fieldOfType(orderClass, orderKindClass);
         orderKinds = (Object[]) orderKindClass.getMethod("values").invoke(null);
+        unitCarrier = field(unitClass, "cN");
+        transportLoad = method(unitClass, "bY");
 
         Class<?> statsClass = Class.forName("com.corrodinggames.rts.game.units.custom.as");
         definedTypeStats = field(definedTypeClass, "cL");
@@ -269,7 +304,34 @@ final class Engine {
         commandBuild = method(commandClass, "a", float.class, float.class, typeInterface, int.class);
         commandStance = method(commandClass, "a", stanceClass);
         commandAction = method(commandClass, "a", actionClass);
+        commandGuard = method(commandClass, "c", unitClass);
+        commandLoadInto = method(commandClass, "e", unitClass);
+        commandLoadUp = method(commandClass, "f", unitClass);
+        commandAppend = field(commandClass, "e");
         actionHandle = method(actionClass, "a", String.class);
+        poolQueue = field(poolClass, "b");
+        commandIssuer = field(commandClass, "i");
+        commandTime = field(commandClass, "d");
+        commandUndo = field(commandClass, "g");
+        commandStop = field(commandClass, "o");
+        commandOrder = field(commandClass, "j");
+        commandSpecial = field(commandClass, "k");
+        commandUnits = field(commandClass, "v");
+        orderX = field(orderClass, "e");
+        orderY = field(orderClass, "f");
+        orderTarget = field(orderClass, "h");
+
+        Class<?> offeredClass = Class.forName("com.corrodinggames.rts.game.units.a.s");
+        Class<?> offeredKindClass = Class.forName("com.corrodinggames.rts.game.units.a.t");
+        unitLevel = method(unitClass, "V");
+        unitActions = method(unitClass, "N");
+        actionHandleOf = method(offeredClass, "N");
+        offeredPrice = method(offeredClass, "c");
+        actionKind = method(offeredClass, "f");
+        offeredType = method(offeredClass, "i");
+        upgradeKind = field(offeredKindClass, "c").get(null);
+        queueKind = field(offeredKindClass, "d").get(null);
+        placeKind = field(offeredKindClass, "e").get(null);
 
         stances = (Object[]) stanceClass.getMethod("values").invoke(null);
 
@@ -421,12 +483,73 @@ final class Engine {
         field(engineClass, "bv").setBoolean(engine, on);
     }
 
-    void setSpeed(Object engine, float multiplier) throws Exception {
-        field(engine.getClass(), "H").setFloat(engine, multiplier);
+    // ---- replays --------------------------------------------------------------------------
+
+    /** l.cb, the replay player and recorder (gameFramework.ba). */
+    private Object replays(Object engine) throws Exception {
+        return field(engineClass, "cb").get(engine);
     }
 
-    float speed(Object engine) throws Exception {
-        return field(engine.getClass(), "H").getFloat(engine);
+    /** Loads a replay by file name, resolved against the replays folder of the working directory, and says whether it loaded. The simulation does not step it until the menu is closed. */
+    boolean loadReplay(Object engine, String name) throws Exception {
+        Object replays = replays(engine);
+        return Boolean.TRUE.equals(method(replays.getClass(), "c", String.class).invoke(replays, name));
+    }
+
+    /**
+     * Closes the menu the way the menu's own replay load does once it has loaded one: the active document, the document history, and the interface itself.
+     * The pause test counts an open menu document as a pause, so a replay loaded with the menu still open stays at frame 0.
+     */
+    void closeMenu() throws Exception {
+        Class<?> gui = Class.forName("com.corrodinggames.librocket.a");
+        Object guiEngine = gui.getMethod("a").invoke(null);
+        Object documents = gui.getField("b").get(guiEngine);
+        documents.getClass().getMethod("closeActiveDocument").invoke(documents);
+        documents.getClass().getMethod("clearHistory").invoke(documents);
+        gui.getMethod("a", boolean.class).invoke(guiEngine, Boolean.FALSE);
+    }
+
+    /** ba.i(): a replay is being played back or a match recorded. After a replay has been loaded it says whether the playback is still going. */
+    boolean replayActive(Object engine) throws Exception {
+        Object replays = replays(engine);
+        return Boolean.TRUE.equals(method(replays.getClass(), "i").invoke(replays));
+    }
+
+    /** ba.k(): the match is being recorded. */
+    boolean replayRecording(Object engine) throws Exception {
+        Object replays = replays(engine);
+        return Boolean.TRUE.equals(method(replays.getClass(), "k").invoke(replays));
+    }
+
+    /** ba.s: playback has read the block that closes a recording. */
+    boolean replayEnded(Object engine) throws Exception {
+        Object replays = replays(engine);
+        return field(replays.getClass(), "s").getBoolean(replays);
+    }
+
+    /** ba.t: the file name a recording is being written to, or null when nothing is being recorded. */
+    String replayFile(Object engine) throws Exception {
+        Object replays = replays(engine);
+        Object name = field(replays.getClass(), "t").get(replays);
+        return name == null ? null : String.valueOf(name);
+    }
+
+    /** ba.l: how many of the recorded checksums the playback has disagreed with. */
+    int replayMismatches(Object engine) throws Exception {
+        Object replays = replays(engine);
+        return field(replays.getClass(), "l").getInt(replays);
+    }
+
+    /** ba.v: world steps the playback runs for each step's worth of elapsed time. More steps a frame, not longer steps, so the match played is the same one. */
+    void setReplaySteps(Object engine, int steps) throws Exception {
+        Object replays = replays(engine);
+        field(replays.getClass(), "v").setInt(replays, steps);
+    }
+
+    /** ba.e(): stops recording or playing back, flushing and closing the file. */
+    void stopReplay(Object engine) throws Exception {
+        Object replays = replays(engine);
+        method(replays.getClass(), "e").invoke(replays);
     }
 
     /**
@@ -464,6 +587,19 @@ final class Engine {
     float x(Object unit) throws Exception { return objectX.getFloat(unit); }
     float y(Object unit) throws Exception { return objectY.getFloat(unit); }
     int price(Object unit) throws Exception { return ((Integer) unitPrice.invoke(unit)).intValue(); }
+
+    /** The transport the unit is aboard, or null. A unit aboard stays in the unit list at its transport's position and holds no order of its own. */
+    Object carrier(Object unit) throws Exception { return unitCarrier.get(unit); }
+
+    /** How many slots of a transport are filled; nought for a unit that carries nothing. */
+    int aboard(Object transport) {
+        try {
+            Object value = transportLoad.invoke(transport);
+            return value instanceof Integer ? Math.max(0, ((Integer) value).intValue()) : 0;
+        } catch (Exception e) {
+            return 0;
+        }
+    }
 
     boolean visibleTo(Object unit, Object player) throws Exception {
         return ((Boolean) unitVisibleTo.invoke(unit, player)).booleanValue();
@@ -599,15 +735,142 @@ final class Engine {
     String typeMovement(Object type) throws Exception { return String.valueOf(typeMovement.invoke(type)); }
 
     /**
+     * Which tiles a movement type cannot cross, row by row from the top left, as the path finder holds them (`l.bU`, a `gameFramework.k.l`, whose `a(ao, x, y)` is true on a blocked tile), or null when it keeps no grid for the movement type or no map is loaded.
+     *
+     * Standing buildings block their footprint here as well as the ground does. The width and height are the first two entries of what is returned, as the array's first row would otherwise have to be guessed.
+     */
+    int[] blockedTiles(Object game, String movement) {
+        try {
+            Object finder = field(engineClass, "bU").get(game);
+            if (finder == null) return null;
+            Class<?> movementClass = Class.forName("com.corrodinggames.rts.game.units.ao");
+            Object kind = null;
+            for (Object constant : movementClass.getEnumConstants()) {
+                if (String.valueOf(constant).equals(movement)) kind = constant;
+            }
+            if (kind == null) return null;
+            Object grid = method(finder.getClass(), "a", movementClass).invoke(finder, kind);
+            if (grid == null) return null;
+            int width = field(grid.getClass(), "b").getInt(grid);
+            int height = field(grid.getClass(), "c").getInt(grid);
+            Method blocked = method(finder.getClass(), "a", movementClass, int.class, int.class);
+            int[] out = new int[2 + width * height];
+            out[0] = width;
+            out[1] = height;
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    if (Boolean.TRUE.equals(blocked.invoke(finder, kind, Integer.valueOf(x), Integer.valueOf(y)))) out[2 + y * width + x] = 1;
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** The engine's own sample unit of a type, or null when it keeps none. Every capability below is read off it, since it is an instance of the type's own class and answers as a unit of the type would. */
+    Object sample(Object type) {
+        try {
+            return sampleOfType.invoke(null, type);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Whether units of the type can attack at all: the sample's own `l()`. A transport or a builder reports a range without having a weapon, so a range is not this answer. */
+    boolean typeCanAttack(Object type) {
+        Object sample = sample(type);
+        try {
+            return sample != null && Boolean.TRUE.equals(method(sample.getClass(), "l").invoke(sample));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Move speed in world units a second: the sample's `z()`, which the engine keeps per sixtieth of a second. Nought for what does not move. */
+    float typeSpeed(Object type) {
+        Object sample = sample(type);
+        try {
+            return sample == null ? 0f : ((Float) method(sample.getClass(), "z").invoke(sample)).floatValue() * 60f;
+        } catch (Exception e) {
+            return 0f;
+        }
+    }
+
+    /** Transport capacity in slots, the sample's `bZ()`; -1 for a type that carries nothing. */
+    int typeCapacity(Object type) {
+        return sampleInt(type, "bZ", -1);
+    }
+
+    /** Slots a unit of the type takes aboard a transport, the sample's `cw()`. */
+    int typeSlots(Object type) {
+        return sampleInt(type, "cw", 1);
+    }
+
+    private int sampleInt(Object type, String name, int otherwise) {
+        Object sample = sample(type);
+        try {
+            return sample == null ? otherwise : ((Integer) method(sample.getClass(), name).invoke(sample)).intValue();
+        } catch (Exception e) {
+            return otherwise;
+        }
+    }
+
+    /** What a unit of the type offers to produce or place at its first tier, read off the sample's action list. */
+    java.util.List<Object> typeMenu(Object type) {
+        Object sample = sample(type);
+        try {
+            return sample == null ? new java.util.ArrayList<Object>() : producible(sample);
+        } catch (Exception e) {
+            return new java.util.ArrayList<Object>();
+        }
+    }
+
+    /** Whether a unit of the type offers a tier raise at its first tier. */
+    boolean typeUpgradable(Object type) {
+        Object sample = sample(type);
+        try {
+            return sample != null && upgradeOffered(sample) != null;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Whether a transport of the first type would load a unit of the second: the engine's own load test, `d(am, boolean)`, between the two samples. It agrees with what live units do. */
+    boolean typeCarries(Object transport, Object passenger) {
+        Object carrier = sample(transport);
+        Object cargo = sample(passenger);
+        if (carrier == null || cargo == null) return false;
+        try {
+            return Boolean.TRUE.equals(method(unitClass, "d", unitClass, boolean.class).invoke(carrier, cargo, Boolean.FALSE));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
      * Maximum attack range in world units, or zero for a type that has none.
      *
-     * Range is not on the type interface. A type that came from a definition file carries its numbers in a stat block, which is where the parser writes the file's maxAttackRange; a type that exists only as code in the game carries no such block, and every one of those is a building or the builder, none of which shoots.
+     * Range is not on the type interface. A type that came from a definition file carries its numbers in a stat block, which is where the parser writes the file's maxAttackRange. A type that exists only as code carries no such block, and some of those shoot (the hover tank is one); for them the range is read off the engine's own sample unit of the type, which answers it in code.
      */
     float typeRange(Object type) {
         try {
-            if (!definedTypeClass.isInstance(type)) return 0f;
+            if (!definedTypeClass.isInstance(type)) {
+                Object sample = sampleOfType.invoke(null, type);
+                return sample != null && armedClass.isInstance(sample) ? ((Float) armedRange.invoke(sample)).floatValue() : 0f;
+            }
             Object stats = definedTypeStats.get(type);
             return stats == null ? 0f : statsRange.getFloat(stats);
+        } catch (Exception e) {
+            return 0f;
+        }
+    }
+
+    /** A type's maximum health, read off the engine's sample unit of it, or nought when the engine keeps no sample of the type. */
+    float typeMaxHealth(Object type) {
+        try {
+            Object sample = sampleOfType.invoke(null, type);
+            return sample == null ? 0f : unitMaxHealth.getFloat(sample);
         } catch (Exception e) {
             return 0f;
         }
@@ -627,7 +890,9 @@ final class Engine {
         return staticCondition(type, definedTypeHitsAir);
     }
 
+    /** A type that exists only as code has no condition to read; one whose sample unit shoots is taken to shoot at the ground, which is what every such type in the game does. */
     Boolean typeHitsLand(Object type) {
+        if (!definedTypeClass.isInstance(type)) return Boolean.valueOf(typeRange(type) > 0f);
         return staticCondition(type, definedTypeHitsLand);
     }
 
@@ -704,6 +969,81 @@ final class Engine {
         commandAttack.invoke(command, target);
     }
 
+    /** Follows the unit and fights what threatens it. */
+    void guard(Object command, Object target) throws Exception {
+        commandGuard.invoke(command, target);
+    }
+
+    /** The units of the command walk to the transport and board it. A transport they cannot reach leaves them standing with the order held. */
+    void loadInto(Object command, Object transport) throws Exception {
+        commandLoadInto.invoke(command, transport);
+    }
+
+    /** The transport of the command goes to the passenger and takes it aboard. One at a time: a second one issued in the same step replaces the first unless the command is appended. */
+    void loadUp(Object command, Object passenger) throws Exception {
+        commandLoadUp.invoke(command, passenger);
+    }
+
+    /** Adds the command's order after the ones its units already hold instead of replacing them. */
+    void append(Object command) throws Exception {
+        commandAppend.set(command, Boolean.TRUE);
+    }
+
+    // ---- reading commands back -----------------------------------------------------------
+
+    /** The pool's queue of commands not yet carried out, or null before a match has a pool. */
+    Object commandQueue(Object engine) throws Exception {
+        Object pool = commandPool.get(engine);
+        return pool == null ? null : poolQueue.get(pool);
+    }
+
+    void setCommandQueue(Object engine, java.util.ArrayList<Object> queue) throws Exception {
+        Object pool = commandPool.get(engine);
+        if (pool != null) poolQueue.set(pool, queue);
+    }
+
+    Object issuer(Object command) throws Exception { return commandIssuer.get(command); }
+    int issuedAt(Object command) throws Exception { return commandTime.getInt(command); }
+    boolean appended(Object command) throws Exception { return commandAppend.getBoolean(command); }
+    boolean undoes(Object command) throws Exception { return commandUndo.getBoolean(command); }
+    boolean stops(Object command) throws Exception { return commandStop.getBoolean(command); }
+    Object orderOf(Object command) throws Exception { return commandOrder.get(command); }
+    Object specialOf(Object command) throws Exception { return commandSpecial.get(command); }
+    java.util.List<?> unitsOf(Object command) throws Exception { return (java.util.List<?>) commandUnits.get(command); }
+    float orderX(Object order) throws Exception { return orderX.getFloat(order); }
+    float orderY(Object order) throws Exception { return orderY.getFloat(order); }
+    Object orderTarget(Object order) throws Exception { return orderTarget.get(order); }
+
+    /** The kind of an order, as its position in the engine's own enumeration, or {@link #NO_ORDER}. */
+    int kindOf(Object order) throws Exception {
+        Object kind = orderKind.get(order);
+        for (int i = 0; i < orderKinds.length; i++) if (orderKinds[i] == kind) return i;
+        return NO_ORDER;
+    }
+
+    /** The handle a command names a special action by, made from its id as the engine makes it. */
+    Object actionHandle(String id) throws Exception { return actionHandle.invoke(null, id); }
+
+    /**
+     * Issues one of the unit's own actions by its action id, such as a transport's "109" (unload) and "110" (cancel the unload); false when the unit offers no action of that id.
+     *
+     * The id is matched against the handles of the unit's action list rather than sent blind, so an id the unit does not offer issues nothing.
+     */
+    boolean unitAction(Object command, Object unit, String id) throws Exception {
+        Object wanted = actionHandle.invoke(null, id);
+        Object actions = unitActions.invoke(unit);
+        if (!(actions instanceof java.util.List)) return false;
+        for (Object action : (java.util.List<?>) actions) {
+            if (action == null) continue;
+            Object handle = actionHandleOf.invoke(action);
+            if (handle == wanted || (handle != null && handle.equals(wanted))) {
+                commandAction.invoke(command, handle);
+                return true;
+            }
+        }
+        return false;
+    }
+
     void build(Object command, float x, float y, Object type, int size) throws Exception {
         commandBuild.invoke(command, Float.valueOf(x), Float.valueOf(y), type, Integer.valueOf(size));
     }
@@ -733,6 +1073,43 @@ final class Engine {
     /** Production and upgrades travel as a special action whose name is built from the type's own reported name. */
     void specialAction(Object command, String handle) throws Exception {
         commandAction.invoke(command, actionHandle.invoke(null, handle));
+    }
+
+    /** Names an action by the handle the unit's own action list carries, which is how a tier raise is issued: its id is a number the unit class chose, not a name built from a type. */
+    void offeredAction(Object command, Object action) throws Exception {
+        commandAction.invoke(command, actionHandleOf.invoke(action));
+    }
+
+    int level(Object unit) throws Exception { return ((Integer) unitLevel.invoke(unit)).intValue(); }
+
+    /** The tier raise this unit offers at its current tier, or null when it offers none. Buildings offer at most one at a time: the next tier. */
+    Object upgradeOffered(Object unit) throws Exception {
+        Object actions = unitActions.invoke(unit);
+        if (!(actions instanceof java.util.List)) return null;
+        for (Object action : (java.util.List<?>) actions) {
+            if (action != null && actionKind.invoke(action) == upgradeKind) return action;
+        }
+        return null;
+    }
+
+    int actionPrice(Object action) throws Exception { return ((Integer) offeredPrice.invoke(action)).intValue(); }
+
+    /**
+     * The types this unit offers to produce or to place at its current tier, which is the engine's own answer to what a factory makes or a builder builds.
+     * Read off the unit's action list: the actions of the production and placement kinds each name the type they make. A definition file cannot say this reliably, since a type whose definition names no maker may be a core unit or a part of something else.
+     */
+    java.util.List<Object> producible(Object unit) throws Exception {
+        java.util.List<Object> out = new java.util.ArrayList<Object>();
+        Object actions = unitActions.invoke(unit);
+        if (!(actions instanceof java.util.List)) return out;
+        for (Object action : (java.util.List<?>) actions) {
+            if (action == null) continue;
+            Object kind = actionKind.invoke(action);
+            if (kind != queueKind && kind != placeKind) continue;
+            Object type = offeredType.invoke(action);
+            if (type != null) out.add(type);
+        }
+        return out;
     }
 
     void setField(Object target, String name, Object value) throws Exception {

@@ -1,0 +1,34 @@
+# Beach landing, our side the east island. The hovercraft: who it takes and how many, both ways of loading, unloading on land, holding the unload over water, a builder working after the crossing.
+# Expect: hc1 picks up b1 and three tanks in turn and t4, told to board once it is full, is turned away; hc3 fetches art; heli, xt and gb never board; t5 stops at the shore; hc3 holds its unload on the water and lets art off on the main island; b1 builds the extractor at (2370,1830).
+@0 bind hc1 hovercraft 3250 1770
+@0 bind b1 builder 3350 1630
+@0 spawn t1 tank 3300 1700
+@0 spawn t2 tank 3320 1650
+@0 spawn t3 tank 3300 1600
+@0 spawn t4 tank 3340 1720
+@0 spawn t5 tank 3460 1660
+@0 spawn hc3 hovercraft 3280 1700
+@0 spawn art artillery 3400 1680
+@0 spawn hc5 hovercraft 3380 1600
+@0 spawn heli helicopter 3360 1560
+@0 spawn xt experimentalTank 3480 1720
+@0 spawn gb gunBoat 3150 1800
+@1 track hc1 b1 t1 t2 t3 t4 t5 hc3 art hc5 heli xt gb
+@2 loadUpQ hc1 b1
+@2.1 loadUpQ hc1 t1
+@2.2 loadUpQ hc1 t2
+@2.3 loadUpQ hc1 t3
+@14 loadInto t4 hc1
+@2 loadUp hc3 art
+@2 loadInto heli hc5
+@2 loadInto xt hc5
+@2 loadInto gb hc5
+@2 move t5 2800 1500
+@20 move hc1 2800 1500
+@20 move hc3 3000 1750
+@30 action hc3 unload
+@45 action hc1 unload
+@50 move hc3 2700 1600
+@60 build b1 extractorT1 2370 1830
+@100 near 2370 1830 120
+@101 end

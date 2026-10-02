@@ -4,9 +4,9 @@ A squad is a first class entity with a name that outlives any one mission, which
 
 The cap of eight is kept here and nowhere else. It is what fixes the operational layer's action space and what the observation's squad block is sized for, so a ninth squad would have no slot to be reported in. At the cap this layer forms nothing at all and puts every loose unit into an existing squad, which is the deliberate failure mode: an over strength squad is merely inefficient, whereas a squad with no slot is invisible.
 
-It runs on events rather than on a clock. Production completing, a unit dying and a squad falling through its doctrine's strength are the three things that change what the squads are, and all three arrive as records in the observation rather than having to be inferred by diffing rosters — which matters because a roster diff cannot tell a unit that died from a unit that was handed to another commander, and the two want opposite responses.
+It runs on events rather than on a clock. Production completing, a unit dying and a squad falling through its doctrine's strength are the three things that change what the squads are, and all three arrive as records in the observation rather than having to be inferred by diffing rosters -which matters because a roster diff cannot tell a unit that died from a unit that was handed to another commander, and the two want opposite responses.
 
-Membership is decided here and stated in whole rosters, never as deltas: the game side replaces a squad's roster with what it is sent and retires a squad sent an empty one, so a full roster is also how a disband is expressed. Everything else about a squad — its worth, its centre, how scattered it is, whether a human holds it — is computed game side and folded back in each period, because those are questions about the world rather than about the plan.
+Membership is decided here and stated in whole rosters, never as deltas: the game side replaces a squad's roster with what it is sent and retires a squad sent an empty one, so a full roster is also how a disband is expressed. Everything else about a squad -its worth, its centre, how scattered it is, whether a human holds it -is computed game side and folded back in each period, because those are questions about the world rather than about the plan.
 """
 
 from __future__ import annotations
@@ -22,11 +22,13 @@ from ...wire import (
     EventState,
     NO_SQUAD,
     Observation,
+    PASSAGE_CLASSES,
     SquadAssignment,
     Status,
 )
 from .catalogue import Catalogue
-from .contracts import DOCTRINES, Doctrine, Replacement, Role, SQUAD_CAP, Shortfall, SquadRecord
+from .contracts import DOCTRINES, Doctrine, Domain, Replacement, Role, SQUAD_CAP, Shortfall, SquadRecord
+from .options import Options
 from .view import Sighting, WorldView
 
 #: Event kinds, mirroring the ones the in-process agent emits.
@@ -43,11 +45,22 @@ MERGE_DISTANCE = 1200.0
 #: Opening value: below this share of its high water worth a squad with nowhere to merge into is retired and its survivors returned to the pool.
 DISBAND_HEALTH = 0.15
 
+#: Opening value: how far a loose unit may be from the squad it is meant for and still join it alone. Further than this it waits for others bound the same way.
+CONVOY_DISTANCE = 1500.0
+
+#: Opening value: how many units bound for the same distant squad travel together.
+CONVOY_SIZE = 3
+
+#: Opening value: the longest a unit waits for a convoy before it goes alone, so that a trickle of production does not keep reinforcements at home for ever.
+CONVOY_WAIT_MS = 30000
+
 #: Opening value: which doctrine gets first refusal on the loose units when more than one of them could be formed. Fighting formations first, so that the front is manned before the rear is comfortable.
 FORMATION_ORDER: Tuple[Doctrine, ...] = (
     Doctrine.VANGUARD,
     Doctrine.GARRISON,
     Doctrine.RAID,
+    Doctrine.FLEET,
+    Doctrine.AIRWING,
     Doctrine.ENGINEER,
 )
 
@@ -55,9 +68,12 @@ FORMATION_ORDER: Tuple[Doctrine, ...] = (
 class Organisation:
     """The layer that owns the squads. Constructed once per episode and carried across periods, since squad identity is the state that has to survive between decisions."""
 
-    def __init__(self, session, catalogue: Catalogue) -> None:
+    def __init__(self, session, catalogue: Catalogue, options: Options = Options()) -> None:
         self.session = session
         self.catalogue = catalogue
+        self.options = options
+        #: Loose units held back to travel with others to a distant squad, with when each started waiting.
+        self.waiting_since: Dict[int, int] = {}
         self.squads: Dict[int, SquadRecord] = {}
         #: Ids not in use. They double as the observation's squad slots, so they are drawn from a fixed set and handed back on a disband rather than counted upward.
         self.free_ids: List[int] = list(range(SQUAD_CAP))
@@ -69,6 +85,8 @@ class Organisation:
         self.settling: Set[int] = set()
         #: Squads the game reported this period, which is what says whether a disband has to be sent at all or the game has already dropped an empty squad on its own.
         self.known_to_game: Set[int] = set()
+        #: The lift layer, which holds the transports this layer leaves out of every squad; handed over by the policy, and read by a commander outside the chain that wants a squad carried.
+        self.logistics = None
         #: Slots handed to someone outside the chain. The cap belongs to this layer and to nowhere else, so a human or an intruder that wants a squad of its own asks for the slot here rather than picking a number; otherwise two commanders would eventually name the same one and the observation would describe whichever wrote last.
         self.reserved: Set[int] = set()
 
@@ -93,14 +111,16 @@ class Organisation:
         self._disband(by_id, pool, disbanded)
 
         for sighting in view.unassigned:
-            # A unit still under construction is in nobody's squad because it does not exist yet, so completion — announced, or evident from the build byte — is what makes it available.
+            # A unit still under construction is in nobody's squad because it does not exist yet, so completion -announced, or evident from the build byte -is what makes it available.
             if sighting.unit.built >= 255 or sighting.unit.id in self.awaiting_orders:
                 pool.append(sighting)
         pool.sort(key=lambda s: s.unit.id)
         self.awaiting_orders -= {s.unit.id for s in pool}
 
         counts = {record.id: _roles_in(record, by_id) for record in self.squads.values()}
-        self._distribute(pool, counts, by_id, changed, returned)
+        self._distribute(pool, counts, by_id, changed, returned, observation.game_time_ms)
+        loose = {s.unit.id for s in pool}
+        self.waiting_since = {unit: since for unit, since in self.waiting_since.items() if unit in loose}
 
         assignments = [SquadAssignment(squad=squad_id, commander=Commander.MACHINE, units=[])
                        for squad_id in sorted(disbanded) if squad_id in self.known_to_game]
@@ -148,9 +168,14 @@ class Organisation:
             record.x = state.x
             record.y = state.y
             record.spread = state.spread
-            record.losses = state.losses
-            record.status = Status(state.status)
+            # A report about a contract older than the one this side has since issued is about the errand that contract replaced: the game has not applied the new one yet. Its status and losses are that old errand's, so the new one reads as just begun.
+            superseded = record.contract is not None and state.issued_at_ms < record.contract.issued_at_ms
+            record.losses = 0.0 if superseded else state.losses
+            record.status = Status.ACTIVE if superseded else Status(state.status)
             record.commander = state.commander
+            record.aboard = state.aboard
+            record.passage = PASSAGE_CLASSES[state.passage] if 0 <= state.passage < len(PASSAGE_CLASSES) else ""
+            record.lift = state.lift
 
     def _adopt(self, state, observation: Observation) -> Optional[SquadRecord]:
         """Takes over a squad the game is holding that this layer has no record of.
@@ -165,7 +190,10 @@ class Organisation:
             return None
         if state.id in self.free_ids:
             self.free_ids.remove(state.id)
-        record = SquadRecord(id=state.id, doctrine=doctrine, members=members)
+        by_id = {u.id: u for u in observation.unit_states}
+        domains = [self.catalogue.domain(by_id[m].type_index) for m in members if m in by_id]
+        domain = max(set(domains), key=domains.count) if domains else Domain.GROUND
+        record = SquadRecord(id=state.id, doctrine=doctrine, members=members, domain=domain)
         self.squads[state.id] = record
         return record
 
@@ -244,13 +272,13 @@ class Organisation:
             self._retire(record, disbanded)
 
     def _merge_target(self, record: SquadRecord, disbanded: Set[int]) -> Optional[SquadRecord]:
-        """The nearest squad of the same doctrine within reach that is fit to take this one in."""
+        """The nearest squad of the same doctrine and domain within reach that is fit to take this one in."""
         best: Optional[SquadRecord] = None
         best_distance = MERGE_DISTANCE
         for other in self.squads.values():
             if other.id == record.id or not other.machine or not other.members:
                 continue
-            if other.doctrine != record.doctrine or other.id in disbanded:
+            if other.doctrine != record.doctrine or other.domain != record.domain or other.id in disbanded:
                 continue
             if other.health < record.health:
                 continue
@@ -282,31 +310,49 @@ class Organisation:
     # ---- filling the squads ------------------------------------------------------------
 
     def _distribute(self, pool: List[Sighting], counts: Dict[int, Dict[Role, int]],
-                    by_id: Dict[int, Sighting], changed: Set[int], returned: Set[int]) -> None:
+                    by_id: Dict[int, Sighting], changed: Set[int], returned: Set[int], now: int) -> None:
         """Reinforcement and formation, alternating until neither has anything left to do.
 
-        Reinforcement runs first so that an under strength squad is made whole before a second one is raised beside it, and it runs again after each formation so the new squad takes the spares that are standing next to it rather than waiting a period for them. Whatever is left when nothing more can be formed is pushed into a squad anyway: a unit standing in the pool contributes nothing, and at the cap the pool is the only place a new unit could otherwise go.
+        Reinforcement runs first so that an under strength squad is made whole before a second one is raised beside it, and it runs again after each formation so the new squad takes the spares that are standing next to it rather than waiting a period for them. Whatever is left when nothing more can be formed is pushed into a squad anyway: a unit standing in the pool contributes nothing, and at the cap the pool is the only place a new unit could otherwise go. The one exception is a unit waiting for a convoy to a distant squad, which waits in the pool until the convoy leaves.
         """
         while True:
-            self._reinforce(pool, counts, by_id, changed, returned, strict=True)
+            self._reinforce(pool, counts, by_id, changed, returned, strict=True, now=now)
             if not self._form(pool, counts, by_id, changed, returned):
                 break
-        self._reinforce(pool, counts, by_id, changed, returned, strict=False)
+        self._reinforce(pool, counts, by_id, changed, returned, strict=False, now=now)
 
     def _reinforce(self, pool: List[Sighting], counts: Dict[int, Dict[Role, int]],
                    by_id: Dict[int, Sighting], changed: Set[int], returned: Set[int],
-                   strict: bool) -> None:
+                   strict: bool, now: int) -> None:
+        """Places loose units into the squads that want them. A unit bound for a squad further than CONVOY_DISTANCE away waits in the pool until CONVOY_SIZE are bound for the same squad, or until the first of them has waited CONVOY_WAIT_MS, and then they all go at once: one tank crossing the board to its squad is one tank met alone on the way."""
         placed: Set[int] = set()
-        for sighting in pool:
-            target = self._best_squad(sighting, counts, by_id, strict)
-            if target is None:
-                continue
+        bound: Dict[int, List[Sighting]] = {}
+        targets: Dict[int, SquadRecord] = {}
+
+        def place(sighting: Sighting, target: SquadRecord) -> None:
             placed.add(sighting.unit.id)
             target.members.append(sighting.unit.id)
             counts[target.id][sighting.role] = counts[target.id].get(sighting.role, 0) + 1
             changed.add(target.id)
             if sighting.unit.id in returned:
                 self.settling.add(target.id)
+
+        for sighting in pool:
+            target = self._best_squad(sighting, counts, by_id, strict)
+            if target is None:
+                continue
+            x, y = self._centre(target, by_id)
+            if self.options.convoy and math.hypot(sighting.unit.x - x, sighting.unit.y - y) > CONVOY_DISTANCE:
+                bound.setdefault(target.id, []).append(sighting)
+                targets[target.id] = target
+                self.waiting_since.setdefault(sighting.unit.id, now)
+                continue
+            place(sighting, target)
+        for squad_id, convoy in bound.items():
+            waited = max(now - self.waiting_since[s.unit.id] for s in convoy)
+            if len(convoy) >= CONVOY_SIZE or waited >= CONVOY_WAIT_MS:
+                for sighting in convoy:
+                    place(sighting, targets[squad_id])
         pool[:] = [s for s in pool if s.unit.id not in placed]
 
     def _best_squad(self, sighting: Sighting, counts: Dict[int, Dict[Role, int]],
@@ -317,13 +363,18 @@ class Organisation:
         """
         best: Optional[SquadRecord] = None
         best_key: Optional[Tuple[int, int, float, int]] = None
+        # When switched to raise vanguards, a unit a vanguard would take is not pushed over strength into another kind of squad while a slot is free for one: it waits loose until enough have gathered to form one, or the garrisons swallow every tank and nothing is ever left to attack with.
+        gathering = (self.options.vanguards and not strict and self.catalogue.accepts(Doctrine.VANGUARD, sighting.unit.type_index)
+                     and len(self.squads) + len(self.reserved) < SQUAD_CAP)
         for record in self.squads.values():
-            if not record.machine or not self.catalogue.accepts(record.doctrine, sighting.unit.type_index):
+            if not record.machine or not self.catalogue.accepts(record.doctrine, sighting.unit.type_index, record.domain):
                 continue
             spec = DOCTRINES[record.doctrine]
             held = counts[record.id]
             deficit = spec.establishment.get(sighting.role, 0) - held.get(sighting.role, 0)
             if strict and deficit <= 0:
+                continue
+            if gathering and deficit <= 0 and record.doctrine != Doctrine.VANGUARD:
                 continue
             total = sum(max(0, want - held.get(role, 0)) for role, want in spec.establishment.items())
             x, y = self._centre(record, by_id)
@@ -337,16 +388,22 @@ class Organisation:
         """Raises one squad if the pool holds a doctrine's minimum and there is a slot for it. Returns whether anything was formed, since the caller alternates this with reinforcement."""
         if len(self.squads) + len(self.reserved) >= SQUAD_CAP or not self.free_ids:
             return False
+        garrisons = sum(1 for record in self.squads.values() if record.doctrine == Doctrine.GARRISON)
         for doctrine in FORMATION_ORDER:
-            picked = _muster(doctrine, pool, self.catalogue)
-            if picked is None:
+            if (doctrine == Doctrine.GARRISON and self.options.vanguards
+                    and garrisons >= self.options.tuning.max_garrisons):
                 continue
+            mustered = _muster(doctrine, pool, self.catalogue)
+            if mustered is None:
+                continue
+            domain, picked = mustered
             squad_id = self.free_ids.pop(0)
             value = sum(s.value for s in picked)
             record = SquadRecord(
                 id=squad_id,
                 doctrine=doctrine,
                 members=[s.unit.id for s in picked],
+                domain=domain,
                 value=value,
                 # Stated here only so that the merge and disband rules mean something before the game has reported the squad back for the first time.
                 formed_value=value,
@@ -400,26 +457,30 @@ def _roles_in(record: SquadRecord, by_id: Dict[int, Sighting]) -> Dict[Role, int
     return found
 
 
-def _muster(doctrine: Doctrine, pool: List[Sighting], catalogue: Catalogue) -> Optional[List[Sighting]]:
-    """The units a squad of this doctrine would be raised from, or nothing if the pool cannot meet its minimum.
+def _muster(doctrine: Doctrine, pool: List[Sighting], catalogue: Catalogue) -> Optional[Tuple[Domain, List[Sighting]]]:
+    """The domain a squad of this doctrine would be raised in and the units it would be raised from, or nothing if the pool cannot meet its minimum in any one domain.
 
-    Only the minimum is taken. The rest of the establishment is filled by the ordinary reinforcement rule, which is the same rule that will keep filling it for the squad's whole life, so there is no second policy deciding what a new squad looks like.
+    Only the minimum is taken. The rest of the establishment is filled by the ordinary reinforcement rule, which is the same rule that will keep filling it for the squad's whole life, so there is no second policy deciding what a new squad looks like. A squad is raised in one domain so that every member can go wherever the others can; of the domains that can raise one, the one with the most candidates is taken.
 
     Which units are taken is decided by how close together they are, since a squad is a thing that moves as one: units are drawn from around whichever candidate sits nearest the middle of them all.
     """
     spec = DOCTRINES[doctrine]
-    candidates = [s for s in pool if catalogue.accepts(doctrine, s.unit.type_index)]
-    by_role: Dict[Role, List[Sighting]] = {}
-    for sighting in candidates:
-        by_role.setdefault(sighting.role, []).append(sighting)
-    if any(len(by_role.get(role, [])) < need for role, need in spec.minimum.items()):
-        return None
-
-    x = sum(s.unit.x for s in candidates) / len(candidates)
-    y = sum(s.unit.y for s in candidates) / len(candidates)
-    seed = min(candidates, key=lambda s: math.hypot(s.unit.x - x, s.unit.y - y))
-    picked: List[Sighting] = []
-    for role, need in spec.minimum.items():
-        near = sorted(by_role[role], key=lambda s: (math.hypot(s.unit.x - seed.unit.x, s.unit.y - seed.unit.y), s.unit.id))
-        picked.extend(near[:need])
-    return picked
+    by_domain: Dict[Domain, List[Sighting]] = {}
+    for sighting in pool:
+        if catalogue.accepts(doctrine, sighting.unit.type_index):
+            by_domain.setdefault(catalogue.domain(sighting.unit.type_index), []).append(sighting)
+    for domain, candidates in sorted(by_domain.items(), key=lambda item: (-len(item[1]), int(item[0]))):
+        by_role: Dict[Role, List[Sighting]] = {}
+        for sighting in candidates:
+            by_role.setdefault(sighting.role, []).append(sighting)
+        if any(len(by_role.get(role, [])) < need for role, need in spec.minimum.items()):
+            continue
+        x = sum(s.unit.x for s in candidates) / len(candidates)
+        y = sum(s.unit.y for s in candidates) / len(candidates)
+        seed = min(candidates, key=lambda s: math.hypot(s.unit.x - x, s.unit.y - y))
+        picked: List[Sighting] = []
+        for role, need in spec.minimum.items():
+            near = sorted(by_role[role], key=lambda s: (math.hypot(s.unit.x - seed.unit.x, s.unit.y - seed.unit.y), s.unit.id))
+            picked.extend(near[:need])
+        return domain, picked
+    return None

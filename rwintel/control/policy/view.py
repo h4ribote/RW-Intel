@@ -1,6 +1,6 @@
 """One period's board, sorted into the shapes the layers ask questions of.
 
-Every layer reads the same observation but wants a different cut of it, and each cut is cheap: a few hundred units filtered a few ways is nothing beside a period. Building it once in one place means the layers agree on what "ours" means — in particular that it excludes whatever another commander is holding, which is the difference between planning with the army and planning with the army we can actually move.
+Every layer reads the same observation but wants a different cut of it, and each cut is cheap: a few hundred units filtered a few ways is nothing beside a period. Building it once in one place means the layers agree on what "ours" means -in particular that it excludes whatever another commander is holding, which is the difference between planning with the army and planning with the army we can actually move.
 """
 
 from __future__ import annotations
@@ -33,13 +33,17 @@ class WorldView:
     catalogue: Catalogue
     ours: List[Sighting] = field(default_factory=list)
     enemies: List[Sighting] = field(default_factory=list)
+    #: The enemy's army: what of theirs is neither a building nor a builder, the same cut `fighters` makes of ours.
+    enemy_fighters: List[Sighting] = field(default_factory=list)
     buildings: List[Sighting] = field(default_factory=list)
     builders: List[Sighting] = field(default_factory=list)
     fighters: List[Sighting] = field(default_factory=list)
+    #: Ours that carry others and do not fight, which the lift layer holds rather than any squad.
+    transports: List[Sighting] = field(default_factory=list)
     #: Ours, able to fight or build, and in no squad. This is what the organisation layer forms and reinforces from.
     unassigned: List[Sighting] = field(default_factory=list)
     home: Optional[RegionState] = None
-    #: The region table, which is the last one that arrived rather than necessarily this frame's. Regions ride the operational frame and the tactical layer runs ten times as often, so a view built on a frame without one would report a board with no places on it — and a policy reading that would see every distance and every balance of force fall to nothing every period and come back two hundred milliseconds later. What is a period out of date about a region is its force totals, which move at the rate an army walks.
+    #: The region table, which is the last one that arrived rather than necessarily this frame's. Regions ride the operational frame and the tactical layer runs ten times as often, so a view built on a frame without one would report a board with no places on it -and a policy reading that would see every distance and every balance of force fall to nothing every period and come back two hundred milliseconds later. What is a period out of date about a region is its force totals, which move at the rate an army walks.
     regions: List[RegionState] = field(default_factory=list)
 
     def region(self, region_id: int) -> Optional[RegionState]:
@@ -59,6 +63,10 @@ class WorldView:
     def enemies_near(self, x: float, y: float, radius: float) -> List[Sighting]:
         return [e for e in self.enemies if math.hypot(e.unit.x - x, e.unit.y - y) <= radius]
 
+    def airborne(self, x: float, y: float, radius: float) -> float:
+        """The worth of the enemies around a point that fly."""
+        return sum(s.value for s in self.enemies_near(x, y, radius) if s.kind is not None and s.kind.movement == "AIR")
+
     def contact(self, x: float, y: float, radius: float) -> Dict[Role, float]:
         """What has been run into around a point, by role and by worth. This is the only way anything above the fighting learns what the enemy is fielding once the fog is on."""
         found: Dict[Role, float] = {}
@@ -71,7 +79,7 @@ def build(observation: Observation, catalogue: Catalogue, home_id: Optional[int]
           regions: Optional[List[RegionState]] = None, invert: bool = False) -> WorldView:
     """The board sorted for the layers, optionally from the other side's point of view.
 
-    Inverting is what lets one process drive both sides of a constructed engagement. It is a parameter here rather than a transformation of the observation because the obvious way to write it — copy every unit with its hostility flag flipped — is by a wide margin the most expensive thing that happens in a frame: it allocates a dataclass per unit twice a period, which measured at three to five times the cost of building the whole view. Reading the flag the other way round costs nothing and produces the same answer.
+    Inverting is what lets one process drive both sides of a constructed engagement. It is a parameter here rather than a transformation of the observation because the obvious way to write it -copy every unit with its hostility flag flipped -is by a wide margin the most expensive thing that happens in a frame: it allocates a dataclass per unit twice a period, which measured at three to five times the cost of building the whole view. Reading the flag the other way round costs nothing and produces the same answer.
     """
     rows = list(observation.regions) if observation.regions else list(regions or ())
     if invert:
@@ -84,10 +92,15 @@ def build(observation: Observation, catalogue: Catalogue, home_id: Optional[int]
         sighting = Sighting(unit=unit, kind=kind, role=catalogue.role(unit.type_index))
         if bool(unit.hostile) != invert:
             view.enemies.append(sighting)
+            if sighting.role not in (Role.STRUCTURE, Role.BUILDER, Role.TRANSPORT):
+                view.enemy_fighters.append(sighting)
             continue
         view.ours.append(sighting)
         if sighting.role == Role.STRUCTURE:
             view.buildings.append(sighting)
+            continue
+        if sighting.role == Role.TRANSPORT:
+            view.transports.append(sighting)
             continue
         if sighting.role == Role.BUILDER:
             view.builders.append(sighting)

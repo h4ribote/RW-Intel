@@ -1,12 +1,14 @@
 """The action frame.
 
-Four sections, each carrying the decisions of one layer, and each present only on the periods that layer runs on.
+Six sections: squad membership, contracts, tactical deviations, production, lifts and unit actions. Each carries the decisions of one layer and is present only on the periods that layer runs on.
 
 Squad membership travels with the actions rather than being decided in the game process. Squads are first class entities with a lifetime of their own, and the layer that manages that lifetime is a policy; the game side only needs to know which units belong to which squad so it can address them and describe them back.
 
 A contract and a deviation are separate sections because they are decided on different clocks. The contract is what the operational layer commits to and is meant to stand until its deadline; the deviation is how the tactical layer carries it out right now, and it is re-decided an order of magnitude more often. Folding the deviation back into the contract row, as the first version did, meant the tactical layer could only speak by restating the whole contract, which loses the distinction between "the plan changed" and "the plan is being executed differently this second".
 
-Both of those rows carry an override bit, which says the decision came from whoever holds the squad rather than from the command chain. The game side refuses a chain decision about a squad someone else has taken over — that is the whole of the ownership rule — and without a way to say "this is that someone" the taking over would silence the squad instead of transferring it. One byte separates the two cases, and it is the only thing on the wire that distinguishes a human at the intervention interface, or the script intruder that trains against it, from the layer whose job the decision ordinarily is.
+Both of those rows carry an override bit, which says the decision came from whoever holds the squad rather than from the command chain. The game side refuses a chain decision about a squad someone else has taken over -that is the whole of the ownership rule -and without a way to say "this is that someone" the taking over would silence the squad instead of transferring it. One byte separates the two cases, and it is the only thing on the wire that distinguishes a human at the intervention interface, or the script intruder that trains against it, from the layer whose job the decision ordinarily is.
+
+A lift names transports, a cargo and where to set it down; the game side carries it out step by step (`agent/Lift.java`) and reports its phase in the observation's lift block. A unit action issues one of a unit's own actions by its action id, such as a transport's unload.
 """
 
 from __future__ import annotations
@@ -21,18 +23,41 @@ _SQUAD_HEADER = struct.Struct("<HBBH2x")
 #: A squad's owner as it travels: nought is the player this process is, and any other value is that player's slot plus one. Ordinary play only ever sends nought; a constructed engagement drives both sides from one process and needs to say which.
 NO_OWNER = 0
 _UNIT_ID = struct.Struct("<I")
-_CONTRACT = struct.Struct("<HBBBB2xfII")
+_CONTRACT = struct.Struct("<HBBBB2xIfII")
 _DEVIATION = struct.Struct("<HBB")
 _PRODUCTION = struct.Struct("<IHBBff")
+_LIFT = struct.Struct("<HBBBBHffffI")
+_UNIT_ACTION = struct.Struct("<IBB")
+
+#: Bits of a lift row's flags.
+LIFT_OVERRIDE = 1
+LIFT_CANCEL = 2
 
 
 class Task(enum.IntEnum):
+    """What a contract asks of a squad. Each is carried out differently on the game side: an attack advances on the target, an encirclement comes at it from both sides, a defence goes and stands on it, a raid goes for the enemy's extractors and builders there, a withdrawal moves away under the contract's stance, and an escort guards the squad or unit it is given."""
+
     ATTACK = 0
     DEFEND = 1
     RAID = 2
     WITHDRAW = 3
     ESCORT = 4
     ENCIRCLE = 5
+
+
+class TargetKind(enum.IntEnum):
+    """What a contract's target names: a region slot, a squad id, or a unit id."""
+
+    REGION = 0
+    SQUAD = 1
+    UNIT = 2
+
+
+class CargoKind(enum.IntEnum):
+    """What a lift carries: one squad, by id, or a list of units by id."""
+
+    SQUAD = 0
+    UNITS = 1
 
 
 class Stance(enum.IntEnum):
@@ -70,6 +95,12 @@ class Status(enum.IntEnum):
     LOSING = 2
     COMPLETE = 3
     EXPIRED = 4
+    #: No member could reach the target under its own power, so no order went out.
+    UNREACHABLE = 5
+    #: The squad is the cargo of a lift whose transports are on their way to it.
+    AWAITING_LIFT = 6
+    #: The squad is being loaded, carried or set down.
+    LIFTING = 7
 
 
 class Commander(enum.IntFlag):
@@ -85,6 +116,8 @@ class ProductionKind(enum.IntEnum):
     UNIT = 0
     #: A builder placing a building, which needs a position.
     BUILDING = 1
+    #: A building raised to its next tier. The type is not read: a building offers at most one tier raise at a time, and the game side issues whichever one it offers.
+    UPGRADE = 2
 
 
 @dataclass
@@ -102,7 +135,9 @@ class Contract:
     squad: int
     task: Task = Task.DEFEND
     stance: Stance = Stance.AGGRESSIVE
-    target_region: int = 0
+    #: A region slot, a squad id or a unit id, as `target_kind` says.
+    target: int = 0
+    target_kind: TargetKind = TargetKind.REGION
     #: Credits, as a float, matching the squad block that reports it back.
     cost_budget: float = 0.0
     deadline_ms: int = 0
@@ -131,6 +166,39 @@ class Production:
 
 
 @dataclass
+class Lift:
+    """Transports taking a cargo to a point on land. A row naming a lift already under way with the same transports, cargo and drop restates it and changes only its deadline; a different one under the same id replaces it."""
+
+    lift: int
+    transports: List[int] = field(default_factory=list)
+    cargo_kind: CargoKind = CargoKind.SQUAD
+    #: The squad id alone for a squad, the unit ids for a list of units.
+    cargo: List[int] = field(default_factory=list)
+    #: Where the passengers gather to be picked up.
+    pickup_x: float = 0.0
+    pickup_y: float = 0.0
+    drop_region: int = 0
+    #: A point on land the transports can stop on: over water they hold their passengers.
+    drop_x: float = 0.0
+    drop_y: float = 0.0
+    deadline_ms: int = 0
+    #: True when this comes from whoever holds the cargo squad rather than from the command chain.
+    override: bool = False
+    #: Ends the lift: anything aboard is set down the next time its transport stops on land.
+    cancel: bool = False
+
+
+@dataclass
+class UnitAction:
+    """One of a unit's own actions by its action id, such as a transport's "109" (unload) and "110" (cancel the unload)."""
+
+    unit: int
+    action_id: str
+    #: Added after the unit's queued orders instead of replacing them.
+    append: bool = False
+
+
+@dataclass
 class Action:
     """One period's decisions. Empty sections are legal and mean "nothing changed"."""
 
@@ -138,6 +206,11 @@ class Action:
     contracts: List[Contract] = field(default_factory=list)
     deviations: List[SquadDeviation] = field(default_factory=list)
     production: List[Production] = field(default_factory=list)
+    lifts: List[Lift] = field(default_factory=list)
+    unit_actions: List[UnitAction] = field(default_factory=list)
+
+    def empty(self) -> bool:
+        return not (self.squads or self.contracts or self.deviations or self.production or self.lifts or self.unit_actions)
 
 
 #: The largest game time the wire's unsigned thirty-two bits can carry, which is about fifty days of match.
@@ -147,7 +220,7 @@ _LATEST = 0xFFFFFFFF
 def _clock(value) -> int:
     """A game time, brought into the range the wire can carry.
 
-    A deadline is a number a person may type, and a person may type a large one. Left unbounded it reaches the encoder, which raises, and the exception unwinds through the policy and the session and takes the whole link down — an instance lost for the rest of a run because somebody asked for a mission to be finished in a thousand years. Clamping turns an absurd deadline into a distant one, which is what was meant.
+    A deadline is a number a person may type, and a person may type a large one. Left unbounded it reaches the encoder, which raises, and the exception unwinds through the policy and the session and takes the whole link down -an instance lost for the rest of a run because somebody asked for a mission to be finished in a thousand years. Clamping turns an absurd deadline into a distant one, which is what was meant.
     """
     return min(_LATEST, max(0, int(value)))
 
@@ -166,8 +239,8 @@ def encode_action(action: Action) -> bytes:
     parts.append(_SECTION.pack(len(action.contracts)))
     for contract in action.contracts:
         parts.append(_CONTRACT.pack(
-            contract.squad, int(contract.task), int(contract.stance), contract.target_region,
-            1 if contract.override else 0,
+            contract.squad, int(contract.task), int(contract.stance), int(contract.target_kind),
+            1 if contract.override else 0, int(contract.target),
             float(contract.cost_budget), _clock(contract.deadline_ms), _clock(contract.issued_at_ms),
         ))
 
@@ -182,6 +255,22 @@ def encode_action(action: Action) -> bytes:
             item.producer, item.type_index, int(item.kind), 1 if item.cancel else 0,
             item.x, item.y,
         ))
+
+    parts.append(_SECTION.pack(len(action.lifts)))
+    for lift in action.lifts:
+        cargo = lift.cargo[:1] if lift.cargo_kind == CargoKind.SQUAD else lift.cargo
+        flags = (LIFT_OVERRIDE if lift.override else 0) | (LIFT_CANCEL if lift.cancel else 0)
+        parts.append(_LIFT.pack(
+            lift.lift, int(lift.cargo_kind), flags, lift.drop_region, len(lift.transports), len(cargo),
+            lift.pickup_x, lift.pickup_y, lift.drop_x, lift.drop_y, _clock(lift.deadline_ms),
+        ))
+        for unit in list(lift.transports) + list(cargo):
+            parts.append(_UNIT_ID.pack(unit))
+
+    parts.append(_SECTION.pack(len(action.unit_actions)))
+    for item in action.unit_actions:
+        name = item.action_id.encode("ascii")
+        parts.append(_UNIT_ACTION.pack(item.unit, 1 if item.append else 0, len(name)) + name)
 
     return b"".join(parts)
 
@@ -212,8 +301,8 @@ def decode_action(body: bytes) -> Action:
         offset += _CONTRACT.size
         action.contracts.append(Contract(
             squad=values[0], task=Task(values[1]), stance=Stance(values[2]),
-            target_region=values[3], override=bool(values[4]), cost_budget=values[5],
-            deadline_ms=values[6], issued_at_ms=values[7],
+            target_kind=TargetKind(values[3]), override=bool(values[4]), target=values[5],
+            cost_budget=values[6], deadline_ms=values[7], issued_at_ms=values[8],
         ))
 
     count, = _SECTION.unpack_from(body, offset)
@@ -234,6 +323,29 @@ def decode_action(body: bytes) -> Action:
             cancel=bool(values[3]), x=values[4], y=values[5],
         ))
 
+    count, = _SECTION.unpack_from(body, offset)
+    offset += _SECTION.size
+    for _ in range(count):
+        (lift_id, cargo_kind, flags, drop_region, transports, cargo, pickup_x, pickup_y,
+         drop_x, drop_y, deadline) = _LIFT.unpack_from(body, offset)
+        offset += _LIFT.size
+        ids = list(struct.unpack_from(f"<{transports + cargo}I", body, offset))
+        offset += 4 * (transports + cargo)
+        action.lifts.append(Lift(
+            lift=lift_id, transports=ids[:transports], cargo_kind=CargoKind(cargo_kind), cargo=ids[transports:],
+            pickup_x=pickup_x, pickup_y=pickup_y, drop_region=drop_region, drop_x=drop_x, drop_y=drop_y,
+            deadline_ms=deadline, override=bool(flags & LIFT_OVERRIDE), cancel=bool(flags & LIFT_CANCEL),
+        ))
+
+    count, = _SECTION.unpack_from(body, offset)
+    offset += _SECTION.size
+    for _ in range(count):
+        unit, append, length = _UNIT_ACTION.unpack_from(body, offset)
+        offset += _UNIT_ACTION.size
+        name = body[offset:offset + length].decode("ascii")
+        offset += length
+        action.unit_actions.append(UnitAction(unit=unit, action_id=name, append=bool(append)))
+
     return action
 
 
@@ -242,4 +354,6 @@ _SIZES: Dict[str, int] = {
     "contract": _CONTRACT.size,
     "deviation": _DEVIATION.size,
     "production": _PRODUCTION.size,
+    "lift": _LIFT.size,
+    "unit_action": _UNIT_ACTION.size,
 }

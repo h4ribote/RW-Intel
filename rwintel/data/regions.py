@@ -16,7 +16,7 @@ from typing import List, Optional, Sequence, Tuple
 
 from .maps import MapContent
 
-#: Merge distance in world units. Chosen against the reach of the units that would contest a region: a tier 1 tank shoots 130 and sees 640, so 400 is comfortably inside what one squad covers and comfortably outside a single extractor's footprint.
+#: Merge distance in world units. Chosen against the reach of the units that would contest a region: a tier 1 tank shoots 130 and sees 300, so 400 is comfortably inside what one squad covers and comfortably outside a single extractor's footprint.
 DEFAULT_MERGE_DISTANCE = 400.0
 
 

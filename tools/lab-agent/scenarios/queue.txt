@@ -1,0 +1,27 @@
+# Beach landing, our side the east island. Pickups queued on one transport, an unload issued after a move, and how far from the water a builder ship builds.
+# Expect: hc1 picks up t1, t2 and t3 in turn; hc1 and hc2 unload where their moves end; bs1 (272 from the water) and bs2 (283) lose their build orders; bs3 (134, on an islet) builds.
+@0 bind hc1 hovercraft 3250 1770
+@0 spawn t1 tank 3300 1700
+@0 spawn t2 tank 3420 1650
+@0 spawn t3 tank 3500 1700
+@0 spawn hc2 hovercraft 3280 1700
+@0 spawn u1 tank 3320 1600
+@0 spawn bs1 builderShip 3100 2600
+@0 spawn bs2 builderShip 3150 1800
+@0 spawn bs3 builderShip 3250 1850
+@1 track hc1 t1 t2 t3 hc2 u1 bs1 bs2 bs3
+@2 loadUpQ hc1 t1
+@2.1 loadUpQ hc1 t2
+@2.2 loadUpQ hc1 t3
+@2 loadUp hc2 u1
+@2 build bs1 extractorT1 1550 2650
+@2 build bs2 extractorT1 2270 490
+@2 build bs3 extractorT1 3530 2710
+@12 moveQ hc2 2800 1650
+@12.1 actionQ hc2 unload
+@25 moveQ hc1 2800 1500
+@25.1 actionQ hc1 unload
+@100 near 1550 2650 150
+@100 near 2270 490 150
+@100 near 3530 2710 150
+@101 end

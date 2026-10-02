@@ -1,0 +1,6 @@
+# Python dependencies of rwintel. Everything outside rwintel.learn uses the standard library only.
+# The Linux wheels of torch on PyPI include CUDA; runs that only read datasets use a graphics card when there is one, and runs that play games serve set networks there and flat ones on the processor unless --device says otherwise.
+torch>=2.4
+# torch warns on import without it.
+numpy
+pytest

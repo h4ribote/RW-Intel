@@ -1,0 +1,18 @@
+# Beach landing, our side the east island. Lifts carried out by the agent's own Lift state machine: a squad of tanks and a builder taken to the main island.
+# Expect: squad 0's attack on region 1 is UNREACHABLE; lift 1 goes APPROACH, LOADING, CARRYING, UNLOADING and ends DONE with loaded=3/3, after which squad 0 is ACTIVE on region 1 and its tanks hold an attack move; lift 2 ends DONE with b1 on the main island, and b1 then builds the extractor at (2370,1830).
+@0 bind hc1 hovercraft 3250 1770
+@0 bind b1 builder 3350 1630
+@0 spawn t1 tank 3300 1700
+@0 spawn t2 tank 3320 1650
+@0 spawn t3 tank 3300 1600
+@0 spawn hc3 hovercraft 3280 1700
+@1 track hc1 hc3 t1 t2 t3 b1
+@1 regions 3430 1570 2400 1800
+@2 squad 0 t1 t2 t3
+@2.2 contract 0 attack region 1
+@4 lift 1 squad 0 via hc1 pickup 3300 1680 drop 1 2800 1500 deadline 90
+@4 lift 2 units b1 via hc3 pickup 3350 1650 drop 1 2700 1600 deadline 90
+@70 status
+@70 build b1 extractorT1 2370 1830
+@110 near 2370 1830 120
+@111 end

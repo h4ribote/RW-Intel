@@ -2,20 +2,20 @@
 
 プロセス内から読み取れるゲーム状態を記録する。クラス名とフィールド名は難読化されているため、確認の度合いを明示する。
 
-- **実行時確認** — 実際に値を読み出し、妥当であることを確認した
-- **逆アセンブル確認** — バイトコードから意味が確定した
-- **推定** — 用法からの推論であり未確定
+- **実行時確認**: 実際に値を読み出し、妥当であることを確認した
+- **逆アセンブル確認**: バイトコードから意味が確定した
+- **推定**: 用法からの推論であり未確定
 
 ## 難読化されていない辞書がゲーム内に存在する
 
-解析の決め手になった発見である。`com.corrodinggames.rts.game.units.custom.logicBooleans.LogicBooleanGameFunctions$*` の 215 クラスは **メンバ名が難読化されていない**。これらは mod 作者向けの条件式機能を提供するもので、`getName()` が `"maxHp"` `"Hp"` `"Shield"` `"Ammo"` といった意味のある名前を文字列として返し、`getValue()` が対応する難読化フィールドを直接読む。つまり **「意味のある名前 → 難読化フィールド」の対応表がゲーム自身に埋め込まれている**。
+解析の決め手になった発見である。`com.corrodinggames.rts.game.units.custom.logicBooleans.LogicBooleanGameFunctions$*` の 215 クラスは **メンバ名が難読化されていない**。これらは mod 作者向けの条件式機能を提供するもので、`getName()` が `"maxHp"` `"Hp"` `"Shield"` `"Ammo"` といった意味のある名前を文字列として返し、`getValue()` が対応する難読化フィールドを直接読む。つまり **「意味のある名前から難読化フィールドへ」の対応表がゲーム自身に埋め込まれている**。
 
 同様に難読化されていない情報源が他にもある。
 
-- `com.corrodinggames.librocket.scripts.Root` — メニュー用スクリプト API。メソッド名が平文で、エンジンの状態フラグの意味を特定できる
-- `com.corrodinggames.rts.game.units.custom.ag` — ユニット定義ファイルのパーサ。`.ini` のキー文字列と代入先フィールドが対になっている
-- `com.corrodinggames.rts.gameFramework.SettingsEngine` — フィールド名が全て平文
-- 各 enum の静的初期化子 — 定数名が文字列として残っている
+- `com.corrodinggames.librocket.scripts.Root`: メニュー用スクリプト API。メソッド名が平文で、エンジンの状態フラグの意味を特定できる
+- `com.corrodinggames.rts.game.units.custom.ag`: ユニット定義ファイルのパーサ。`.ini` のキー文字列と代入先フィールドが対になっている
+- `com.corrodinggames.rts.gameFramework.SettingsEngine`: フィールド名が全て平文
+- 各 enum の静的初期化子: 定数名が文字列として残っている
 
 以降の対応表は、主にこれらを根拠としている。
 
@@ -70,10 +70,12 @@ flowchart TD
 | 項目 | フィールド/メソッド | 型 | 確認 |
 | --- | --- | --- | --- |
 | 建造進捗(0 から 1) | `am.cm` | `float` | 逆アセンブル確認 |
-| 完成しているか | `am.cm >= 1.0f` | — | 逆アセンブル確認 |
+| 完成しているか | `am.cm >= 1.0f` | - | 逆アセンブル確認 |
 | 撃破数 | `am.cU` | `int` | 逆アセンブル確認 |
 | 生成時刻(ミリ秒) | `am.bz` | `int` | 逆アセンブル確認 |
 | 価格(クレジット) | `am.cL()` | `int` | 逆アセンブル確認 |
+| 段階 | `am.V()` | `int` | 逆アセンブル確認。基底は 1、陸上工場と採掘施設が強化に応じて上書きする |
+| いま出しているアクション | `am.N()` | `ArrayList` of `a.s` | 逆アセンブル確認。段階ごとに中身が変わる([04-actions.md](04-actions.md) の段階の強化) |
 
 ### 目標と命令キュー
 
@@ -195,7 +197,7 @@ flowchart TD
 
 **資源地点はゲームオブジェクトではなく、マップタイルの属性である。** マップ読み込みの `com.corrodinggames.rts.game.b.g` がタイル属性 `res_pool` を読み、タイルオブジェクト `game.b.g` の `boolean` フィールド `i` を立てる。**逆アセンブル確認**である。`res_pool` の文字列は jar 全体でこの 1 クラスにしか現れず、属性の読み出しに続くバイトコードは `putfield ... Field i:Z` である。
 
-**実行時確認**でも裏が取れている。資源地点が 9 個ある組み込みマップ Lake (2p) で、全ゲームオブジェクトのコレクション `w.dK()` が保持していたのはちょうど 24 個、内訳は樹木 `game.units.al` が 20 個と司令部 2 個と建設機 2 個であり、`crystalResource` 種別のオブジェクトは一つもなかった。
+**実行時確認**でもある。試合開始直後の全ゲームオブジェクトのコレクション `w.dK()` には樹木 `game.units.al` と各陣営の司令部と建設機しかなく、`crystalResource` 種別のオブジェクトは資源地点がいくつあるマップでも一つも無い。
 
 したがって**資源地点の位置は実行中のプロセスからは取れず、マップファイルから読むしかない**。制御プロセスが TMX から読んだ位置をゲーム側へ渡し、ゲーム側はその位置と自軍・敵軍の採掘施設を突き合わせて占有を数える。マップ側の表現は [06-content.md](06-content.md)、受け渡しの経路は [../project/05-interface.md](../project/05-interface.md) に記す。
 
@@ -213,24 +215,14 @@ for (int i = 0; i < count; i++) { ... }
 
 **プレイヤー別のインデックスは存在しない。** エンジン自身も全件走査して `bX` で絞り込んでいる。集計値だけで足りる場合は `n.T` を読めばよい。
 
-投射体やエフェクトを含む全ゲームオブジェクトは `gameFramework.w.dK()` から取れる。ID からの逆引きは `w.a(long, boolean)` である。
+投射体やエフェクトを含む全ゲームオブジェクトは `gameFramework.w.dK()` から取れる。`dK()` は保留中の追加と削除をコレクションへ反映する書き込みなので、ゲームスレッドでだけ呼ぶ([01-internals.md](01-internals.md))。ID からの逆引きは `w.a(long, boolean)` である。
 
-## 検証済みの実測例
+## 対応を実データで確かめる
 
-計測エージェントの `dump` 機能で実際に読み出した値である。上記の対応が実データと一致することを確認した。
+計測エージェントに `dump=<件数>` を渡すと、盤面にオブジェクトが揃った時点で、種類の異なるゲームオブジェクトと全プレイヤーの全フィールドを、宣言しているクラスごとに実値付きで一度だけ出力する。上の表の実行時確認はこの出力と照らしたものである。
 
-```
-object[0] = com.corrodinggames.rts.game.units.al
-  [am] bX:n=d@48c70c5e   cu:float=100.0  cv:float=100.0  dz:as=ar$20@2542b0a8
-  [w]  eh:long=1  eo:float=2130.0  ep:float=470.0
-player[0] = com.corrodinggames.rts.game.d
-  [n]  k:int=-1  o:double=4000.0  r:int=-2
+```bash
+python -m rwintel.runtime probe --count 1 --speed 5 --seconds 60 --agent-options dump=3
 ```
 
-再現するには次を実行する。
-
-```powershell
-.\tools\Start-RwProbe.ps1 -Count 1 -Speed 5 -Seconds 60
-```
-
-エージェントに `dump=<件数>` を渡すと、種類の異なるゲームオブジェクトと全プレイヤーの全フィールドを一度だけ出力する。
+出力は `local/logs/probe/latest/00.out` の `---- dump begin ----` から `---- dump end ----` までにある。

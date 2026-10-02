@@ -1,171 +1,355 @@
 """What one episode was worth, as a single number from -1 to +1.
 
-A win or a loss would be the natural thing to score on, and it is unusable: built-in AI against built-in AI produced no decision at all across the measured episodes, so a win rate has no observations to be estimated from. The score here is therefore a continuous reading of the board at the cut-off, and a decision, when one does happen, saturates it rather than being blended into it — a match that was actually won is not more or less won depending on how much armour was left standing.
+A decided match scores what it came to: +1 won, -1 lost. A match cut off by the clock is scored on its board as a prediction of that, so that the two kinds of episode are on one scale. With fitted weights the prediction is the expected outcome under a logistic model, 2 P(win) - 1, whose weights are fitted on boards taken some time before decided matches ended; until such weights are adopted it is the military value edge alone.
 
-Every component is a ratio of the form (ours - theirs) / (ours + theirs), which is what keeps a score comparable across maps and match lengths: a long match on a large map produces larger absolute figures on both sides and the same ratio. "Theirs" is the strongest opponent in that quantity, taken per quantity rather than by nominating one opponent overall, so that a free-for-all is scored as being ahead of all of them rather than ahead of an average that a weak third party would flatter.
+Every component is a ratio from -1 to +1, which is what keeps a score comparable across maps and match lengths. Where a component compares us with the others, "theirs" is the strongest opponent in that quantity, taken per quantity rather than by nominating one opponent overall, so that a free-for-all is scored as being ahead of all of them rather than ahead of an average that a weak third party would flatter.
 
-The weights are deliberately not settled here. The design fixes how they are to be decided — fitted so that the score's sign agrees with the winner on episodes that were decided — and there are no decided episodes yet, so the opening choice is the military term alone. `fit_weights` implements the fitting for the day the episodes exist; today it returns None on every set it is handed, which is the honest answer rather than a fabricated fit.
-
-Nothing here imports the control package. The score is a function of what an episode ended up looking like, not of how it was run, and keeping the dependency out means a recorded episode can be rescored from a log by anything that can produce the same shape of standing.
+Nothing here imports the control package. The score is a function of what an episode looked like, not of how it was run, so a recorded episode can be rescored from its journal by anything that can produce the same shape of record.
 """
 
 from __future__ import annotations
 
-import itertools
+import functools
+import json
+import math
+import os
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 
 class Episode(Protocol):
-    """What scoring needs an episode to know. `EpisodeRecord` satisfies it structurally, and so does anything reconstructed from a log."""
+    """What scoring needs an episode to know. `EpisodeRecord` satisfies it structurally, and so does anything reconstructed from a journal."""
 
     #: The team that won, or negative when the match was cut off with nobody beaten.
     winner: int
     #: The team the observations were taken from, or negative when this side only watched.
     team: int
     timeout: bool
-    #: One entry per team, carrying at least `team`, `value`, `income`, `killed` and `lost`.
+    #: Game seconds the episode lasted.
+    seconds: int
+    #: One entry per team, carrying `team`, `units`, `value`, `income`, `killed`, `lost` and, from the game builds that send it, `credits`.
     standing: Sequence[Mapping[str, Any]]
+    #: Standings taken while the episode ran, each as `second` and `standing`, in the order they were taken. Empty for episodes recorded before they were kept.
+    history: Sequence[Mapping[str, Any]]
+
+
+#: A blend clamped to the score range.
+LINEAR = "linear"
+#: The expected outcome of a logistic model, tanh(blend / 2), which is 2 P(win) - 1.
+LOGISTIC = "logistic"
+
+#: The components in the order a weight vector lists them.
+COMPONENTS = ("military", "economy", "exchange", "treasury")
 
 
 @dataclass(frozen=True)
 class Weights:
-    """How much of each component the score is made of. Non-negative and summing to one, so that the blended score stays inside the range each component already lives in."""
+    """How the board of a cut-off match is turned into a score: a coefficient per component and the link that maps their blend onto the score range."""
 
     military: float
-    economy: float
-    record: float
+    economy: float = 0.0
+    exchange: float = 0.0
+    treasury: float = 0.0
+    link: str = LINEAR
+    #: How long before the end of a decided match the boards these weights were fitted on were taken, or 0 for weights that were chosen rather than fitted.
+    lead_seconds: float = 0.0
+
+    def vector(self) -> Tuple[float, ...]:
+        return tuple(getattr(self, name) for name in COMPONENTS)
+
+    def describe(self) -> str:
+        coefficients = " ".join(f"{name} {value:+.3f}" for name, value in zip(COMPONENTS, self.vector()))
+        fitted = f", fitted {self.lead_seconds:.0f}s before the end" if self.lead_seconds else ""
+        return f"{self.link}: {coefficients}{fitted}"
 
 
-#: The opening choice, and only that. The design says the weights are to be fitted against episodes that were decided, and no episode has yet been decided — built-in AI against built-in AI times out even with five difficulty steps between the two sides. Until a population of script policies produces decisions to fit against, the score is the military value edge alone, which is the one component that is measured every episode and whose scatter is known.
-OPENING_WEIGHTS = Weights(military=1.0, economy=0.0, record=0.0)
+#: The score before any weights are fitted: the military value edge alone, which is measured every episode.
+OPENING_WEIGHTS = Weights(military=1.0)
 
-#: Resolution of the search `fit_weights` runs. Coarse on purpose: the fit is judged on how many decided episodes get the right sign out of a few hundred at most, and a grid finer than this splits candidates that the data cannot tell apart.
-WEIGHT_GRID_STEP = 0.05
+#: The adopted weights, which are the default whenever the file is present.
+WEIGHTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights.json")
 
-#: What a decided episode scores, whatever the board looked like. The score is meant to predict the winner, so an observed winner overrides the prediction outright.
+#: What a decided episode scores, whatever the board looked like.
 DECIDED_SCORE = 1.0
 
-#: The range a score is defined on. The components are ratios that normally sit inside it, but a blend of several, or a ratio whose denominator nearly cancelled, can leave it.
+#: The range a score is defined on.
 SCORE_RANGE = (-1.0, 1.0)
+
+#: How long before the end of a decided match the board a fit is taken on lies. A decided match is over some time before the last defeat is registered, and the board a score is used on is one where both sides are still standing.
+DEFAULT_LEAD_SECONDS = 60.0
+
+#: Strength of the penalty on the squared coefficients of a fit. It keeps a set of boards that separates the outcomes perfectly from sending the coefficients to infinity, and leaves a component that never varies at nought.
+RIDGE = 1.0
+
+#: Folds of the cross-validation a fit reports its held-out agreement from.
+FOLDS = 5
+
+#: The fields that say a team took part in the match. Credits are not among them, because the game hands starting credits to the slots nobody plays from as well.
+PRESENCE = ("units", "value", "income", "killed", "lost")
 
 
 @dataclass(frozen=True)
 class Components:
-    """The three readings the score is blended from, each already a ratio from -1 to +1 in the ordinary case."""
+    """The readings a score is blended from, each a ratio from -1 to +1."""
 
-    #: Value of completed units still standing, ours against the strongest opponent's.
+    #: Value of completed units and buildings still standing, ours against the strongest opponent's.
     military: float
     #: Income, ours against the strongest opponent's.
     economy: float
-    #: Kills less losses, ours against the strongest opponent's. In a two-sided match our kills are their losses exactly, so this term's denominator cancels to zero and the term reads 0.0; it only carries information with a third party in the match, or once losses are valued rather than counted.
-    record: float
+    #: Our own exchange: kills less losses over kills and losses, counting units and buildings alike, and nought before anything has been destroyed.
+    exchange: float
+    #: Credits held unspent, ours against the strongest opponent's. Nought on records from before the game sent credits.
+    treasury: float
+
+    def vector(self) -> Tuple[float, ...]:
+        return tuple(getattr(self, name) for name in COMPONENTS)
 
     def weighted(self, weights: Weights) -> float:
-        """The blend before clamping. Exposed because the fit compares candidate weights by how far on the right side of zero they put an episode, which is a quantity the clamp would flatten."""
-        return weights.military * self.military + weights.economy * self.economy + weights.record * self.record
+        """The blend before the link is applied."""
+        return sum(w * x for w, x in zip(weights.vector(), self.vector()))
+
+
+def contestants(standing: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
+    """The entries for teams that took part in the match.
+
+    The game lists every non-spectator team, including those of slots nobody plays from, and those read nought on everything that says a side was present from the first frame to the last; credits are not among those, since records written before the game stopped counting an absent player's credits carry the starting credits there. A side that took part has at least lost something by the time it has nothing left, so it never reads that way once it has been on the board.
+    """
+    return [entry for entry in standing
+            if int(entry.get("team", -1)) >= 0 and any(float(entry.get(key, 0) or 0) for key in PRESENCE)]
 
 
 def viewpoint(standing: Sequence[Mapping[str, Any]], team: int) -> int:
-    """Which team the score is taken from the perspective of.
-
-    Normally that is the team the observations came from. When this side only watched, there is no "ours" in the standing at all, and the sensible reading is the first contestant against the rest — the same choice `EpisodeRecord.value_edge` makes, so that a watched episode and a played one are scored on the same convention. Returns -1 when fewer than two teams were playing, which is not a scorable episode.
-    """
-    playing = _playing(standing)
+    """Which team the score is taken from the perspective of: the team the observations came from, or, when this side only watched, the first contestant. Returns -1 for a watched episode with fewer than two contestants, which is not a scorable one."""
+    if team >= 0:
+        return team
+    playing = contestants(standing)
     if len(playing) < 2:
         return -1
-    ours = _ours(playing, team)
-    return int(ours.get("team", -1))
+    return int(playing[0].get("team", -1))
 
 
 def components(standing: Sequence[Mapping[str, Any]], team: int) -> Components:
-    """The three ratios, read off the standing the episode ended with.
+    """The four ratios, read off one standing from the side of `team`.
 
-    A missing or zero-summing denominator gives 0.0 for that component rather than an error: a side that has been reduced to nothing scores through the military term, and a match where neither side has any income yet genuinely has no economic edge to report.
+    A zero-summing denominator gives 0.0 for that component: a side that has been reduced to nothing scores through the other terms, and a match where nobody has any income yet has no economic edge to report. Fewer than two contestants is no comparison at all and reads 0.0 throughout.
     """
-    playing = _playing(standing)
+    playing = contestants(standing)
     if len(playing) < 2:
-        return Components(0.0, 0.0, 0.0)
-    ours = _ours(playing, team)
+        return Components(0.0, 0.0, 0.0, 0.0)
+    if team >= 0:
+        ours = next((entry for entry in playing if int(entry.get("team", -1)) == team), {"team": team})
+    else:
+        ours = playing[0]
     rest = [entry for entry in playing if entry is not ours]
+    if not rest:
+        return Components(0.0, 0.0, 0.0, 0.0)
     return Components(
-        military=_edge(_value(ours), max(_value(e) for e in rest)),
-        economy=_edge(_income(ours), max(_income(e) for e in rest)),
-        record=_edge(_record(ours), max(_record(e) for e in rest)),
+        military=_edge(_field(ours, "value"), max(_field(e, "value") for e in rest)),
+        economy=_edge(_field(ours, "income"), max(_field(e, "income") for e in rest)),
+        exchange=_edge(_field(ours, "killed"), _field(ours, "lost")),
+        treasury=_edge(_field(ours, "credits"), max(_field(e, "credits") for e in rest)),
     )
 
 
 def decided(episode: Episode) -> bool:
-    """Whether the match ended with somebody beaten rather than with the clock. `timeout` and a winner are meant to be exclusive, and a winner is the stronger statement, so it is the one that decides."""
+    """Whether the match ended with somebody beaten rather than with the clock."""
     return episode.winner >= 0
 
 
-def score(episode: Episode, weights: Weights = OPENING_WEIGHTS) -> float:
-    """The episode's worth from our side, from -1 to +1.
+def outcome(episode: Episode) -> float:
+    """+1 when the side the score is taken from won a decided match, -1 when it lost."""
+    return DECIDED_SCORE if episode.winner == viewpoint(episode.standing, episode.team) else -DECIDED_SCORE
 
-    A decision saturates it: +1 if the winner is the side the score is taken from, -1 otherwise. Only a cut-off match is scored on the board, and then the blend is clamped, because the components are ratios that a nearly cancelling denominator can throw outside the range.
-    """
-    if decided(episode):
-        return DECIDED_SCORE if episode.winner == viewpoint(episode.standing, episode.team) else -DECIDED_SCORE
+
+def board_score(parts: Components, weights: Weights) -> float:
+    """What a board is worth under `weights`, from -1 to +1."""
+    blended = parts.weighted(weights)
+    if weights.link == LOGISTIC:
+        return math.tanh(blended / 2.0)
     low, high = SCORE_RANGE
-    return min(high, max(low, components(episode.standing, episode.team).weighted(weights)))
+    return min(high, max(low, blended))
 
 
-def fit_weights(records: Iterable[Episode]) -> Optional[Weights]:
-    """Weights fitted so that the board score predicts the winner, or None when there is nothing to fit against.
-
-    None is what this returns today, and will keep returning until a match is actually won by somebody: every episode measured so far timed out. That is the whole reason the opening weights are a choice rather than a result, and returning None rather than a plausible-looking triple is what keeps that visible.
-
-    The fit is a search over a coarse grid of non-negative weights summing to one. A candidate is judged on how many decided episodes it puts on the right side of zero, ties going to the candidate that does it by the wider margin — between two candidates that are right equally often, the one that is right less narrowly is the one more likely to stay right on the next episode.
-
-    One limit is worth knowing when reading a fitted result. The design asks for the score *just before* the decision, and what is recorded is the standing the episode ended with, which for a decided match is taken after the loser has already been destroyed. The fit is therefore against a board that is easier to call than the one the score is meant to be used on, and the weights it produces should be checked against cut-off episodes rather than trusted from the fit alone.
-    """
-    decided_records = [record for record in records if decided(record)]
-    if not decided_records:
-        return None
-
-    graded: List[Tuple[Components, float]] = []
-    for record in decided_records:
-        outcome = 1.0 if record.winner == viewpoint(record.standing, record.team) else -1.0
-        graded.append((components(record.standing, record.team), outcome))
-
-    best: Optional[Weights] = None
-    best_key: Tuple[int, float] = (-1, 0.0)
-    for candidate in _grid():
-        correct = 0
-        margin = 0.0
-        for parts, outcome in graded:
-            blended = parts.weighted(candidate)
-            if blended * outcome > 0.0:
-                correct += 1
-            margin += blended * outcome
-        key = (correct, margin)
-        if key > best_key:
-            best, best_key = candidate, key
-    return best
+def score(episode: Episode, weights: Optional[Weights] = None) -> float:
+    """The episode's worth from our side, from -1 to +1: the outcome of a decided match, the board of a cut-off one."""
+    if decided(episode):
+        return outcome(episode)
+    return board_score(components(episode.standing, episode.team), weights or default_weights())
 
 
-# ---- internals -----------------------------------------------------------------------
+def board_before(episode: Episode, lead_seconds: float) -> Optional[Sequence[Mapping[str, Any]]]:
+    """The last standing taken at least `lead_seconds` before the episode ended, or None when none was."""
+    limit = episode.seconds - lead_seconds
+    found = None
+    for entry in getattr(episode, "history", None) or ():
+        if float(entry.get("second", 0)) <= limit:
+            found = entry.get("standing", [])
+    return found
 
 
-def _grid() -> Iterable[Weights]:
-    """Every non-negative triple on the grid that sums to one. Generated in a fixed order so that a tie between two genuinely equivalent candidates resolves the same way on every run."""
-    steps = int(round(1.0 / WEIGHT_GRID_STEP))
-    for military, economy in itertools.product(range(steps + 1), repeat=2):
-        if military + economy > steps:
+# ---- weights on disk -------------------------------------------------------------------------
+
+
+def load_weights(path: str) -> Weights:
+    with open(path, "r", encoding="utf-8") as handle:
+        stored = json.load(handle)
+    return Weights(**{name: float(stored.get(name, 0.0)) for name in COMPONENTS},
+                   link=str(stored.get("link", LINEAR)), lead_seconds=float(stored.get("lead_seconds", 0.0)))
+
+
+def save_weights(weights: Weights, path: str) -> None:
+    from .. import paths
+
+    stored = {"link": weights.link, "lead_seconds": weights.lead_seconds,
+              **{name: round(value, 6) for name, value in zip(COMPONENTS, weights.vector())}}
+    with paths.replacing(path) as handle:
+        json.dump(stored, handle, indent=1)
+        handle.write("\n")
+
+
+@functools.lru_cache(maxsize=1)
+def default_weights() -> Weights:
+    """The adopted weights when `WEIGHTS_FILE` is present, and the opening weights otherwise."""
+    return load_weights(WEIGHTS_FILE) if os.path.exists(WEIGHTS_FILE) else OPENING_WEIGHTS
+
+
+# ---- fitting ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Agreement:
+    """How well a set of weights calls the winners of decided matches from their boards some time before the end."""
+
+    n: int
+    #: Share of the boards whose score has the sign of the outcome. A board scored exactly nought counts as a miss.
+    accuracy: float
+    #: Mean negative log likelihood of the outcomes under the logistic reading of the blend, or None for linear weights, which make no probability statement.
+    log_loss: Optional[float]
+
+
+@dataclass(frozen=True)
+class Fit:
+    weights: Weights
+    #: Agreement on the boards the weights were fitted on.
+    fitted: Agreement
+    #: Agreement of weights fitted without each fold on that fold, or None when there are too few boards to fold.
+    held_out: Optional[Agreement]
+
+    @property
+    def separated(self) -> bool:
+        """Whether the weights call every board right. The boards then fix the direction of the weights and not their size: any larger multiple calls them right more confidently, and the size is the penalty's. Such weights do not state a probability of winning."""
+        return self.fitted.n > 0 and self.fitted.accuracy == 1.0
+
+
+def graded(records: Iterable[Episode], lead_seconds: float) -> List[Tuple[Tuple[float, ...], float]]:
+    """The decided episodes that carry a board from `lead_seconds` before their end, as that board's components and the outcome, both from the scored side."""
+    samples = []
+    for record in records:
+        if not decided(record):
             continue
-        record = steps - military - economy
-        yield Weights(military * WEIGHT_GRID_STEP, economy * WEIGHT_GRID_STEP, record * WEIGHT_GRID_STEP)
+        board = board_before(record, lead_seconds)
+        side = viewpoint(record.standing, record.team)
+        if board is None or side < 0:
+            continue
+        samples.append((components(board, side).vector(), outcome(record)))
+    return samples
 
 
-def _playing(standing: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
-    """The entries for teams that were actually playing. Watchers and unused slots carry a negative team number and are not part of anybody's comparison."""
-    return [entry for entry in standing if int(entry.get("team", -1)) >= 0]
+def agreement(records: Iterable[Episode], weights: Weights, lead_seconds: float) -> Agreement:
+    return _agreement(graded(records, lead_seconds), weights.vector(), weights.link)
 
 
-def _ours(playing: List[Mapping[str, Any]], team: int) -> Mapping[str, Any]:
-    """The entry the score is taken from, falling back to the first contestant when this side only watched."""
-    return next((entry for entry in playing if int(entry.get("team", -1)) == team), playing[0])
+def fit_weights(records: Iterable[Episode], lead_seconds: float = DEFAULT_LEAD_SECONDS, folds: int = FOLDS) -> Optional[Fit]:
+    """Logistic weights fitted so that the board `lead_seconds` before the end predicts who won, or None when no decided episode carries such a board.
+
+    The model has no intercept, so an even board reads nought whoever the opponent was, and it is odd in the board, so a loss is as informative as a win: a lost match is a won one seen from the other side.
+    """
+    samples = graded(records, lead_seconds)
+    if not samples:
+        return None
+    beta = _logistic(samples)
+    weights = Weights(*beta, link=LOGISTIC, lead_seconds=lead_seconds)
+    held_out = None
+    if len(samples) >= 2 * folds:
+        predictions: List[Tuple[Tuple[float, ...], float, Tuple[float, ...]]] = []
+        for fold in range(folds):
+            training = [sample for index, sample in enumerate(samples) if index % folds != fold]
+            beta_fold = _logistic(training)
+            predictions.extend((x, y, beta_fold) for index, (x, y) in enumerate(samples) if index % folds == fold)
+        held_out = _agreement_each(predictions, LOGISTIC)
+    return Fit(weights=weights, fitted=_agreement(samples, beta, LOGISTIC), held_out=held_out)
+
+
+def _agreement(samples: Sequence[Tuple[Tuple[float, ...], float]], beta: Sequence[float], link: str) -> Agreement:
+    return _agreement_each([(x, y, tuple(beta)) for x, y in samples], link)
+
+
+def _agreement_each(predictions: Sequence[Tuple[Tuple[float, ...], float, Tuple[float, ...]]], link: str) -> Agreement:
+    if not predictions:
+        return Agreement(0, 0.0, None)
+    hits = 0
+    loss = 0.0
+    for x, y, beta in predictions:
+        margin = y * _dot(beta, x)
+        if margin > 0.0:
+            hits += 1
+        loss += _softplus(-margin)
+    n = len(predictions)
+    return Agreement(n, hits / n, loss / n if link == LOGISTIC else None)
+
+
+def _logistic(samples: Sequence[Tuple[Tuple[float, ...], float]]) -> Tuple[float, ...]:
+    """Coefficients maximising the penalised likelihood of the outcomes, by Newton's method. The penalised objective is strictly convex, so the iteration converges from nought."""
+    size = len(COMPONENTS)
+    beta = [0.0] * size
+    for _ in range(100):
+        gradient = [RIDGE * b for b in beta]
+        hessian = [[RIDGE if i == j else 0.0 for j in range(size)] for i in range(size)]
+        for x, y in samples:
+            p = _sigmoid(_dot(beta, x))
+            target = 1.0 if y > 0 else 0.0
+            for i in range(size):
+                gradient[i] += (p - target) * x[i]
+                for j in range(size):
+                    hessian[i][j] += p * (1.0 - p) * x[i] * x[j]
+        step = _solve(hessian, gradient)
+        beta = [b - s for b, s in zip(beta, step)]
+        if max(abs(s) for s in step) < 1e-9:
+            break
+    return tuple(beta)
+
+
+def _solve(matrix: List[List[float]], vector: List[float]) -> List[float]:
+    """Gaussian elimination with partial pivoting. The penalty keeps the matrix positive definite."""
+    size = len(vector)
+    rows = [list(row) + [value] for row, value in zip(matrix, vector)]
+    for column in range(size):
+        pivot = max(range(column, size), key=lambda r: abs(rows[r][column]))
+        rows[column], rows[pivot] = rows[pivot], rows[column]
+        for r in range(column + 1, size):
+            factor = rows[r][column] / rows[column][column]
+            for c in range(column, size + 1):
+                rows[r][c] -= factor * rows[column][c]
+    solution = [0.0] * size
+    for r in range(size - 1, -1, -1):
+        solution[r] = (rows[r][size] - sum(rows[r][c] * solution[c] for c in range(r + 1, size))) / rows[r][r]
+    return solution
+
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _sigmoid(z: float) -> float:
+    if z >= 0:
+        return 1.0 / (1.0 + math.exp(-z))
+    e = math.exp(z)
+    return e / (1.0 + e)
+
+
+def _softplus(z: float) -> float:
+    """log(1 + e^z) without overflow."""
+    return z + math.log1p(math.exp(-z)) if z > 0 else math.log1p(math.exp(z))
 
 
 def _edge(mine: float, theirs: float) -> float:
@@ -173,14 +357,5 @@ def _edge(mine: float, theirs: float) -> float:
     return (mine - theirs) / total if total else 0.0
 
 
-def _value(entry: Mapping[str, Any]) -> float:
-    return float(entry.get("value", 0))
-
-
-def _income(entry: Mapping[str, Any]) -> float:
-    return float(entry.get("income", 0))
-
-
-def _record(entry: Mapping[str, Any]) -> float:
-    """Kills less losses, counting units and buildings alike. Counts rather than credits, because that is what the game keeps per player."""
-    return float(entry.get("killed", 0)) - float(entry.get("lost", 0))
+def _field(entry: Mapping[str, Any], key: str) -> float:
+    return float(entry.get(key, 0) or 0)

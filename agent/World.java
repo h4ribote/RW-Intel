@@ -37,6 +37,17 @@ final class World {
     static final int LOSING = 2;
     static final int COMPLETE = 3;
     static final int EXPIRED = 4;
+    /** No member can reach the target under its own power, so no order went out. */
+    static final int UNREACHABLE = 5;
+    /** The squad is the cargo of a lift whose transports are still on their way to it. */
+    static final int AWAITING_LIFT = 6;
+    /** The squad is being loaded, carried or set down. */
+    static final int LIFTING = 7;
+
+    /** What a contract's target names, matching `rwintel/wire/action.py`. */
+    static final int TARGET_REGION = 0;
+    static final int TARGET_SQUAD = 1;
+    static final int TARGET_UNIT = 2;
 
     /** A mission is stalled when the balance of force in its target region has not moved this much for this long. */
     private static final float STALL_MOVEMENT = 0.10f;
@@ -52,6 +63,10 @@ final class World {
     static final int EVENT_UNIT_COMPLETED = 1;
     static final int EVENT_UNIT_LOST = 2;
     static final int EVENT_SQUAD_DEPLETED = 3;
+    static final int EVENT_BOARDED = 4;
+    static final int EVENT_DISEMBARKED = 5;
+    static final int EVENT_LIFT_DONE = 6;
+    static final int EVENT_LIFT_FAILED = 7;
 
     static final class Region {
         final int id;
@@ -90,7 +105,25 @@ final class World {
         int task;
         int stance;
         int status;
+        /** What the contract's target names, and the region, squad or unit it is. */
+        int targetKind;
+        long target;
+        /** The region the target lies in: the target itself for a region, and the region nearest a squad or unit target as of the last scan. What completion and stalling are judged in. */
         int targetRegion;
+        /** Set when the contract was taken on and no member could reach its target. */
+        boolean unreachable;
+        /** Set when the squad or unit the contract names is gone. */
+        boolean targetLost;
+        /** The lift the squad is the cargo of, or null. While there is one the lift moves the squad and nothing else does. */
+        Lift lift;
+        /** Members aboard a transport, and the narrowest movement type among the members as a {@link Passage#CLASSES} number. */
+        int aboard;
+        int passage;
+        /** Members aboard as of the last upkeep, which is how members set down since are noticed. */
+        int aboardSeen;
+        /** The unit a raid is attacking, and the unit an escort is guarding, so that each is reissued only when it changes. */
+        long raidTarget;
+        long escortLead;
         /** Value lost since the current contract was issued, which is what the contract's budget is spent against. */
         float losses;
         float costBudget;
@@ -133,6 +166,15 @@ final class World {
         Object handle;
         boolean building;
         int price;
+        /** The tier a building of ours has been raised to, and the price of raising it to the next one, which is nought when it offers no further tier. Read only for our own finished buildings; nought for everything else. */
+        int level;
+        int upgradePrice;
+        /** The transport this unit is aboard, by id, 0 for none; and for a transport, how many slots it has filled. */
+        long carrier;
+        int aboard;
+        boolean builder;
+        /** A building that may only stand on a resource pool, finished or not. */
+        boolean extractor;
     }
 
     static final class Event {
@@ -168,6 +210,18 @@ final class World {
     /** How far each type can shoot, resolved once. Range is not on the type interface and digging it out per unit per period would be paid for every unit in the world. */
     private final Map<Object, Float> rangeByType = new java.util.IdentityHashMap<Object, Float>();
 
+    /** Each type's movement, transport capacity and whether it builds, resolved once for the same reason. */
+    private final Map<Object, String> movementByType = new java.util.IdentityHashMap<Object, String>();
+    private final Map<Object, Integer> capacityByType = new java.util.IdentityHashMap<Object, Integer>();
+    private final Map<Object, Boolean> builderByType = new java.util.IdentityHashMap<Object, Boolean>();
+
+    /** What each movement type can cross on the map in play, or null until the episode's terrain has been read. */
+    Passage.Grids passage;
+
+    /** The lifts under way by id, and the ones that ended since the last frame that reported them. */
+    final Map<Integer, Lift> lifts = new LinkedHashMap<Integer, Lift>();
+    final List<Lift> endedLifts = new ArrayList<Lift>();
+
     private final Map<Long, Integer> unitToSquad = new HashMap<Long, Integer>();
     private final Map<Long, Object> unitHandles = new HashMap<Long, Object>();
 
@@ -192,6 +246,9 @@ final class World {
         typeIndex.clear();
         typesByIndex.clear();
         rangeByType.clear();
+        movementByType.clear();
+        capacityByType.clear();
+        builderByType.clear();
         for (Object type : types) {
             String name = engine.typeName(type);
             if (typeIndex.containsKey(name)) continue;
@@ -242,6 +299,9 @@ final class World {
         events.clear();
         regions.clear();
         resourcePoints.clear();
+        lifts.clear();
+        endedLifts.clear();
+        passage = null;
         homeX = Float.NaN;
         homeY = Float.NaN;
         commandedUnits = 0;
@@ -291,6 +351,66 @@ final class World {
     float rangeOfType(Object type) {
         Float range = rangeByType.get(type);
         return range == null ? 0f : range.floatValue();
+    }
+
+    /** The engine's name for the movement type of a unit's type, the empty name when it cannot be read. */
+    String movementOf(Object unit) {
+        try {
+            return movementOfType(engine.type(unit));
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    String movementOfType(Object type) {
+        if (type == null) return "";
+        String movement = movementByType.get(type);
+        if (movement == null) {
+            try {
+                movement = engine.typeMovement(type);
+            } catch (Exception e) {
+                movement = "";
+            }
+            movementByType.put(type, movement);
+        }
+        return movement;
+    }
+
+    /** Transport capacity of a type in slots, -1 for one that carries nothing. */
+    int capacityOfType(Object type) {
+        if (type == null) return -1;
+        Integer capacity = capacityByType.get(type);
+        if (capacity == null) capacityByType.put(type, capacity = Integer.valueOf(engine.typeCapacity(type)));
+        return capacity.intValue();
+    }
+
+    boolean builderType(Object type) {
+        if (type == null) return false;
+        Boolean builder = builderByType.get(type);
+        if (builder == null) {
+            try {
+                builder = Boolean.valueOf(engine.typeIsBuilder(type));
+            } catch (Exception e) {
+                builder = Boolean.FALSE;
+            }
+            builderByType.put(type, builder);
+        }
+        return builder.booleanValue();
+    }
+
+    /** Whether the unit can get to the position under its own power. True while the map's passage is unknown, so that nothing is withheld for want of it. */
+    boolean reachable(Object unit, float x, float y) {
+        if (passage == null) return true;
+        try {
+            return passage.reachable(movementOf(unit), engine.x(unit), engine.y(unit), x, y);
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    /** Whether a unit of this movement type at one position can get to the other, by the same rule. */
+    boolean reachable(String movement, float x0, float y0, float x1, float y1) {
+        return passage == null || passage.reachable(movement, x0, y0, x1, y1);
     }
 
     /** Whether a squad is one this process still commands, rather than one a human has taken over. */
@@ -352,6 +472,11 @@ final class World {
             seen.typeIndex = indexOf(typeName);
             seen.building = engine.typeIsBuilding(type);
             seen.price = engine.price(unit);
+            if (ours && seen.building && seen.built >= 255) {
+                seen.level = engine.level(unit);
+                Object upgrade = engine.upgradeOffered(unit);
+                seen.upgradePrice = upgrade == null ? 0 : engine.actionPrice(upgrade);
+            }
             seen.order = Engine.NO_ORDER;
             if (engine.armedClass.isInstance(unit)) {
                 seen.stance = engine.stanceOf(unit);
@@ -360,6 +485,11 @@ final class World {
                 Object target = engine.attackTarget(unit);
                 seen.target = target == null ? 0L : engine.id(target);
             }
+            Object carrier = engine.carrier(unit);
+            seen.carrier = carrier == null ? 0L : engine.id(carrier);
+            if (capacityOfType(type) > 0) seen.aboard = engine.aboard(unit);
+            seen.builder = builderType(type);
+            seen.extractor = seen.building && engine.typeOnResourcePool(type);
             Integer squadId = unitToSquad.get(Long.valueOf(seen.id));
             seen.squad = squadId == null ? NO_SQUAD : squadId.intValue();
 
@@ -367,7 +497,7 @@ final class World {
             valueById.put(Long.valueOf(seen.id), Float.valueOf(seen.price));
             visible.add(seen);
 
-            if (seen.building && seen.built >= 255 && engine.typeOnResourcePool(type)) extractors.add(seen);
+            if (seen.extractor && seen.built >= 255) extractors.add(seen);
 
             boolean commanded = ours && ours(squads.get(squadId));
             if (commanded) {
@@ -408,22 +538,27 @@ final class World {
         refreshSquads(valueById, now);
     }
 
-    /** Remembers what our units looked like, and reports the ones that finished building since the last scan. */
+    /** Remembers what our units looked like, and reports the ones that finished building, went aboard a transport or came off one since the last scan. */
     private void noteOwnUnit(Seen seen, Set<Long> ownNow) {
         Long key = Long.valueOf(seen.id);
         ownNow.add(key);
+        int aboard = seen.carrier != 0L ? 1 : 0;
         int[] previous = ownLastSeen.get(key);
         if (previous == null) {
-            ownLastSeen.put(key, new int[]{seen.built, seen.typeIndex, seen.price});
+            ownLastSeen.put(key, new int[]{seen.built, seen.typeIndex, seen.price, aboard});
             if (seen.built >= 255) events.add(new Event(EVENT_UNIT_COMPLETED, seen.squad, seen.id, seen.typeIndex, seen.price));
             return;
         }
         if (previous[0] < 255 && seen.built >= 255) {
             events.add(new Event(EVENT_UNIT_COMPLETED, seen.squad, seen.id, seen.typeIndex, seen.price));
         }
+        if (previous[3] != aboard) {
+            events.add(new Event(aboard != 0 ? EVENT_BOARDED : EVENT_DISEMBARKED, seen.squad, seen.id, seen.typeIndex, seen.price));
+        }
         previous[0] = seen.built;
         previous[1] = seen.typeIndex;
         previous[2] = seen.price;
+        previous[3] = aboard;
     }
 
     private void noteLostUnits(Set<Long> ownNow) {
@@ -470,6 +605,20 @@ final class World {
                 squad.y = sumY / alive;
             }
             squad.spread = spreadOf(squad);
+            noteCarriage(squad);
+        }
+        for (Squad squad : squads.values()) {
+            if (squad.targetKind == TARGET_REGION) {
+                squad.targetRegion = (int) squad.target;
+                continue;
+            }
+            float[] point = targetPoint(squad);
+            squad.targetLost = point == null;
+            Region where = point == null ? null : nearest(point[0], point[1]);
+            if (where != null) squad.targetRegion = where.id;
+        }
+        for (Squad squad : squads.values()) {
+            float value = squad.value;
             if (squad.rebaseline) {
                 squad.rebaseline = false;
                 squad.valueAtIssue = value;
@@ -484,6 +633,45 @@ final class World {
             }
             squad.reportedDepleted = depleted;
         }
+    }
+
+    /** How many members are aboard a transport, and the narrowest movement type among all of them. */
+    private void noteCarriage(Squad squad) {
+        int aboard = 0;
+        Set<String> movements = new HashSet<String>();
+        for (Long id : squad.units) {
+            Object handle = unitHandles.get(id);
+            if (handle == null) continue;
+            try {
+                if (engine.carrier(handle) != null) aboard++;
+            } catch (Exception ignored) {
+                // a unit that cannot be read is counted as not aboard
+            }
+            String movement = movementOf(handle);
+            if (!movement.isEmpty()) movements.add(movement);
+        }
+        squad.aboard = aboard;
+        squad.passage = Passage.classOf(Passage.narrowest(movements));
+    }
+
+    /** Where a squad's contract points: the centre of its target region, the centre of its target squad, or its target unit; null when the squad or unit named is gone or the region does not exist. */
+    float[] targetPoint(Squad squad) {
+        if (squad.targetKind == TARGET_SQUAD) {
+            Squad other = squads.get(Integer.valueOf((int) squad.target));
+            if (other == null || other.units.isEmpty()) return null;
+            return new float[]{other.x, other.y};
+        }
+        if (squad.targetKind == TARGET_UNIT) {
+            Object unit = handle(squad.target);
+            if (unit == null) return null;
+            try {
+                return new float[]{engine.x(unit), engine.y(unit)};
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        Region region = regionAt((int) squad.target);
+        return region == null ? null : new float[]{region.x, region.y};
     }
 
     private float spreadOf(Squad squad) {
@@ -507,13 +695,16 @@ final class World {
     /**
      * Where a mission stands, in the terms the contract is written in.
      *
-     * The order the cases are tried in is what decides which one a caller hears about when several hold at once. Completion is reported ahead of expiry because a mission that took the region and ran late is a success that was slow, not a failure. Losing is reported ahead of a stall because the budget is the thing the operational layer has to act on soonest.
+     * The order the cases are tried in is what decides which one a caller hears about when several hold at once. A lift comes first, since while one is under way the lift and not the contract is moving the squad. A target nothing can reach or that is gone comes next, since nothing further happens on the contract until it is replaced. Completion is reported ahead of expiry because a mission that took the region and ran late is a success that was slow, not a failure. Losing is reported ahead of a stall because the budget is the thing the operational layer has to act on soonest.
      */
     private int statusOf(Squad squad, int now) {
         Region target = regionAt(squad.targetRegion);
         // Tracked before the ladder rather than inside it. The stall clock only means anything if it runs whatever else is true; left to be updated only on the periods where no other status won, it would sit still through a spell of losing and then report a stall the instant the squad recovered.
         boolean stalled = target != null && trackBalance(squad, target, now);
         if (squad.units.isEmpty()) return ACTIVE;
+        if (squad.lift != null) return squad.lift.phase == Lift.APPROACH ? AWAITING_LIFT : LIFTING;
+        if (squad.unreachable) return UNREACHABLE;
+        if (squad.targetLost) return STALLED;
         if (target != null && target.enemyValue <= 0f && holding(squad, target)) return COMPLETE;
         if (squad.deadlineMs > 0 && now > squad.deadlineMs) return EXPIRED;
         if (squad.costBudget > 0f && squad.losses > squad.costBudget * LOSING_SHARE) return LOSING;

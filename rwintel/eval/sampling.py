@@ -1,10 +1,10 @@
-"""How many episodes a claimed difference needs before it is worth claiming.
+"""How many episodes a difference needs, and whether the episodes run establish it.
 
-The same match run twice does not reproduce, so two policies can never be compared on one game; they are compared on the distribution of a few hundred. That makes the sample size a first-class part of the design rather than an afterthought — every statement of the form "this policy is better" is really a statement about two means and their scatter, and the honest form of it names the number of episodes it took.
+The same match run twice does not reproduce, so two policies can never be compared on one game; they are compared on the distribution of a few hundred. Two things follow. Before a run, the scatter of the score says how many episodes a difference of a given size would take (`episodes_for`). After it, the difference found is judged by its interval and its p-value (`Difference`), and when several arms are held against one reference the p-values are corrected for there being several (`holm`).
 
-The arithmetic is the standard two-sample sizing, and its point is a practical one. A win rate needs roughly sixteen hundred episodes a side to resolve five percentage points, and worse, it needs matches that end with a winner, which the measured ones do not. The military value edge is produced by every episode without exception and has a measured scatter of about 0.228, which puts a ten percent difference within about eighty episodes a side. That difference in cost is the entire argument for scoring the board instead of counting wins.
+The sizing is the standard two-sample arithmetic, and its point is a practical one. A win rate needs roughly sixteen hundred episodes a side to resolve five percentage points, and it needs matches that end with a winner, which most do not. A score read off the board is produced by every episode, which puts a ten percent difference under a hundred episodes a side at the scatter the military value edge has.
 
-Everything here is on the sample, not on the population: the standard deviation divides by n-1, which is what the measurement tool reports and what the recorded figures were computed with.
+Everything here is on the sample, not on the population: the standard deviation divides by n-1.
 """
 
 from __future__ import annotations
@@ -12,11 +12,17 @@ from __future__ import annotations
 import math
 import sys
 from dataclasses import dataclass
-from typing import Sequence
+from typing import List, Sequence
 
 
 #: (z(1 - alpha/2) + z(power))^2 for five per cent significance at eighty per cent power, which is (1.96 + 0.84)^2. This is a choice of how sure a comparison has to be before it counts, not a derivation; it is stated as a constant so that raising the bar is one edit rather than a rederivation everywhere a sample size is quoted.
 SIGNIFICANCE_POWER_FACTOR = 7.85
+
+#: The significance level a difference is judged at, the same five per cent the sizing is done at.
+SIGNIFICANCE_LEVEL = 0.05
+
+#: z(1 - alpha/2) at that level: the half-width of a 95 per cent interval in standard errors.
+SIGNIFICANCE_Z = 1.96
 
 #: The variance of a coin at p = 0.5, which is where a win rate comparison between two comparable policies sits and where the variance is at its largest. Sizing at the worst case means the answer never has to be revised upward once the rate is known.
 WIN_RATE_VARIANCE = 0.25
@@ -63,35 +69,51 @@ def episodes_for_win_rate(delta: float) -> int:
     return math.ceil(SIGNIFICANCE_POWER_FACTOR * 2.0 * WIN_RATE_VARIANCE / delta ** 2)
 
 
-@dataclass(frozen=True)
-class Comparison:
-    """Two sets of episodes held against each other, with the sample size the difference between them would need.
+def standard_error(first: Summary, second: Summary) -> float:
+    """The standard error of the difference of two means, each side on its own scatter (Welch). Nought when either side has too few episodes to have a scatter."""
+    if first.n < 2 or second.n < 2:
+        return 0.0
+    return math.sqrt(first.sd ** 2 / first.n + second.sd ** 2 / second.n)
 
-    `sufficient` is deliberately the weakest possible claim: it says only that both sides have already run at least as many episodes as the observed difference requires. It is not a test result and does not become one — a comparison that is not sufficient means run more, and one that is means the difference is worth reporting with its episode count beside it.
+
+@dataclass(frozen=True)
+class Difference:
+    """Two sets of episodes held against each other: the difference of their means, the interval around it and how surprising it would be if there were none.
+
+    The p-value is two-sided on the normal approximation, which the episode counts a comparison runs at make adequate. A standard error of nought is a scatter that was never measured rather than one measured to be small, so it gives a p-value of one: nothing has been established.
     """
 
     first: Summary
     second: Summary
     #: First mean less second mean, so a positive difference means the first side scored higher.
     difference: float
-    pooled_sd: float
-    #: Episodes per side that `difference` needs at `pooled_sd`.
-    needed: int
-    sufficient: bool
+    standard_error: float
+    #: Half-width of the interval, in the units of the score.
+    interval: float
+    p_value: float
 
     @classmethod
-    def of(cls, first: Summary, second: Summary) -> "Comparison":
+    def of(cls, first: Summary, second: Summary, z: float = SIGNIFICANCE_Z) -> "Difference":
         difference = first.mean - second.mean
-        pooled = _pooled_sd(first, second)
-        needed = episodes_for(pooled, abs(difference))
-        return cls(first, second, difference, pooled, needed,
-                   first.n >= needed and second.n >= needed)
+        error = standard_error(first, second)
+        p_value = math.erfc(abs(difference) / error / math.sqrt(2.0)) if error > 0.0 else 1.0
+        return cls(first, second, difference, error, z * error, p_value)
+
+    @property
+    def low(self) -> float:
+        return self.difference - self.interval
+
+    @property
+    def high(self) -> float:
+        return self.difference + self.interval
 
 
-def _pooled_sd(first: Summary, second: Summary) -> float:
-    """The two scatters combined, weighted by how many episodes each rests on. Zero when there are not enough episodes between them to have any scatter at all."""
-    degrees = first.n + second.n - 2
-    if degrees <= 0:
-        return 0.0
-    total = (first.n - 1) * first.sd ** 2 + (second.n - 1) * second.sd ** 2
-    return math.sqrt(total / degrees)
+def holm(p_values: Sequence[float], alpha: float = SIGNIFICANCE_LEVEL) -> List[bool]:
+    """Which of several p-values stay significant once there are several of them, by Holm's step-down procedure. It holds the chance of any false claim among them to `alpha`."""
+    order = sorted(range(len(p_values)), key=lambda index: p_values[index])
+    rejected = [False] * len(p_values)
+    for rank, index in enumerate(order):
+        if p_values[index] > alpha / (len(p_values) - rank):
+            break
+        rejected[index] = True
+    return rejected

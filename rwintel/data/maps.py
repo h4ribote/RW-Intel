@@ -77,11 +77,8 @@ def _decode_layer(layer: ElementTree.Element) -> Tuple[int, ...]:
     return struct.unpack("<%dI" % (len(raw) // 4), raw)
 
 
-def read_map(path: str, paths: Optional[AssetPaths] = None) -> MapContent:
-    paths = paths or AssetPaths.default()
-    map_dir = os.path.dirname(os.path.abspath(path))
-    root = ElementTree.parse(path).getroot()
-
+def _tile_property_table(root: ElementTree.Element, paths: AssetPaths, map_dir: str) -> Dict[int, Dict[str, str]]:
+    """Every global tile id of a map that carries properties, with those properties."""
     tilesets = root.findall("tileset")
     first_gids = [int(t.get("firstgid")) for t in tilesets]
     properties: Dict[int, Dict[str, str]] = {}
@@ -93,6 +90,14 @@ def read_map(path: str, paths: Optional[AssetPaths] = None) -> MapContent:
         for tile_id, tile_properties in _load_tileset(tileset, paths, map_dir).items():
             if tile_id < limit:
                 properties[first + tile_id] = tile_properties
+    return properties
+
+
+def read_map(path: str, paths: Optional[AssetPaths] = None) -> MapContent:
+    paths = paths or AssetPaths.default()
+    map_dir = os.path.dirname(os.path.abspath(path))
+    root = ElementTree.parse(path).getroot()
+    properties = _tile_property_table(root, paths, map_dir)
 
     width = int(root.get("width"))
     content = MapContent(

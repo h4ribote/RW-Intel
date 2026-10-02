@@ -1,6 +1,6 @@
 """Where an episode is written down as it finishes.
 
-A run that is only summarised at the end can be summarised once. Everything the design says to keep — the settings and who the opponent was, the score and what it is made of, whether it was decided and when, what each layer decided and how much of it came off — is kept per episode so that a question asked later can be answered without playing the matches again. That matters here more than usual: the same settings do not reproduce the same match, so an episode that is not written down at the time cannot be recovered by running it again.
+A run that is only summarised at the end can be summarised once. Everything the design says to keep -the settings and who the opponent was, the score and what it is made of, whether it was decided and when, what each layer decided and how much of it came off -is kept per episode so that a question asked later can be answered without playing the matches again. That matters here more than usual: the same settings do not reproduce the same match, so an episode that is not written down at the time cannot be recovered by running it again.
 
 One JSON object per line, appended and flushed as each episode ends. A run that is interrupted keeps everything up to the interruption, which a single document written at the end would not.
 """
@@ -12,15 +12,14 @@ import os
 import threading
 from typing import Iterator, List, Optional
 
+from .. import paths
+
 
 class Journal:
     """Appends episodes to a file as they finish. Safe to hand to every session: they finish on their own threads."""
 
     def __init__(self, path: str) -> None:
-        self.path = path
-        directory = os.path.dirname(os.path.abspath(path))
-        if directory:
-            os.makedirs(directory, exist_ok=True)
+        self.path = paths.ensure_parent(path)
         self._lock = threading.Lock()
         self._handle = open(path, "a", encoding="utf-8")
 
@@ -57,5 +56,5 @@ def stream(path: str) -> Iterator[dict]:
 
 
 def default_path(name: Optional[str] = None) -> str:
-    """Where a run writes when nothing was asked for. Under the working area, which is not in version control, because these are measurements of one machine on one day."""
-    return os.path.join("local", "episodes", f"{name or 'run'}.jsonl")
+    """Where a run writes when nothing was asked for: a file of its own under local/episodes, so that runs with different settings never share a journal."""
+    return os.path.join(paths.episodes(), f"{name or 'run'}-{paths.stamp()}.jsonl")

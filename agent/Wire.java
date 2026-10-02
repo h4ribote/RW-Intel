@@ -14,12 +14,16 @@ final class Wire {
     /** ASCII "RWIN", so a stream that has lost sync fails at the next header rather than silently. */
     static final int MAGIC = 0x4E495752;
 
-    static final int PROTOCOL_VERSION = 3;
+    static final int PROTOCOL_VERSION = 10;
 
     static final int HEADER_SIZE = 16;
 
+    /** The header's flags field is 16 bits wide; an observation carries its number there and the action answering it carries the same number back. */
+    static final int FLAGS_MASK = 0xFFFF;
+
     static final int KIND_HELLO = 0x01;
     static final int KIND_EPISODE = 0x02;
+    static final int KIND_TERRAIN = 0x03;
     static final int KIND_OBSERVATION = 0x10;
     static final int KIND_ACTION = 0x20;
     static final int KIND_CONTROL = 0x30;
@@ -28,6 +32,12 @@ final class Wire {
     static final int BLOCK_SQUADS = 2;
     static final int BLOCK_UNITS = 4;
     static final int BLOCK_EVENTS = 8;
+    static final int BLOCK_MENUS = 16;
+    static final int BLOCK_LIFTS = 32;
+    /** Sent on every observation and written last: the number of the observation whose answer was applied at the head of this step, -1 when none was. */
+    static final int BLOCK_TIMING = 64;
+    /** The built-in AI players' orders since the last operational observation, written after the timing block on operational observations of an episode that asked for them. */
+    static final int BLOCK_AI_ORDERS = 128;
 
     private Wire() {
     }
@@ -37,26 +47,28 @@ final class Wire {
     }
 
     /** Writes one frame. Callers hold the stream's monitor, because a frame must not be interleaved with another. */
-    static void write(OutputStream out, int kind, int instance, byte[] body) throws IOException {
+    static void write(OutputStream out, int kind, int instance, int flags, byte[] body) throws IOException {
         ByteBuffer header = buffer(HEADER_SIZE);
         header.putInt(MAGIC);
         header.putShort((short) PROTOCOL_VERSION);
         header.putShort((short) kind);
         header.putShort((short) instance);
-        header.putShort((short) 0);
+        header.putShort((short) flags);
         header.putInt(body.length);
         out.write(header.array());
         out.write(body);
         out.flush();
     }
 
-    /** One received frame: the kind, and the body. */
+    /** One received frame: the kind, the header flags, and the body. */
     static final class Frame {
         final int kind;
+        final int flags;
         final byte[] body;
 
-        Frame(int kind, byte[] body) {
+        Frame(int kind, int flags, byte[] body) {
             this.kind = kind;
+            this.flags = flags;
             this.body = body;
         }
     }
@@ -77,11 +89,11 @@ final class Wire {
         }
         int kind = view.getShort() & 0xFFFF;
         view.getShort();  // instance, which the game side already knows about itself
-        view.getShort();  // flags, unused so far
+        int flags = view.getShort() & FLAGS_MASK;
         int length = view.getInt();
         byte[] body = new byte[length];
         if (length > 0) in.readFully(body);
-        return new Frame(kind, body);
+        return new Frame(kind, flags, body);
     }
 
     // ---- text bodies ---------------------------------------------------------------------

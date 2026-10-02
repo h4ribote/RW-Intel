@@ -1,0 +1,18 @@
+# Beach landing, our side the east island. A contract on ground no member can reach, beside one the members can.
+# Expect: squad 0 (tanks) is UNREACHABLE and its tanks get no order (orders=0, nothing to hold on the shore); squad 1 (hover tanks) is ACTIVE and crosses to the main island; squad 2 (a tank and a hover tank) is ACTIVE and only its hover tank moves.
+@0 spawn t1 tank 3300 1700
+@0 spawn t2 tank 3320 1650
+@0 spawn h1 hoverTank 3280 1650
+@0 spawn h2 hoverTank 3300 1620
+@0 spawn t3 tank 3340 1600
+@0 spawn h3 hoverTank 3360 1600
+@1 track t1 t2 h1 h2 t3 h3
+@1 regions 3430 1570 2400 1800
+@2 squad 0 t1 t2
+@2 squad 1 h1 h2
+@2 squad 2 t3 h3
+@2.2 contract 0 attack region 1
+@2.2 contract 1 attack region 1
+@2.2 contract 2 attack region 1
+@40 status
+@41 end

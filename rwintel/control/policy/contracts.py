@@ -2,7 +2,7 @@
 
 Every one of these is a structure with fixed meaning rather than a vector, and that is the whole design: a layer can be learnt, or replaced by a script, or taken over by a human, against frozen neighbours, because what crosses the boundary means the same thing to all three. A latent hand-off would tie the layers together so that changing one invalidates the other, and it would leave a human with nothing editable to edit.
 
-The numbers here divide into two kinds. Some are structural — which fields exist, what a posture is, how many squads there may be — and changing one is a change of design. Others are opening values to be measured and adjusted, and are marked as such. The point of writing the whole command chain as a script first is that the second kind can be settled by measurement rather than by argument.
+The numbers here divide into two kinds. Some are structural -which fields exist, what a posture is, how many squads there may be -and changing one is a change of design. Others are opening values to be measured and adjusted, and are marked as such. The point of writing the whole command chain as a script first is that the second kind can be settled by measurement rather than by argument.
 """
 
 from __future__ import annotations
@@ -11,7 +11,8 @@ import enum
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from ...wire.action import Commander, Stance, Status, Task
+from ...wire.action import Commander, Stance, Status, TargetKind, Task
+from ...wire.observation import NO_LIFT
 
 
 class Posture(enum.IntEnum):
@@ -43,8 +44,42 @@ ALLOCATION: Dict[Posture, Allocation] = {
 }
 
 
+class Domain(enum.IntEnum):
+    """Where a unit moves, read off its movement type: over land (LAND, OVER_CLIFF), over land and water (HOVER, OVER_CLIFF_WATER), on water only (WATER), or through the air. Buildings and what does not move are STATIC."""
+
+    GROUND = 0
+    AMPHIBIOUS = 1
+    NAVAL = 2
+    AIR = 3
+    STATIC = 4
+
+
+DOMAIN_OF_MOVEMENT: Dict[str, Domain] = {
+    "LAND": Domain.GROUND,
+    "OVER_CLIFF": Domain.GROUND,
+    "HOVER": Domain.AMPHIBIOUS,
+    "OVER_CLIFF_WATER": Domain.AMPHIBIOUS,
+    "WATER": Domain.NAVAL,
+    "AIR": Domain.AIR,
+}
+
+
+class Function(enum.IntFlag):
+    """What a unit can do, several at once. Read off the capabilities the engine reports for the type: whether it can attack, its reach, whether it only shoots upwards, its speed, its transport capacity, whether it builds, what its menu makes."""
+
+    COMBAT = 1
+    ARTILLERY = 2
+    ANTI_AIR = 4
+    FAST = 8
+    TRANSPORT = 16
+    BUILDER = 32
+    PRODUCER = 64
+    SCOUT = 128
+    STRUCTURE = 256
+
+
 class Role(enum.IntEnum):
-    """What a unit is for. Decided from what the type can do, never from its name, so that a definition file that renames or replaces a built-in changes nothing here."""
+    """The one function a unit is counted under in a squad's establishment and in the target mix: its scarcest function, in the order builder, structure, then for what can attack anti-air, artillery, fast and armour, then transport. Derived from the domain and the functions, never from the type's name."""
 
     ARMOUR = 0
     ARTILLERY = 1
@@ -52,7 +87,8 @@ class Role(enum.IntEnum):
     FAST = 3
     BUILDER = 4
     STRUCTURE = 5
-    OTHER = 6
+    TRANSPORT = 6
+    OTHER = 7
 
 
 class Doctrine(enum.IntEnum):
@@ -62,6 +98,10 @@ class Doctrine(enum.IntEnum):
     GARRISON = 1
     RAID = 2
     ENGINEER = 3
+    #: Warships: holding the water and firing on the shore.
+    FLEET = 4
+    #: Aircraft that fight.
+    AIRWING = 5
 
 
 @dataclass(frozen=True)
@@ -70,8 +110,8 @@ class DoctrineSpec:
     minimum: Dict[Role, int]
     #: What a full squad of this kind looks like. The shortfall against this is what decides where a reinforcement goes.
     establishment: Dict[Role, int]
-    #: Movement types this doctrine will take, so that a squad keeps to one kind of ground.
-    movement: frozenset
+    #: Domains this doctrine is raised in. A squad is formed in one of them and takes members of that domain only, so that every member can follow the others.
+    domains: frozenset
     #: Tasks the operational layer may give a squad of this doctrine.
     tasks: tuple
 
@@ -80,27 +120,39 @@ DOCTRINES: Dict[Doctrine, DoctrineSpec] = {
     Doctrine.VANGUARD: DoctrineSpec(
         minimum={Role.ARMOUR: 4},
         establishment={Role.ARMOUR: 8, Role.ARTILLERY: 2},
-        movement=frozenset({"LAND", "HOVER", "OVER_CLIFF"}),
+        domains=frozenset({Domain.GROUND, Domain.AMPHIBIOUS}),
         tasks=(Task.ATTACK, Task.ENCIRCLE),
     ),
     Doctrine.GARRISON: DoctrineSpec(
         minimum={Role.ARMOUR: 2},
         establishment={Role.ARMOUR: 4, Role.ANTI_AIR: 2},
-        movement=frozenset({"LAND", "HOVER"}),
+        domains=frozenset({Domain.GROUND, Domain.AMPHIBIOUS}),
         tasks=(Task.DEFEND, Task.ESCORT),
     ),
     Doctrine.RAID: DoctrineSpec(
         minimum={Role.FAST: 3},
         establishment={Role.FAST: 6},
-        movement=frozenset({"AIR", "HOVER"}),
+        domains=frozenset({Domain.GROUND, Domain.AMPHIBIOUS}),
         tasks=(Task.RAID, Task.WITHDRAW),
     ),
     # Engineers are what an escort escorts, not what is sent anywhere. They are grouped so that the organisation layer can keep count of them and so that a squad can be told to cover them, but the layer that moves them is the economy, which addresses each one by name to place a building. A contract on an engineer squad would put a move order on top of the placement it was in the middle of, and the half built structure would be a total loss.
     Doctrine.ENGINEER: DoctrineSpec(
         minimum={Role.BUILDER: 1},
         establishment={Role.BUILDER: 3},
-        movement=frozenset({"LAND", "HOVER"}),
+        domains=frozenset({Domain.GROUND, Domain.AMPHIBIOUS, Domain.NAVAL, Domain.AIR}),
         tasks=(),
+    ),
+    Doctrine.FLEET: DoctrineSpec(
+        minimum={Role.ARMOUR: 2},
+        establishment={Role.ARMOUR: 4, Role.ARTILLERY: 2, Role.ANTI_AIR: 1},
+        domains=frozenset({Domain.NAVAL}),
+        tasks=(Task.ATTACK, Task.DEFEND, Task.ESCORT),
+    ),
+    Doctrine.AIRWING: DoctrineSpec(
+        minimum={Role.ARMOUR: 2},
+        establishment={Role.ARMOUR: 6, Role.ANTI_AIR: 2},
+        domains=frozenset({Domain.AIR}),
+        tasks=(Task.ATTACK, Task.RAID, Task.ESCORT),
     ),
 }
 
@@ -118,6 +170,8 @@ class EconomyOrders:
     tech_cap: float
     #: Shares of military spending by role, which the economy reads as what to build next.
     target_mix: Dict[Role, float]
+    #: Region ids the economy may place extractors in beyond home, safest first.
+    expansion: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -130,6 +184,8 @@ class OperationsOrders:
     offensive: bool
     #: Credits of our own the strategic layer is prepared to lose across every mission at once.
     loss_allowance: float
+    #: The same expansion plan the economy is given, so that a garrison can stand on the next region before the builder arrives.
+    expansion: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -139,6 +195,8 @@ class SquadRecord:
     id: int
     doctrine: Doctrine
     members: List[int] = field(default_factory=list)
+    #: The domain the squad was formed in, which every member shares.
+    domain: Domain = Domain.GROUND
     #: Filled in from the observation each period; absent until the game has reported the squad back.
     value: float = 0.0
     formed_value: float = 0.0
@@ -154,6 +212,11 @@ class SquadRecord:
     settling: bool = False
     #: The contract it is under, if any.
     contract: Optional["TaskContract"] = None
+    #: Members aboard a transport, and the narrowest movement type among the members, as the game reports them.
+    aboard: int = 0
+    passage: str = ""
+    #: The lift carrying the squad as the game reports it, NO_LIFT for none.
+    lift: int = NO_LIFT
 
     @property
     def machine(self) -> bool:
@@ -162,7 +225,7 @@ class SquadRecord:
 
     @property
     def ours_to_task(self) -> bool:
-        """Whether the operational layer may still write this squad's contract. Taking only the tactical command leaves the contract ours to set, and the design calls the opposite split — a human writing contracts while the tactical layer fights them — the most useful arrangement of all."""
+        """Whether the operational layer may still write this squad's contract. Taking only the tactical command leaves the contract ours to set, and the design calls the opposite split -a human writing contracts while the tactical layer fights them -the most useful arrangement of all."""
         return not self.commander & Commander.OPERATIONS
 
     @property
@@ -177,6 +240,7 @@ class TaskContract:
 
     squad: int
     task: Task
+    #: The region the errand is in: the target itself for a region, and where the escorted squad or unit is headed otherwise.
     target_region: int
     stance: Stance
     #: Credits of our own this mission may spend. An absolute figure, not a share: a share has a denominator that moves while the mission runs, so a contract issued early would quietly grow.
@@ -184,6 +248,15 @@ class TaskContract:
     #: The game time by which it should be done, absolute so that a period of delay does not change what it means.
     deadline_ms: int
     issued_at_ms: int
+    #: What the target is: the region, or a squad or unit to escort, named by `target`.
+    target_kind: TargetKind = TargetKind.REGION
+    target: int = 0
+    #: How the squad gets there: on its own, or carried by the transport in the slot named (`logistics.TRANSPORT_SLOTS`).
+    means: int = -1
+
+    @property
+    def wire_target(self) -> int:
+        return self.target_region if self.target_kind == TargetKind.REGION else self.target
 
 
 @dataclass
@@ -195,6 +268,10 @@ class MissionReport:
     #: What the squad has run into, by role and by worth.
     contact: Dict[Role, float] = field(default_factory=dict)
     losses: float = 0.0
+    #: Enemy worth the squad has destroyed since its contract was issued, the other half of the exchange its losses are one half of.
+    destroyed: float = 0.0
+    #: Of what the squad has run into, the worth that flies. Reported apart from the roles because a role is shared across domains, and anti-air cannot shoot what does not fly.
+    airborne: float = 0.0
 
 
 @dataclass
@@ -224,6 +301,8 @@ class FrontReport:
     credits: float
     military_value: float
     enemy_value: float
+    #: The enemy's army alone, on the same footing as `military_value`: buildings and builders are left out of both.
+    enemy_military: float
     #: Regions we hold a resource point in, and regions the enemy does.
     held: int
     enemy_held: int
